@@ -2,3 +2,6 @@ out/
 node_modules/
 *.tmp
 .env
+# the live database is local; the JSON snapshot in data/ is imported into it on first start
+data/hivemind.db*
+data/*.tmp
