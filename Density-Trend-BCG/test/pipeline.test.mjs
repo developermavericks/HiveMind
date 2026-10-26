@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseGoogleNews, extractArticleText } from "../src/gnews.mjs";
+import { parseGoogleNews, extractArticleText, dayQuery } from "../src/gnews.mjs";
 import { clusterArticles } from "../src/cluster.mjs";
 import { BracketRegistry, norm } from "../src/brackets.mjs";
 import { normalizeReading, normalizeMatches, normalizeMerges, extractJson } from "../src/llm.mjs";
 import { parseSectors, CompanyStore, needsMatch } from "../src/companies.mjs";
+import { Store, titleKey, dayStart, DAY_MS } from "../src/db.mjs";
+import { DatabaseSync } from "node:sqlite";
 import { buildBracketDensity, companyView, gaussianSmooth } from "../src/density.mjs";
 
 const bcg = JSON.parse(readFileSync(new URL("../config/bcg.json", import.meta.url), "utf8"));
@@ -285,6 +287,109 @@ test("company store: replacing sectors resets matches, same sectors keeps them",
   assert.throws(() => store.put({ name: "Empty", sectors: [] }));
 });
 
+// ---------- database ----------
+const cl = (title, urls, t, outlets = ["The Hindu"]) => ({
+  title, url: urls[0], snippet: "", publishedAt: t,
+  articles: urls.map((u, i) => ({ title, outlet: outlets[i % outlets.length], publication: outlets[i % outlets.length], url: u, publishedAt: t })),
+});
+const reading = { analysis: { summary: "s", geography: [], impacts: [] }, basis: "full-text" };
+
+test("database: readings survive closing and reopening the file", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "db-")), "h.db");
+  const a = new Store(path);
+  a.putReading("k1", { ...reading, readAt: 5 });
+  assert.equal(a.hasReading("k1"), true);
+  a.close();
+  const b = new Store(path);
+  assert.equal(b.hasReading("k1"), true);
+  assert.equal(b.hasReading("nope"), false);
+  assert.equal(b.readingCount(), 1);
+  b.close();
+});
+
+test("database: stories keep their day, join readings, and a re-seen link keeps its story across runs", () => {
+  const s = new Store(":memory:");
+  const d1 = new Date(2026, 9, 25, 10).getTime(), d2 = new Date(2026, 9, 26, 9).getTime();
+  const [k1, k2] = s.upsertClusters([cl("Cyclone Arnab hits Odisha", ["u1", "u2"], d1, ["The Hindu", "NDTV"]), cl("RBI holds repo rate", ["u3"], d2)]);
+  s.putReading(k1, reading);
+  // next day's poll clusters the same event under a different headline but with an old link plus a new one
+  const [k1b, k3] = s.upsertClusters([cl("Odisha braces for cyclone landfall", ["u2", "u9"], d2, ["NDTV", "Mint"]), cl("Brand new story", ["u10"], d2)]);
+  assert.equal(k1b, k1);
+  assert.notEqual(k3, k1);
+  assert.deepEqual(s.days().map((d) => [d.day, d.stories, d.analysed]), [["2026-10-26", 2, 0], ["2026-10-25", 1, 1]]);
+  const day1 = s.loadStories({ from: dayStart("2026-10-25"), to: dayStart("2026-10-25") + DAY_MS });
+  assert.equal(day1.length, 1); // the story stays on the day it first appeared
+  assert.equal(day1[0].id, k1);
+  assert.equal(day1[0].articles.length, 3); // u1, u2 + the new link u9
+  assert.deepEqual(day1[0].outlets.sort(), ["Mint", "NDTV", "The Hindu"]);
+  assert.equal(day1[0].analysis.summary, "s");
+  const day2 = s.loadStories({ from: dayStart("2026-10-26"), to: dayStart("2026-10-26") + DAY_MS });
+  assert.deepEqual(day2.map((x) => x.title).sort(), ["Brand new story", "RBI holds repo rate"]);
+  assert.equal(day2.find((x) => x.title === "Brand new story").analysis, null); // not read yet
+  assert.equal(k2 !== undefined, true);
+  s.close();
+});
+
+test("database: a story merged into another is pruned, runs track progress, legacy files import once", () => {
+  const s = new Store(":memory:");
+  const t = new Date(2026, 9, 26, 8).getTime();
+  const [a, b] = s.upsertClusters([cl("First event", ["x1"], t), cl("Second event", ["y1"], t)]);
+  const [merged] = s.upsertClusters([cl("Both events", ["x1", "y1"], t)]);
+  assert.equal(merged, a); // earliest-seen story wins
+  s.pruneOrphans();
+  assert.equal(s.loadStories({ from: 0, to: Date.now() + DAY_MS }).length, 1);
+  assert.equal(s.loadStories({ from: 0, to: Date.now() + DAY_MS })[0].id, a);
+  assert.notEqual(a, b);
+
+  const id = s.startRun({ model: "m", headlines: 10, publications: 2, perPublication: [{ name: "P", available: 5, polled: 5 }], total: 4 });
+  s.progressRun(id, 2);
+  assert.deepEqual([s.latestRun().done, s.latestRun().total, s.latestRun().finishedAt], [2, 4, null]);
+  s.finishRun(id, 4);
+  assert.equal(s.latestRun().done, 4);
+  assert.ok(s.latestRun().finishedAt);
+  assert.deepEqual(s.latestRun().perPublication, [{ name: "P", available: 5, polled: 5 }]);
+
+  const dir = mkdtempSync(join(tmpdir(), "legacy-"));
+  writeFileSync(join(dir, "readings-v3.json"), JSON.stringify({ [titleKey("Old story")]: { ...reading, readAt: 1 } }));
+  writeFileSync(join(dir, "stories-v3.json"), JSON.stringify({ meta: { generatedAt: t, model: "m", articles: 1, publications: 1, perPublication: [{ name: "P", available: 1, polled: 1 }] },
+    stories: [{ title: "Old story", url: "o1", snippet: "", publishedAt: t, articles: [{ title: "Old story", outlet: "P", publication: "P", url: "o1" }] }] }));
+  const fresh = new Store(":memory:");
+  assert.deepEqual(fresh.importLegacy(dir), { readings: 1, stories: 1 });
+  assert.equal(fresh.importLegacy(dir), null); // only once
+  const [story] = fresh.loadStories({ from: 0, to: Date.now() + DAY_MS });
+  assert.equal(story.analysis.summary, "s"); // the legacy reading is attached to the legacy story
+  assert.equal(story.id, titleKey("Old story"));
+  s.close(); fresh.close();
+});
+
+test("past-day runs: Google's whole-day query, and backfills don't hijack the 'latest' run", () => {
+  assert.equal(dayQuery("2026-10-24"), "after:2026-10-24 before:2026-10-25");
+  assert.equal(dayQuery("2026-12-31"), "after:2026-12-31 before:2027-01-01");
+  assert.equal(dayQuery("2026-02-28"), "after:2026-02-28 before:2026-03-01");
+  const s = new Store(":memory:");
+  const base = { model: "m", headlines: 1, publications: 1, perPublication: [], total: 1 };
+  const latest = s.startRun({ ...base, startedAt: 1000 });
+  const backfill = s.startRun({ ...base, startedAt: 2000, targetDate: "2026-10-20" });
+  assert.equal(s.latestRun().id, backfill);
+  assert.equal(s.latestRun().targetDate, "2026-10-20");
+  assert.equal(s.latestRun("rolling").id, latest); // the rolling view still keys off the latest-window run
+  assert.equal(s.latestRun("rolling").targetDate, null);
+  s.close();
+});
+
+test("a database from before backfill support gains the target_date column", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "mig-")), "old.db");
+  const raw = new DatabaseSync(path);
+  raw.exec("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, model TEXT, headlines INTEGER, publications INTEGER, per_publication TEXT, total INTEGER, done INTEGER NOT NULL DEFAULT 0)");
+  raw.exec("INSERT INTO runs (started_at, updated_at, model, headlines, publications, per_publication, total) VALUES (1, 1, 'm', 1, 1, '[]', 1)");
+  raw.close();
+  const s = new Store(path);
+  assert.equal(s.latestRun().targetDate, null);
+  s.startRun({ model: "m", headlines: 1, publications: 1, perPublication: [], total: 1, targetDate: "2026-10-01" });
+  assert.equal(s.latestRun().targetDate, "2026-10-01");
+  s.close();
+});
+
 // ---------- server ----------
 test("server: upload a company, list it in state, reject bad uploads", async () => {
   process.env.HIVEMIND_LLM = "off"; // matching disabled; this test covers HTTP + storage only
@@ -311,4 +416,52 @@ test("server: upload a company, list it in state, reject bad uploads", async () 
     const del = await fetch(`${base}/api/company?id=bcg`, { method: "DELETE" });
     assert.equal(del.status, 400);
   } finally { server.close(); server.closeAllConnections?.(); }
+});
+
+test("server: the Run button validates the day, starts one run at a time, and reports the outcome", async () => {
+  const prev = { llm: process.env.HIVEMIND_LLM, key: process.env.ANTHROPIC_API_KEY };
+  process.env.HIVEMIND_LLM = "anthropic"; process.env.ANTHROPIC_API_KEY = "test-key-not-real"; // detect() only checks it is set
+  const root = mkdtempSync(join(tmpdir(), "run-"));
+  mkdirSync(join(root, "src"));
+  copyFileSync(new URL("../src/dashboard.html", import.meta.url), join(root, "src", "dashboard.html"));
+  const { serve } = await import("../src/server.mjs");
+  const { EventEmitter } = await import("node:events");
+  const calls = [];
+  let child;
+  const fakeSpawn = (cmd, args) => {
+    calls.push(args);
+    child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
+    return child;
+  };
+  const server = await serve({ root, bcg, port: 0, log: () => {}, spawn: fakeSpawn });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (body, type = "application/json") => fetch(`${base}/api/run`, { method: "POST", headers: { "content-type": type }, body: typeof body === "string" ? body : JSON.stringify(body) });
+  const state = async () => (await (await fetch(`${base}/api/state`)).json()).runner;
+  try {
+    assert.equal((await post("{}", "text/plain")).status, 415);
+    assert.equal((await post({ date: "not-a-date" })).status, 400);
+    assert.equal((await post({ date: "2999-01-01" })).status, 400); // future
+    assert.equal(calls.length, 0);
+
+    assert.equal((await post({ date: "2026-10-24" })).status, 200);
+    assert.deepEqual(calls[0].slice(-3), ["run", "--date", "2026-10-24"]);
+    assert.equal((await state()).running, true);
+    assert.equal((await state()).date, "2026-10-24");
+    assert.equal((await post({ date: "2026-10-23" })).status, 409); // one at a time
+    assert.equal(calls.length, 1);
+
+    child.stderr.emit("data", "(node:1) ExperimentalWarning: SQLite\nError: No articles retrieved from any publication.\n");
+    child.emit("close", 1);
+    const failed = await state();
+    assert.deepEqual([failed.running, failed.lastExit, failed.lastMessage], [false, 1, "Error: No articles retrieved from any publication."]);
+
+    assert.equal((await post({ date: null })).status, 200); // latest 24h: no --date
+    assert.ok(!calls[1].includes("--date"));
+    child.stdout.emit("data", "Read 12 new stories (0 failed, 3 already in the database) · 22 brackets\nDatabase: x — 2 day(s) of history\n");
+    child.emit("close", 0);
+    assert.match((await state()).lastMessage, /Read 12 new stories/);
+  } finally {
+    server.close(); server.closeAllConnections?.();
+    for (const [k, v] of [["HIVEMIND_LLM", prev.llm], ["ANTHROPIC_API_KEY", prev.key]]) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
 });

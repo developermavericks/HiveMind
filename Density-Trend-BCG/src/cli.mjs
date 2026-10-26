@@ -1,24 +1,32 @@
 #!/usr/bin/env node
-// node src/cli.mjs run   [--hours 24] [--per-pub N] [--limit N] [--no-fulltext] [--concurrency 6]
-//     poll Google News → cluster → read each story (company-agnostic, into keyword brackets) → data/*.json, live
+// node src/cli.mjs run   [--date YYYY-MM-DD] [--hours 24] [--per-pub N] [--limit N] [--no-fulltext] [--concurrency 6]
+//     poll Google News (the last 24h, or one whole past day with --date) → cluster → read each story (company-agnostic,
+//     into keyword brackets) → data/hivemind.db, live. The dashboard's Run button starts this for you.
 // node src/cli.mjs serve [--port 8788]
-//     dashboard + company-sector upload + bracket→sector matching, reads what `run` writes
-import { readFileSync, existsSync } from "node:fs";
-import { writeFileAtomic } from "./atomic.mjs";
-import { createHash } from "node:crypto";
+//     dashboard + date picker + company-sector upload + bracket→sector matching, reads the database
+// node src/cli.mjs consolidate
+//     merge duplicate brackets the model added
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchPublication, fetchArticleBody } from "./gnews.mjs";
 import { clusterArticles } from "./cluster.mjs";
 import { Reader } from "./llm.mjs";
 import { BracketRegistry } from "./brackets.mjs";
+import { Store, dayStart } from "./db.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readJson = (p) => JSON.parse(readFileSync(join(root, p), "utf8"));
-const CACHE = join(root, "data", "readings-v3.json");
-const STORIES = join(root, "data", "stories-v3.json");
-const BRACKETS = join(root, "data", "brackets-v3.json");
+const DATA = join(root, "data");
+const BRACKETS = join(DATA, "brackets-v3.json");
 const loadRegistry = () => new BracketRegistry(BRACKETS, readJson("config/brackets.seed.json"));
+
+function openStore() {
+  const store = new Store(join(DATA, "hivemind.db"));
+  const imported = store.importLegacy(DATA); // one time: pulls in the earlier readings-v3.json / stories-v3.json
+  if (imported) console.log(`Imported earlier data into the database: ${imported.readings} readings, ${imported.stories} stories`);
+  return store;
+}
 
 function parseArgs(argv) {
   const o = {};
@@ -51,20 +59,21 @@ async function consolidate(reader, registry) {
   } catch (e) { console.warn(`  consolidation skipped: ${e.message}`); }
 }
 
-const key = (title) => createHash("sha1").update(title.toLowerCase().replace(/\W+/g, " ").trim()).digest("hex").slice(0, 16);
-const writeAtomic = writeFileAtomic;
-
 async function run(opts) {
   const bcg = readJson("config/bcg.json");
   const pubs = readJson("config/publications.json");
   const hours = +opts.hours || 24, perPub = +opts["per-pub"] || Infinity;
+  const date = opts.date === undefined ? null : String(opts.date);
+  if (date !== null && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date)))) throw new Error(`--date must be YYYY-MM-DD, got "${opts.date}"`);
+  if (date !== null && dayStart(date) > Date.now()) throw new Error(`--date ${date} is in the future`);
   const registry = loadRegistry();
   const reader = new Reader(bcg, registry);
-  console.log(`LLM: ${await reader.detect()}   (${registry.size} brackets in the taxonomy)`);
+  const store = openStore();
+  console.log(`LLM: ${await reader.detect()}   (${registry.size} brackets in the taxonomy, ${store.readingCount()} readings already in the database)`);
 
-  console.log(`Polling Google News for ${pubs.length} publications (last ${hours}h)…`);
+  console.log(`Polling Google News for ${pubs.length} publications (${date ? `the day ${date}` : `last ${hours}h`})…`);
   const polled = await pool(pubs, 4, async (p) => {
-    try { const items = await fetchPublication(p, { hours, perPub }); console.log(`  ${p.name.padEnd(26)} ${items.length}`); return items; }
+    try { const items = await fetchPublication(p, { hours, perPub, date }); console.log(`  ${p.name.padEnd(26)} ${items.length}`); return items; }
     catch (e) { console.warn(`  ${p.name.padEnd(26)} FAILED: ${e.message}`); return Object.assign([], { available: 0 }); }
   });
   const articles = polled.flat();
@@ -73,33 +82,33 @@ async function run(opts) {
   console.log(`${articles.length} headlines → ${clusters.length} distinct stories`);
   if (opts.limit) clusters = clusters.slice(0, +opts.limit);
 
-  const cache = existsSync(CACHE) ? JSON.parse(readFileSync(CACHE, "utf8")) : {};
-  const meta = {
+  // Stories and headlines are stored before reading, so they are already filed under their day.
+  const keys = store.upsertClusters(clusters);
+  const runId = store.startRun({
+    model: reader.label, headlines: articles.length, publications: pubs.length, total: clusters.length, targetDate: date,
     perPublication: pubs.map((p, i) => ({ name: p.name, available: polled[i].available ?? 0, polled: polled[i].length })),
-    articles: articles.length, publications: pubs.length, model: reader.label, generatedAt: Date.now(),
-  };
-  const done = new Array(clusters.length).fill(null);
-  let fresh = 0, failed = 0, finished = 0, lastFlush = 0, consolidating = null;
+  });
 
-  // Everything the dashboard reads is rewritten as stories complete, so it fills in live.
+  let fresh = 0, failed = 0, finished = 0, lastFlush = 0, consolidating = null, knownBrackets = registry.size;
   const flush = (final = false) => {
     if (!final && Date.now() - lastFlush < 3000) return;
     lastFlush = Date.now();
-    writeAtomic(CACHE, JSON.stringify(cache));
     registry.save();
-    writeAtomic(STORIES, JSON.stringify({ meta: { ...meta, live: final ? null : { done: finished, total: clusters.length } }, stories: done.filter(Boolean) }));
+    store.progressRun(runId, finished);
   };
 
   await pool(clusters, +opts.concurrency || 6, async (c, i) => {
-    const k = key(c.title);
-    if (!cache[k]) {
+    if (!store.hasReading(keys[i])) {
       try {
         const body = opts["no-fulltext"] ? { text: "", basis: "headline" } : await fetchArticleBody(c);
         const analysis = await reader.read(c, body);
-        if (analysis) { cache[k] = { analysis, basis: body.basis, readAt: Date.now() }; fresh++; } else failed++;
+        if (analysis) {
+          if (registry.size !== knownBrackets) { registry.save(); knownBrackets = registry.size; } // a reading never outlives its bracket
+          store.putReading(keys[i], { analysis, basis: body.basis });
+          fresh++;
+        } else failed++;
       } catch (e) { failed++; console.warn(`  read failed: ${c.title.slice(0, 60)} (${e.message})`); }
     }
-    done[i] = { ...c, analysis: cache[k]?.analysis ?? null, basis: cache[k]?.basis ?? "headline" };
     finished++;
     if (finished % 25 === 0) console.log(`  ${finished}/${clusters.length} stories read · ${registry.size} brackets`);
     if (finished % 300 === 0 && !consolidating) { consolidating = consolidate(reader, registry).finally(() => { consolidating = null; }); }
@@ -107,8 +116,12 @@ async function run(opts) {
   });
   await consolidating;
   await consolidate(reader, registry);
-  flush(true);
-  console.log(`Read ${fresh} new stories (${failed} failed, ${clusters.length - fresh - failed} from cache) · ${registry.size} brackets`);
+  registry.save();
+  store.pruneOrphans();
+  store.finishRun(runId, finished);
+  console.log(`Read ${fresh} new stories (${failed} failed, ${clusters.length - fresh - failed} already in the database) · ${registry.size} brackets`);
+  console.log(`Database: ${store.path} — ${store.days().length} day(s) of history`);
+  store.close();
 }
 
 const [cmd = "run", ...rest] = process.argv.slice(2);
