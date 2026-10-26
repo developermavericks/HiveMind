@@ -1,0 +1,17 @@
+[
+  { "name": "The Hindu", "domain": "thehindu.com" },
+  { "name": "Times of India", "domain": "timesofindia.indiatimes.com" },
+  { "name": "Hindustan Times", "domain": "hindustantimes.com" },
+  { "name": "The Indian Express", "domain": "indianexpress.com" },
+  { "name": "Business Standard", "domain": "business-standard.com" },
+  { "name": "The Economic Times", "domain": "economictimes.indiatimes.com" },
+  { "name": "Mint", "domain": "livemint.com" },
+  { "name": "Financial Express", "domain": "financialexpress.com" },
+  { "name": "The Hindu BusinessLine", "domain": "thehindubusinessline.com" },
+  { "name": "NDTV", "domain": "ndtv.com" },
+  { "name": "India Today", "domain": "indiatoday.in" },
+  { "name": "The Telegraph India", "domain": "telegraphindia.com" },
+  { "name": "Deccan Herald", "domain": "deccanherald.com" },
+  { "name": "ThePrint", "domain": "theprint.in" },
+  { "name": "Moneycontrol", "domain": "moneycontrol.com" }
+]
