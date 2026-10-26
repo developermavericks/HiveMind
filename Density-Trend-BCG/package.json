@@ -4,7 +4,7 @@
   "description": "Google News per-publication headline poll -> LLM impact reading -> density fields -> exposure map for BCG practice areas.",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node src/cli.mjs run",
     "report": "node src/cli.mjs report",

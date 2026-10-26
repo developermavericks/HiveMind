@@ -37,7 +37,7 @@ export function clusterArticles(articles, threshold = 0.5) {
       snippet: rep.snippet,
       publishedAt: Math.min(...arts.map((a) => a.publishedAt)),
       outlets,
-      articles: arts.map((a) => ({ title: a.title, outlet: a.outlet, publication: a.publication, url: a.url })),
+      articles: arts.map((a) => ({ title: a.title, outlet: a.outlet, publication: a.publication, url: a.url, publishedAt: a.publishedAt })),
     };
   });
 }

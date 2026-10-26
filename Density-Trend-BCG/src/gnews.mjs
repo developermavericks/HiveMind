@@ -35,10 +35,14 @@ export function parseGoogleNews(xml, publication) {
   return items;
 }
 
-async function getText(url, { timeout = 15000, ...init } = {}) {
-  const res = await fetch(url, { ...init, headers: { "user-agent": UA, "accept-language": "en-IN,en;q=0.9", ...init.headers }, signal: AbortSignal.timeout(timeout), redirect: "follow" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.text();
+// Google throttles with 429/503 when polled heavily; back off and retry a few times rather than failing the whole run.
+async function getText(url, { timeout = 15000, retries = 3, ...init } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { ...init, headers: { "user-agent": UA, "accept-language": "en-IN,en;q=0.9", ...init.headers }, signal: AbortSignal.timeout(timeout), redirect: "follow" });
+    if (res.ok) return res.text();
+    if ((res.status === 429 || res.status === 503) && attempt < retries) { await new Promise((r) => setTimeout(r, 3000 * 3 ** attempt)); continue; }
+    throw new Error(`HTTP ${res.status}`);
+  }
 }
 
 const RSS_CAP = 90; // Google returns ~100 items per query; at or above this we assume the result was truncated
@@ -49,9 +53,26 @@ async function queryRss(pub, extra) {
   return parseGoogleNews(await getText(url), pub.name);
 }
 
+// Google's whole-day filter: after:D before:D+1 (dates are calendar days, YYYY-MM-DD).
+export function dayQuery(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  return `after:${date} before:${next}`;
+}
+
+// A past day can only be fetched as one query, so it is capped at Google's ~100 items per publication.
+async function fetchDay(pub, date) {
+  const [y, m, d] = date.split("-").map(Number);
+  const from = new Date(y, m - 1, d).getTime(), to = new Date(y, m - 1, d + 1).getTime(); // the server's local day, like the stored days
+  const all = (await queryRss(pub, dayQuery(date))).filter((i) => i.publishedAt >= from && i.publishedAt < to).sort((a, b) => b.publishedAt - a.publishedAt);
+  return Object.assign([...all], { available: all.length });
+}
+
 // perPub defaults to unlimited. One query is capped by Google at ~100 items, so when a publication saturates
 // it we add narrower recent windows (and "today") and merge by URL to get past that ceiling.
-export async function fetchPublication(pub, { hours = 24, perPub = Infinity } = {}) {
+// With `date` it fetches that whole calendar day instead of the trailing window.
+export async function fetchPublication(pub, { hours = 24, perPub = Infinity, date = null } = {}) {
+  if (date) return fetchDay(pub, date);
   const byUrl = new Map();
   const add = (items) => items.forEach((i) => byUrl.set(i.url, i));
   const first = await queryRss(pub, `when:${hours}h`);

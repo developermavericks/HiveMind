@@ -40,6 +40,12 @@ button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}bu
 <main>
 <h1>What's happening, and what should we write about?</h1>
 <p class="sub" id="sub">Loading…</p>
+<div class="flex" style="margin-bottom:12px"><label>View <select id="dsel"></select></label><span class="note" id="dnote"></span></div>
+<div class="flex" style="margin-bottom:12px">
+  <label>Run <select id="rmode"><option value="latest">latest 24 hours</option><option value="day">a specific day</option></select></label>
+  <input type="date" id="rday" style="display:none">
+  <button id="rbtn">Run</button><span class="note" id="rstat"></span>
+</div>
 <div id="live"></div>
 <div class="kpis" id="kpis"></div>
 
@@ -108,7 +114,14 @@ const ramp=t=>{const a=hex(css('--r0')),b=hex(css('--r1'));return `rgb(${a.map((
 const fmt=n=>n>=10?n.toFixed(0):n.toFixed(1);
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+'…':s;
 const store={get:k=>{try{return localStorage.getItem(k)}catch{return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch{}}};
-let S=null,company=store.get('company')||'bcg',selB=null,selS=null,timer=null;
+let S=null,company=store.get('company')||'bcg',selB=null,selS=null,timer=null,date=null; // date: null = latest rolling window, else 'YYYY-MM-DD'
+const fmtDay=d=>new Date(d+'T00:00:00').toLocaleDateString([],{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+function renderDates(){
+  const opts=`<option value="">Latest — rolling ${S.hours||48}h</option>`+(S.dates||[]).map(d=>`<option value="${d.day}">${fmtDay(d.day)} — ${d.stories} stories</option>`).join('');
+  if($('dsel').dataset.sig!==opts){$('dsel').innerHTML=opts;$('dsel').dataset.sig=opts}
+  $('dsel').value=date||'';
+  $('dnote').textContent=date?"Every story first published on this day. The company lens uses the latest matches, so its angles were written from the most recent news, not this day's.":'';
+}
 
 const momentum=m=>m>1.3?'<span class="up" title="more than an even share landed recently">▲ rising</span>':m<0.7?'<span class="dn">▼ fading</span>':'<span class="dn">steady</span>';
 
@@ -139,8 +152,7 @@ const storyList=ds=>ds.map(d=>`<div class="drv"><a href="${esc(d.url)}" target="
 
 function renderTop(){
   const m=S.meta;
-  $('sub').textContent=`${m.stories} stories from ${m.articles} headlines across ${m.publications} publications · last ${S.hours}h · ${m.brackets} impact brackets · read by ${m.model} · data as of ${new Date(m.generatedAt).toLocaleString()}`;
-  $('live').innerHTML=m.live?`<div class="kpi" style="margin-bottom:16px;border-color:var(--indirect)"><b>● Live — ${m.live.done}/${m.live.total} stories read</b><span>Updating as stories are processed.</span><div class="bar"><div style="width:${100*m.live.done/m.live.total}%"></div></div></div>`:'';
+  $('sub').textContent=`${m.stories} stories from ${m.articles} headlines across ${m.publications} publications · ${date?`published ${fmtDay(date)}`:`last ${S.hours}h`} · ${m.brackets} impact brackets · read by ${m.model}${date?'':` · data as of ${new Date(m.generatedAt).toLocaleString()}`}`;
   const cmp=S.company;
   $('kpis').innerHTML=[[m.stories,'stories analysed'],[m.brackets,'impact brackets'],[Math.round(100*m.fullText/Math.max(1,m.stories))+'%','read from full article text'],...(cmp?[[cmp.topicCount,`topics relevant to ${cmp.name}`]]:[])].map(([v,l])=>`<div class="kpi"><b>${v}</b><span>${esc(l)}</span></div>`).join('');
 }
@@ -160,9 +172,9 @@ function renderBrackets(){
   const gm=Math.max(...S.geography.map(a=>a[1]),1e-9);
   $('geo').innerHTML=`<svg viewBox="0 0 560 ${S.geography.length*20+4}">`+S.geography.map(([a,v],i)=>`<text x="4" y="${i*20+14}">${esc(clip(a,28))}</text><rect x="180" y="${i*20+3}" width="${330*v/gm}" height="13" rx="2" fill="var(--indirect)"/><text class="m" x="${186+330*v/gm}" y="${i*20+14}">${fmt(v)}</text>`).join('')+'</svg>';
   const P=S.meta.perPublication||[];
-  if(P.length){const tp=P.reduce((a,p)=>a+p.polled,0),ta=P.reduce((a,p)=>a+p.available,0),mx=Math.max(...P.map(p=>p.polled),1);
-    $('pubnote').textContent=`${tp} headlines polled (Google returned ${ta} in the window). "Read" = headlines whose story the LLM has analysed so far.`;
-    $('pubs').innerHTML='<table><tr><th>Publication</th><th>Available</th><th>Polled</th><th>Read</th><th style="width:40%"></th></tr>'+P.map(p=>`<tr><td>${esc(p.name)}</td><td>${p.available}</td><td>${p.polled}</td><td>${p.read}</td><td><div style="height:10px;background:var(--r0);border-radius:2px;width:${100*p.polled/mx}%"><div style="height:10px;width:${p.polled?100*p.read/p.polled:0}%;background:var(--direct);border-radius:2px"></div></div></td></tr>`).join('')+`<tr><th>Total</th><th>${ta}</th><th>${tp}</th><th>${P.reduce((a,p)=>a+p.read,0)}</th><th></th></tr></table>`}
+  if(P.length){const tp=P.reduce((a,p)=>a+p.polled,0),ta=P.reduce((a,p)=>a+(p.available||0),0),mx=Math.max(...P.map(p=>p.polled),1);
+    $('pubnote').textContent=`${tp} headlines ${date?'stored for this day':'polled'}${ta?` (Google returned ${ta} in the window)`:''}. "Read" = headlines whose story the LLM has analysed.`;
+    $('pubs').innerHTML='<table><tr><th>Publication</th><th>Available</th><th>Polled</th><th>Read</th><th style="width:40%"></th></tr>'+P.map(p=>`<tr><td>${esc(p.name)}</td><td>${p.available??'–'}</td><td>${p.polled}</td><td>${p.read}</td><td><div style="height:10px;background:var(--r0);border-radius:2px;width:${100*p.polled/mx}%"><div style="height:10px;width:${p.polled?100*p.read/p.polled:0}%;background:var(--direct);border-radius:2px"></div></div></td></tr>`).join('')+`<tr><th>Total</th><th>${ta||'–'}</th><th>${tp}</th><th>${P.reduce((a,p)=>a+p.read,0)}</th><th></th></tr></table>`}
 }
 function renderCompany(){
   const sel=$('csel');
@@ -190,16 +202,55 @@ function renderCompany(){
   heat($('stime'),ss.map(s=>({label:s.name,values:s.series})),S.bins.map((t,i)=>i%every?'':new Date(t).toLocaleString([],{day:'numeric',month:'short',hour:'numeric'})),k=>new Date(S.bins[k]).toLocaleString());
   heat($('sfronts'),ss.map(s=>({label:s.name,values:c.fronts.map(f=>s.fronts[f]||0)})),c.fronts.map(f=>f.replace('_',' ').slice(0,9)),k=>c.fronts[k],1180);
 }
-function render(){if(!S||S.empty){$('sub').textContent='No data yet — run: node src/cli.mjs run';return}renderTop();renderBrackets();renderCompany()}
+// Run button state + the live banner. A run started from a terminal also shows (S.live), but only the dashboard's own runs report a failure message.
+function renderRunner(){
+  const r=S.runner||{},live=S.live,running=!!(r.running||live);
+  $('rbtn').disabled=running;$('rbtn').textContent=running?'Running…':'Run';
+  const prog=r.running&&r.total?{done:r.done,total:r.total}:live;
+  const what=r.running?(r.date?fmtDay(r.date):'the latest 24 hours'):live?(live.date?fmtDay(live.date):'the latest 24 hours'):'';
+  $('live').innerHTML=running?`<div class="kpi" style="margin-bottom:16px;border-color:var(--indirect)"><b>● ${prog&&prog.total?`Running — ${prog.done}/${prog.total} stories read`:'Running — polling Google News…'}</b><span>${esc(what)}. The page updates as stories are processed.</span>${prog&&prog.total?`<div class="bar"><div style="width:${100*prog.done/prog.total}%"></div></div>`:''}</div>`:'';
+  const st=$('rstat');
+  if(!running&&r.lastExit!=null&&r.lastMessage){st.className='note'+(r.lastExit===0?'':' warn');st.textContent=(r.lastExit===0?'Last run: ':'Last run failed: ')+r.lastMessage}
+  else if(running)st.textContent='';
+}
+function render(){
+  if(!S)return;
+  renderDates();renderRunner();
+  if(S.empty){
+    for(const id of ['bbars','bdet','btime','areas','groups','geo','pubs','topics','sbars','sdet','stime','sfronts','kpis'])$(id).innerHTML='';
+    $('sub').textContent=date?`No analysed stories for ${fmtDay(date)} yet.`:'No data yet — run: node src/cli.mjs run';
+    return;
+  }
+  renderTop();renderBrackets();renderCompany();
+}
 
 async function load(){
   clearTimeout(timer);
-  try{const r=await fetch('/api/state?company='+encodeURIComponent(company));S=await r.json();
+  try{const r=await fetch('/api/state?company='+encodeURIComponent(company)+(date?'&date='+date:''));S=await r.json();
     if(S.companies?.length&&!S.companies.some(c=>c.id===company)){company='bcg';return load()}
     render()}catch(e){$('sub').textContent='Cannot reach the server: '+e.message}
-  const busy=S?.meta?.live||(S?.company&&S.company.matching.done<S.company.matching.total&&S.llm.ok);
+  const busy=S?.runner?.running||S?.live||(S?.company&&S.company.matching.done<S.company.matching.total&&S.llm.ok);
   timer=setTimeout(load,busy?4000:20000);
 }
+$('dsel').onchange=e=>{date=e.target.value||null;selB=null;selS=null;load()};
+const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
+$('rday').max=today();
+$('rmode').onchange=e=>{const day=e.target.value==='day';$('rday').style.display=day?'':'none';if(day&&!$('rday').value)$('rday').value=date||today()};
+$('rbtn').onclick=async()=>{
+  const day=$('rmode').value==='day'?$('rday').value:null,st=$('rstat');
+  if($('rmode').value==='day'&&!day){st.className='note warn';st.textContent='Pick a day first.';return}
+  const have=day&&(S.dates||[]).find(d=>d.day===day);
+  const msg=`${day?`Fetch and read ${fmtDay(day)}`:'Fetch and read the last 24 hours'}?\n\nEvery story not already in the database is read by the LLM — a full day is roughly 2,000 calls and takes a while. Stories already stored are skipped.`
+    +(day?'\n\nA past day is limited to about 100 headlines per publication (Google News returns no more).':'')
+    +(have?`\n\n${fmtDay(day)} already has ${have.stories} stories stored.`:'');
+  if(!confirm(msg))return;
+  st.className='note';st.textContent='Starting…';$('rbtn').disabled=true;
+  try{const r=await fetch('/api/run',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({date:day})});
+    const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);
+    if(day){date=day;selB=null;selS=null}
+    await load()}
+  catch(e){st.className='note warn';st.textContent=e.message;$('rbtn').disabled=false}
+};
 $('csel').onchange=e=>{company=e.target.value;store.set('company',company);selS=null;load()};
 $('cdel').onclick=async()=>{if(!confirm('Remove this company and its matches?'))return;await fetch('/api/company?id='+encodeURIComponent(company),{method:'DELETE'});company='bcg';store.set('company',company);load()};
 $('ufile').onchange=async e=>{const f=e.target.files[0];if(!f)return;$('utext').value=await f.text();if(!$('uname').value)$('uname').value=f.name.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ')};

@@ -5,12 +5,29 @@ Polls Google News for 15 Indian publications, reads every story **with no compan
 ```
 $env:ANTHROPIC_API_KEY="sk-ant-..."     # or run Ollama locally with a model pulled
 node src/cli.mjs run                    # poll → cluster → read → brackets   (writes data/*.json live; resumable)
-node src/cli.mjs serve                  # dashboard + upload + matching at http://127.0.0.1:8788
+node src/cli.mjs run --date 2026-10-24  # fetch and read one whole past day instead of the last 24h
+node src/cli.mjs serve                  # dashboard + upload + matching at http://127.0.0.1:8788 (has a Run button)
 node src/cli.mjs consolidate            # merge duplicate brackets now (also runs during/after `run`)
 npm test
 ```
 
-`run` and `serve` are separate processes; start both. `serve` reads what `run` writes and keeps matching new brackets to every company while the run is going. Zero npm dependencies, Node ≥ 22. Model defaults to `claude-haiku-5-5` (`HIVEMIND_MODEL`). Never put the API key in a file — pass it in the environment.
+`run` and `serve` are separate processes; start both. `serve` reads what `run` writes and keeps matching new brackets to every company while the run is going. Zero npm dependencies, Node ≥ 22.13 (uses the built-in `node:sqlite`). Model defaults to `claude-haiku-5-5` (`HIVEMIND_MODEL`). Never put the API key in a file — pass it in the environment.
+
+## Run button
+At the top of the dashboard: choose **latest 24 hours** or **a specific day**, press **Run**, confirm. The server starts `cli.mjs run` (one at a time), the page shows progress, and a failure message (e.g. Google throttling) appears next to the button. It needs the server to have been started with the API key, and it reads every story not already in the database, so a full day is thousands of LLM calls. A past day uses Google's whole-day filter (`after:`/`before:`), which returns at most ~100 headlines per publication for that day, so a past day is less complete than a day captured live. **This past-day query has not been confirmed against Google yet** (Google was returning 503 when it was built); try one day and check its headline counts in the publication table.
+
+## Database and date-wise history
+Everything the pipeline reads and learns is kept in a local SQLite file, `data/hivemind.db` (WAL mode, so `run` can write while `serve` reads):
+
+| Table | Holds |
+|---|---|
+| `readings` | the LLM's reading of each story — the cache; a story is never read (or paid for) twice, and each reading is saved the moment it is made |
+| `stories` / `articles` | every story and headline ever seen, tagged with the local calendar day it was first published. A re-seen link keeps its story, so overlapping daily runs don't double count |
+| `runs` | each run's start/finish, headline count, per-publication counts and live progress |
+
+Run it daily and history accumulates. The dashboard's **View** picker switches between the latest rolling 48h and any stored day (that day's brackets, impacts, geography, publications, and company lens). The first start imports any earlier `readings-v3.json` / `stories-v3.json`. Bracket registry (`brackets-v3.json`) and company profiles (`data/companies/`) are still JSON files. To inspect the database: `sqlite3 data/hivemind.db "select day, count(*) from stories group by day"`.
+
+For a past day the company lens uses the *latest* sector matches, so its article angles were written from the most recent news, not that day's. Back up `data/hivemind.db` (copy it with the server stopped) — it is the only copy of your history.
 
 ## Pipeline
 1. **Poll** — `site:<domain> when:24h` per publication; where Google's ~100-item ceiling is hit, narrower recent windows are merged by URL. No cap.
@@ -37,6 +54,7 @@ npm test
 - **Broad brackets are blunt.** With ~22 areas, "Politics" or "Economy" collect a large share of stories and touch almost every sector weakly. Ranking by bracket weight × relevance therefore lets a big bracket with a weak link (relevance 0.3) outrank a small bracket with a strong one; treat the relevance tag as seriously as the rank. The taxonomy is my starter list, not BCG's — edit it.
 - **Weights are heuristics.** The log₂ outlet bonus, 0.7 headline discount, 3-hour bins, 0.3 relevance threshold are reasoned defaults. Coverage ≠ importance: press attention skews to politics/crime and metros.
 - **Matching lags reading.** Each company needs one LLM judgement per bracket, so topics fill in behind the reading and can reorder as more brackets are judged.
-- **Short window.** 24–48h shows momentum, not trend; no baseline yet for "unusual versus a normal day".
+- **Short window.** Each run sees only the last 24h, so history exists only for days you actually run it; there is no backfill. With history you can now build a baseline for "unusual versus a normal day", but nothing computes one yet.
+- **Google throttles.** Heavy polling returns HTTP 503/429 (it happened during development); the poller backs off and retries, but a run can still fail with "No articles retrieved". Wait and retry rather than hammering.
 - **Cost and privacy.** Thousands of LLM calls per full run; article text goes to the API provider (use Ollama to keep it local, with weaker results).
 - **Local server has no auth.** Bound to 127.0.0.1, JSON-only POSTs; don't expose it on a network.
