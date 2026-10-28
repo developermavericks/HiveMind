@@ -1,0 +1,299 @@
+{
+  "_note": "Pilot assumptions from HiveMind.docx. Every number here is a starting point to tune, not a validated finding.",
+  "weights": {
+    "momentum": 25,
+    "acceleration": 15,
+    "sourceBreadth": 15,
+    "sectorEvidence": 20,
+    "triggerTiming": 15,
+    "headroom": 10
+  },
+  "intervals": {
+    "recentHours": 24,
+    "recentHoursShort": 12,
+    "shortBelowHistoryHours": 72,
+    "stepHours": 12,
+    "baselineHours": 168,
+    "minBaselineHours": 24,
+    "minBaselineClusters": 100,
+    "rollingHours": 6,
+    "rollingDays": 3,
+    "dayView": 14,
+    "hourView": 72,
+    "minTotalPerHour": 5,
+    "outageFractionHour": 0.05,
+    "outageFractionDay": 0.25,
+    "observedLagHours": 6
+  },
+  "evidence": {
+    "minClusters": 3,
+    "minOrigins": 2,
+    "highOrigins": 5,
+    "mediumOrigins": 3,
+    "originsForFullScore": 8,
+    "verifiedTriggerOrigins": 3,
+    "requireFullText": false
+  },
+  "stage": {
+    "risingRatio": 1.3,
+    "sustainedRatio": 1.1,
+    "decliningRatio": 0.8,
+    "decliningStrongRatio": 0.6,
+    "crowdedPercentile": 0.75,
+    "emergingPercentile": 0.5
+  },
+  "action": {
+    "writeNowScore": 65,
+    "investigateScore": 50,
+    "monitorScore": 35,
+    "writeNowMinHeadroom": 40,
+    "skipHeadroom": 25,
+    "writeNowMinBaselineHours": 72,
+    "writeNowMinOrigins": 4
+  },
+  "windows": {
+    "immediateHours": 72,
+    "analysisDays": 7
+  },
+  "forecast": {
+    "hourAhead": 24,
+    "dayAhead": 5,
+    "minHourPoints": 24,
+    "minDayPoints": 5,
+    "alpha": 0.5,
+    "beta": 0.3,
+    "phi": 0.9,
+    "z": 1.28
+  },
+  "success": {
+    "shareMultiple": 2,
+    "minOrigins": 5,
+    "baselineDays": 7,
+    "windowHours": 72,
+    "minHistoryDays": 10,
+    "topK": 5,
+    "minPeakStories": 6,
+    "bands": [
+      {
+        "maxBaseShare": 0.002,
+        "multiple": 3
+      },
+      {
+        "maxBaseShare": 0.01,
+        "multiple": 2
+      },
+      {
+        "maxBaseShare": 1,
+        "multiple": 1.5
+      }
+    ],
+    "_bandNote": "A topic that is tiny at baseline must grow more (3x) to count as a hit than a large one (1.5x); at least minPeakStories stories at the peak."
+  },
+  "briefs": {
+    "maxStories": 6
+  },
+  "topics": {
+    "minOrigins": 3,
+    "_note": "A topic must be covered by at least this many independent origins to rank. Vague filler labels are hidden from rankings (not deleted).",
+    "weakLabels": [
+      "personal stories",
+      "human interest",
+      "general news",
+      "miscellaneous",
+      "welfare payouts",
+      "other",
+      "news",
+      "latest news",
+      "current affairs",
+      "breaking news",
+      "top stories",
+      "opinion",
+      "analysis",
+      "feature",
+      "trending",
+      "viral",
+      "india news",
+      "local news"
+    ],
+    "minParentShare": 0.5,
+    "weakSuffixes": [
+      "news",
+      "updates",
+      "roundup",
+      "highlights",
+      "features",
+      "stories",
+      "commentary"
+    ],
+    "weakMaxWords": 2
+  },
+  "hot": {
+    "_note": "Hot topics get a wider web check (Serper news search) and, within budget, a search-interest fetch. Budgets are per calendar day.",
+    "maxTopicsPerPass": 5,
+    "recheckHours": 12,
+    "minScore": 60,
+    "stages": [
+      "emerging",
+      "rising"
+    ],
+    "serperDailyBudget": 20,
+    "serpapiDailyBudget": 3
+  },
+  "fulltext": {
+    "dailyRetries": 2500,
+    "perPass": 500,
+    "retryAfterHours": 12,
+    "maxTries": 2,
+    "_note": "Second attempts at articles that were only read from the headline. Fetched directly (the proxy adds nothing for article pages) and re-read once; the earlier reading is kept.",
+    "enabled": true
+  },
+  "sentiment": {
+    "batchSize": 12
+  },
+  "seasonality": {
+    "minDays": 28,
+    "_note": "Weekday adjustment switches on once there are this many days of history."
+  },
+  "tuning": {
+    "minOutcomes": 30,
+    "minHits": 5,
+    "step": 5,
+    "_note": "Weights are only re-tuned from measured outcomes once there are enough of them."
+  },
+  "pricing": {
+    "_note": "Optional: price per million tokens, to show an estimated spend. Leave empty to show tokens only.",
+    "anthropic": {
+      "inPerMTok": null,
+      "outPerMTok": null
+    }
+  },
+  "reading": {
+    "mode": "headline",
+    "_note": "Stories are read from the headline and snippet only (set HIVEMIND_FULLTEXT=1 to fetch article text again). This cuts model cost; the evidence rules therefore lean on independent origins, not on full-text share.",
+    "batchSize": 4,
+    "fullText": "after",
+    "_fullTextNote": "\"after\": stories are first read from headlines (Claude), then the full-text job re-reads their articles with the low-cost model, keeping topic labels, to add detail. Measured: the low-cost model's own topic labels agreed only ~27-37% with Claude's, so it never assigns topics."
+  },
+  "topicMatch": {
+    "maxTopics": 60,
+    "refreshHours": 168,
+    "batch": 6,
+    "minRelevance": 0.3,
+    "supportedRelevance": 0.5,
+    "minStories": 3
+  },
+  "audit": {
+    "sampleSize": 25,
+    "targetAccuracy": 0.9,
+    "secondOpinionTop": 15,
+    "reviewModel": "claude-sonnet-5-5"
+  },
+  "forecastLog": {
+    "topN": 15,
+    "horizons": [
+      6,
+      12,
+      24
+    ],
+    "everyHours": 6
+  },
+  "junk": {
+    "titlePatterns": [
+      "Latest News, Photos, Videos",
+      "Ball by Ball Commentary",
+      "Live Score",
+      "Match \\d+ Commentary",
+      "highlights \\(\\d+/\\d+/\\d{4}\\)",
+      "horoscope today",
+      "Panchang",
+      "Bigg Boss",
+      "Box Office Collection Day",
+      "Wordle",
+      "Quordle",
+      "NYT Connections",
+      "Dream11",
+      "fantasy (cricket|football) (team|prediction)",
+      "Today.s (Sudoku|Crossword)",
+      "(IPL|ISL|WPL|PKL) \\d{4}.*(points table|schedule|squad|playing XI)",
+      "(Lottery|Sambad|Kerala Lottery).*Result",
+      "Rashifal|Daily Horoscope|Weekly Horoscope|Tarot",
+      "Today.s (Wordle|Connections|Strands) (hints?|answers?)",
+      "Live Updates?: .*(Score|Match)",
+      "Playing XI|Dream 11|My11Circle",
+      "OTT releases? this week|Web series to watch"
+    ],
+    "_note": "Template pages (topic landing pages, scoreboards) that are not news: skipped at collection and excluded from analysis."
+  },
+  "dedupe": {
+    "minJaccard": 0.7,
+    "withinHours": 36,
+    "minTokenLength": 3
+  },
+  "quality": {
+    "duplicateRate": {
+      "amber": 0.03,
+      "red": 0.08
+    },
+    "junkRate": {
+      "amber": 0.02,
+      "red": 0.06
+    },
+    "noImpactStories": {
+      "amber": 0.35,
+      "red": 0.6
+    },
+    "lowConcentrationTopics": {
+      "amber": 0.35,
+      "red": 0.6
+    },
+    "silentSourceHours": {
+      "amber": 6,
+      "red": 18,
+      "multiple": 3
+    },
+    "silentSources": {
+      "amber": 1,
+      "red": 4
+    },
+    "baselineHours": {
+      "amber": 72,
+      "red": 24
+    },
+    "auditAccuracy": {
+      "amber": 0.9,
+      "red": 0.75,
+      "minReviewed": 20
+    },
+    "forecastCoverage": {
+      "amber": 0.65,
+      "red": 0.5,
+      "minEvaluated": 30
+    },
+    "holdWriteNowWhenRed": true,
+    "topicFit": {
+      "amber": 0.85,
+      "red": 0.65,
+      "minChecked": 50
+    }
+  },
+  "batchApi": {
+    "minItems": 40,
+    "pollSeconds": 20,
+    "maxWaitMinutes": 180,
+    "_note": "Backlogs of at least this many items use the discounted batch service (results within hours) instead of live calls."
+  },
+  "topicVerify": {
+    "maxTopics": 60,
+    "batch": 25,
+    "windowHours": 72,
+    "maxPerTopic": 150,
+    "_note": "Headlines filed under the topics behind today's opportunities are checked against the topic; those that do not fit are left out (reversibly)."
+  },
+  "routing": {
+    "readFullText": "groq",
+    "sentiment": "groq",
+    "readHeadlines": "groq",
+    "topicFit": "claude",
+    "_note": "Which provider does each job first: groq (low cost) or claude. Claude stays the fallback. Measured on real stories: full-article reading and sentiment matched Claude's agreement with earlier readings; topic-fit verdicts agreed only 79%, so they stay on Claude."
+  }
+}

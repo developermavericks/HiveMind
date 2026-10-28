@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Sign in · HiveMind</title>
+<link rel="icon" type="image/png" href="/ui/logo.png">
+<link rel="stylesheet" href="/ui/login.css">
+</head>
+<body>
+<main class="stage">
+  <section class="card" aria-labelledby="title">
+    <div class="logo-tile"><img src="/ui/logo.png" alt="HiveMind" width="222" height="157"></div>
+    <h1 id="title">Welcome back</h1>
+    <p class="sub" id="sub">Sign in to see what the market is about to talk about.</p>
+
+    <div class="tabs" role="tablist" id="tabs" aria-label="Account">
+      <button type="button" role="tab" id="tab-in" aria-selected="true" data-mode="signin">Sign in</button>
+      <button type="button" role="tab" id="tab-up" aria-selected="false" data-mode="signup">Create account</button>
+    </div>
+
+    <form id="form" novalidate autocomplete="on">
+      <label class="field" id="f-name" hidden>
+        <span>Full name</span>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="80" placeholder="Your name">
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input id="email" name="email" type="email" autocomplete="username" inputmode="email" maxlength="254" placeholder="you@company.com" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <div class="pw">
+          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" placeholder="Your password" required>
+          <button type="button" class="eye" id="eye" aria-label="Show password" aria-pressed="false">Show</button>
+        </div>
+      </label>
+      <div class="meter" id="meter" hidden aria-live="polite">
+        <div class="bar"><i id="bar"></i></div>
+        <p id="hint">Use at least 10 characters. A short phrase works well.</p>
+      </div>
+      <p class="msg" id="msg" role="alert" aria-live="assertive" hidden></p>
+      <button type="submit" class="primary" id="submit">Sign in</button>
+    </form>
+    <p class="foot" id="foot">Access is by invitation. New accounts are approved by an administrator.</p>
+  </section>
+  <p class="legal">HiveMind · Editorial intelligence</p>
+</main>
+<script src="/ui/login.js"></script>
+</body>
+</html>

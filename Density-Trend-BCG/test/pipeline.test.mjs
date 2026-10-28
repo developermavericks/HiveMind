@@ -397,7 +397,7 @@ test("server: upload a company, list it in state, reject bad uploads", async () 
   mkdirSync(join(root, "src"));
   copyFileSync(new URL("../src/dashboard.html", import.meta.url), join(root, "src", "dashboard.html"));
   const { serve } = await import("../src/server.mjs");
-  const server = await serve({ root, bcg, port: 0, log: () => {} });
+  const server = await serve({ root, bcg, port: 0, autoSync: false, auth: false, log: () => {} });
   const base = `http://127.0.0.1:${server.address().port}`;
   const post = (body, type = "application/json") => fetch(`${base}/api/company`, { method: "POST", headers: { "content-type": type }, body: typeof body === "string" ? body : JSON.stringify(body) });
   try {
@@ -433,7 +433,7 @@ test("server: the Run button validates the day, starts one run at a time, and re
     child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
     return child;
   };
-  const server = await serve({ root, bcg, port: 0, log: () => {}, spawn: fakeSpawn });
+  const server = await serve({ root, bcg, port: 0, autoSync: false, auth: false, log: () => {}, spawn: fakeSpawn });
   const base = `http://127.0.0.1:${server.address().port}`;
   const post = (body, type = "application/json") => fetch(`${base}/api/run`, { method: "POST", headers: { "content-type": type }, body: typeof body === "string" ? body : JSON.stringify(body) });
   const state = async () => (await (await fetch(`${base}/api/state`)).json()).runner;

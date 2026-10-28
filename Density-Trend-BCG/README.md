@@ -1,4 +1,49 @@
-# Density-Trend-BCG
+# Density-Trend-BCG (HiveMind)
+
+## Topic forecasting layer (implements HiveMind.docx)
+On top of the pipeline below, the app now tracks which topics are **gaining attention** and recommends **what to write, why now, and who should write it**. Open the dashboard (`node src/cli.mjs serve`) and use the sidebar:
+
+| Page | What it answers |
+|---|---|
+| Overview | KPIs, today's priorities, momentum leaders, topic lifecycle, data confidence |
+| Opportunities | Ranked 0–100 opportunity score with six visible components, evidence strength, action (write now / investigate / monitor / skip), window, review condition |
+| Momentum | Per-topic coverage volume (bars), coverage share and rolling average (lines), verified-trigger markers, collection gaps, comparison, dashed unvalidated forecast with band, separate search-interest panel |
+| Company lens | The earlier sector exposure, fronts and geography views |
+| Sources | Approved-source list with why each is trusted, syndication vs independent origins, run history, outages |
+| Authors & briefs | Author profiles, fit ranked separately from momentum, LLM-drafted briefs that an editor approves / rejects |
+| Validation | Backtest vs a "fastest growth" baseline (needs ≥ 10 days of history) |
+| Method | Every formula, threshold and stage rule, plus how the app maps to each section of the concept document |
+
+Key rules (all tunable in `config/hivemind.json`, all pilot assumptions, none validated): coverage share not raw counts; momentum = (recent + 1) ÷ (baseline share × recent total + 1); independent origins (ownership groups and wire credits collapse); a label is only judged against stories that could have carried it; time axis = publication time, with first-seen time used only to stop future leakage in replays; scores rank, they are not probabilities.
+
+New commands and settings: `node src/cli.mjs enrich` (adds topic labels to stories already read; no re-reading), `serve --schedule 60` or `HIVEMIND_SCHEDULE_MINUTES` (hourly collection), see `.env.example`. New tables are added to `data/hivemind.db` automatically; existing readings, stories and runs are untouched. Primary sources (PIB, RBI, IMD, SEBI) were added to `config/publications.json`.
+
+Not built / needs data: historical sequences from comparable events, article-performance tracking, licensed feeds (collection is Google News), a trained forecasting model.
+
+## Background jobs, logs and costs
+
+`serve` runs everything on a schedule (`HIVEMIND_SCHEDULE_MINUTES=60`). After each collection the follow-ups run one at a time, each only if there is something to do:
+
+| Step | Command | What it does |
+|---|---|---|
+| Collect | `run` | Polls Google News (the time since the last run, 3–24 h), reads new stories once. |
+| Label topics | `enrich` | Topic labels for stories that have none. |
+| Sentiment | `sentiment` | Tone and stance, 12 stories per request, newest first; new stories get it in their normal reading. |
+| Merge topics | `topics-merge` | Meaning-based merge of duplicate topics. Reversible: the merged row stays and points at the kept one. |
+| Merge entities | `entities-merge` | Same-entity name variants ("Tata Motors" / "TML") are folded together through a stored alias table, after a second strict review. |
+| Duplicates | (in server) | Repeated stories and template pages are marked in `story_dupes` and left out of the analysis; nothing is deleted. |
+| Judge topics | (in server) | Each leading rising topic is judged directly against each client's sectors (relevance and angle) instead of inheriting its broader area's link. |
+| Second opinion | (in server, weekly) | A stronger model (`audit.reviewModel`) re-reads the stories behind the top opportunities and says whether it agrees. |
+| Full-text retry | `fulltext` | Off by default (`fulltext.enabled`); stories are read from the headline and snippet to keep cost down. Set `HIVEMIND_FULLTEXT=1` to fetch article text again. |
+| Hot topics | (in server) | Serper news search and search interest for the few rising topics, within the daily budgets in `config/hivemind.json` (`hot`). |
+
+**Reading mode.** `config/hivemind.json → reading.mode` is `headline`: evidence rests on independent origins, history and the second-model check, not on full-text share. "Write now" additionally needs 72 h of history, 4 independent origins and data quality not in the red (Accuracy → Data quality). Hit bars scale with a topic's size (`success.bands`), and forecasts are logged and compared with outcomes (Accuracy → Validation).
+
+**Sign-in.** The dashboard requires an account. The first account created becomes the administrator; later sign-ups wait for approval in Settings → Users. Passwords are hashed with scrypt, sessions are HttpOnly SameSite=Strict cookies (Secure over https, or `HIVEMIND_COOKIE_SECURE=1`), repeated failures lock the email and throttle the IP, and members cannot change keys, run jobs or manage users. Create the administrator account before exposing the server beyond localhost; behind a proxy set `HIVEMIND_TRUST_PROXY=1` and `HIVEMIND_ALLOWED_HOSTS`. `HIVEMIND_AUTH=off` disables it (not for shared machines).
+
+Settings → Logs lists every job (scheduled, automatic or manual) with what it collected and whether it worked; Settings → Usage shows calls, tokens and the credit each provider reports. Recommendations are judged 72 hours after they are made (live hit rate in Accuracy); weight re-tuning is only ever suggested, and applied on confirmation (`data/weights.override.json`). Weekday adjustment switches on after 28 days of history.
+
+## Original description
 
 Polls Google News for 15 Indian publications, reads every story **with no company in mind**, files each impact under a reusable **keyword bracket**, then — for any company whose sectors you upload — works out which brackets matter to it and **what to write about**.
 

@@ -42,12 +42,99 @@ export class Store {
         model TEXT, headlines INTEGER, publications INTEGER, per_publication TEXT, total INTEGER, done INTEGER NOT NULL DEFAULT 0,
         target_date TEXT);
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+      -- Added for the topic-forecasting workflow. All optional: stories without these rows keep working.
+      CREATE TABLE IF NOT EXISTS enrichments (
+        key TEXT PRIMARY KEY, wire TEXT, content_type TEXT, entities TEXT, topics TEXT, pathways TEXT, source TEXT, enriched_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS topics (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, bracket TEXT, aliases TEXT NOT NULL DEFAULT '[]', count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS authors (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, profile TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS briefs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, company TEXT, opp_key TEXT NOT NULL, sector TEXT, topic TEXT,
+        author_id TEXT, brief TEXT NOT NULL, model TEXT, status TEXT NOT NULL DEFAULT 'pending', note TEXT, decided_at INTEGER);
+      CREATE INDEX IF NOT EXISTS briefs_opp ON briefs(opp_key);
+      CREATE TABLE IF NOT EXISTS recommendation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, as_of INTEGER NOT NULL, company TEXT NOT NULL, opp_key TEXT NOT NULL,
+        sector TEXT, label TEXT, level TEXT, score REAL, action TEXT, stage TEXT, kind TEXT, components TEXT, evidence TEXT, reason TEXT);
+      CREATE INDEX IF NOT EXISTS reclog_key ON recommendation_log(company, opp_key, ts);
+      CREATE TABLE IF NOT EXISTS journalists (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, publication TEXT, beat TEXT, designation TEXT, city TEXT, state TEXT, country TEXT,
+        email TEXT, phone TEXT, linkedin TEXT, twitter TEXT, profile_url TEXT, articles TEXT NOT NULL DEFAULT '[]', synced_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS journalists_pub ON journalists(publication);
+      CREATE TABLE IF NOT EXISTS signals (
+        topic TEXT NOT NULL, source TEXT NOT NULL, t INTEGER NOT NULL, value REAL NOT NULL, PRIMARY KEY (topic, source, t));
     `);
+    // ---- v2: sentiment, merged topics, job log, usage, outcomes, reading history. Additive only: nothing existing is altered or dropped.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS job_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, trigger TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL,
+        finished_at INTEGER, summary TEXT NOT NULL DEFAULT '', stats TEXT NOT NULL DEFAULT '{}', error TEXT);
+      CREATE TABLE IF NOT EXISTS usage_daily (
+        day TEXT NOT NULL, service TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
+        tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, service));
+      CREATE TABLE IF NOT EXISTS reading_versions (key TEXT NOT NULL, at INTEGER NOT NULL, basis TEXT NOT NULL, analysis TEXT NOT NULL, PRIMARY KEY (key, at));
+      CREATE TABLE IF NOT EXISTS rec_outcomes (
+        rec_id INTEGER PRIMARY KEY, evaluated_at INTEGER NOT NULL, hit INTEGER NOT NULL, peak_ratio REAL, peak_origins INTEGER, base_share REAL, peak_share REAL);
+      CREATE TABLE IF NOT EXISTS fulltext_tries (key TEXT PRIMARY KEY, tries INTEGER NOT NULL DEFAULT 0, last_at INTEGER NOT NULL, result TEXT);
+      CREATE TABLE IF NOT EXISTS web_checks (topic TEXT NOT NULL, source TEXT NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (topic, source, at));
+    `);
+    const cols = (t) => this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+    const addCol = (t, c, def) => { if (!cols(t).includes(c)) this.db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
+    addCol("enrichments", "sentiment", "TEXT"); addCol("enrichments", "stance", "TEXT"); addCol("enrichments", "sentiment_at", "INTEGER");
+    addCol("topics", "merged_into", "TEXT"); addCol("topics", "merged_at", "INTEGER");
+    addCol("recommendation_log", "voided", "INTEGER NOT NULL DEFAULT 0");
+    addCol("usage_daily", "cache_read", "INTEGER NOT NULL DEFAULT 0"); addCol("usage_daily", "batch_tokens", "INTEGER NOT NULL DEFAULT 0");
+    // ---- v3: judged topic-sector links, duplicate/junk stories, human audit, second opinions, forecast log, entity aliases. Additive only.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS topic_matches (
+        company TEXT NOT NULL, topic TEXT NOT NULL, sector TEXT NOT NULL, relevance REAL NOT NULL, channel TEXT, front TEXT, why TEXT, angle TEXT,
+        judged_at INTEGER NOT NULL, story_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (company, topic, sector));
+      CREATE TABLE IF NOT EXISTS story_dupes (key TEXT PRIMARY KEY, canonical TEXT, reason TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS audits (key TEXT PRIMARY KEY, verdict TEXT NOT NULL, note TEXT, reviewer TEXT, reason TEXT, at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS reading_reviews (key TEXT NOT NULL, model TEXT NOT NULL, agrees INTEGER NOT NULL, note TEXT, at INTEGER NOT NULL, PRIMARY KEY (key, model));
+      CREATE TABLE IF NOT EXISTS forecast_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, made_at INTEGER NOT NULL, target_at INTEGER NOT NULL, horizon INTEGER NOT NULL,
+        predicted REAL NOT NULL, lo REAL, hi REAL, naive REAL, actual REAL, evaluated_at INTEGER);
+      CREATE INDEX IF NOT EXISTS forecast_target ON forecast_log(target_at);
+      CREATE TABLE IF NOT EXISTS topic_checks (story_key TEXT NOT NULL, topic_id TEXT NOT NULL, fits INTEGER NOT NULL, why TEXT, at INTEGER NOT NULL, PRIMARY KEY (story_key, topic_id));
+      CREATE INDEX IF NOT EXISTS topic_checks_at ON topic_checks(at);
+      CREATE TABLE IF NOT EXISTS entity_aliases (alias TEXT PRIMARY KEY, canonical TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS topic_matches_topic ON topic_matches(topic);
+    `);
+    // Indexes for every lookup the dashboard, the jobs and the analytics make (IF NOT EXISTS: safe on every start).
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS stories_first_seen ON stories(first_seen);
+      CREATE INDEX IF NOT EXISTS stories_last_seen ON stories(last_seen);
+      CREATE INDEX IF NOT EXISTS articles_pub ON articles(publication, published_at);
+      CREATE INDEX IF NOT EXISTS articles_published ON articles(published_at);
+      CREATE INDEX IF NOT EXISTS readings_read_at ON readings(read_at);
+      CREATE INDEX IF NOT EXISTS readings_basis ON readings(basis);
+      CREATE INDEX IF NOT EXISTS enrich_at ON enrichments(enriched_at);
+      CREATE INDEX IF NOT EXISTS enrich_sentiment ON enrichments(sentiment);
+      CREATE INDEX IF NOT EXISTS topics_name ON topics(name);
+      CREATE INDEX IF NOT EXISTS topics_merged ON topics(merged_into);
+      CREATE INDEX IF NOT EXISTS reclog_ts ON recommendation_log(ts);
+      CREATE INDEX IF NOT EXISTS reclog_action ON recommendation_log(action, ts);
+      CREATE INDEX IF NOT EXISTS briefs_status ON briefs(status);
+      CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at);
+      CREATE INDEX IF NOT EXISTS signals_source ON signals(source, t);
+      CREATE INDEX IF NOT EXISTS journalists_name ON journalists(name);
+      CREATE INDEX IF NOT EXISTS journalists_beat ON journalists(beat);
+      CREATE INDEX IF NOT EXISTS joblog_started ON job_log(started_at);
+      CREATE INDEX IF NOT EXISTS joblog_kind ON job_log(kind, started_at);
+      CREATE INDEX IF NOT EXISTS webchecks_at ON web_checks(at);
+    `);
+    // When each headline was first seen (databases created earlier only recorded it per story).
+    if (!this.db.prepare("PRAGMA table_info(articles)").all().some((c) => c.name === "first_seen")) this.db.exec("ALTER TABLE articles ADD COLUMN first_seen INTEGER");
     // databases created before backfill support lack this column
     if (!this.db.prepare("PRAGMA table_info(runs)").all().some((c) => c.name === "target_date")) this.db.exec("ALTER TABLE runs ADD COLUMN target_date TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS runs_target ON runs(target_date)");
   }
 
-  close() { this.db.close(); }
+  // Refresh the query planner's statistics before closing, so indexes keep being chosen well as the data grows.
+  close() { try { this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
+  // Consistent copy of the whole database (safe while other processes use it).
+  backup(dest) { this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`); }
 
   #tx(fn) {
     this.db.exec("BEGIN IMMEDIATE");
@@ -77,10 +164,10 @@ export class Store {
          ON CONFLICT(key) DO UPDATE SET last_seen = excluded.last_seen`,
       ).run(key, c.title, c.url, c.snippet || "", c.publishedAt, dayOf(c.publishedAt), now, now);
       const art = this.db.prepare(
-        `INSERT INTO articles (url, story_key, title, outlet, publication, published_at) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO articles (url, story_key, title, outlet, publication, published_at, first_seen) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(url) DO UPDATE SET story_key = excluded.story_key`,
       );
-      for (const a of c.articles) art.run(a.url, key, a.title, a.outlet || "", a.publication || a.outlet || "", a.publishedAt ?? c.publishedAt);
+      for (const a of c.articles) art.run(a.url, key, a.title, a.outlet || "", a.publication || a.outlet || "", a.publishedAt ?? c.publishedAt, now);
       return key;
     }));
   }
@@ -93,24 +180,224 @@ export class Store {
   // Stories first published in [from, to), shaped like the pipeline's in-memory stories. analysis is null until read.
   loadStories({ from, to }) {
     const rows = this.db.prepare(
-      `SELECT s.key, s.title, s.url, s.snippet, s.published_at, r.basis, r.analysis
-       FROM stories s LEFT JOIN readings r ON r.key = s.key
+      `SELECT s.key, s.title, s.url, s.snippet, s.published_at, s.first_seen, r.basis, r.analysis, r.read_at, e.enriched_at,
+              e.wire, e.content_type, e.entities, e.topics, e.pathways, e.sentiment, e.stance
+       FROM stories s LEFT JOIN readings r ON r.key = s.key LEFT JOIN enrichments e ON e.key = s.key
        WHERE s.published_at >= ? AND s.published_at < ? ORDER BY s.published_at`,
     ).all(from, to);
     const arts = this.db.prepare(
       `SELECT story_key, title, outlet, publication, url FROM articles
        WHERE story_key IN (SELECT key FROM stories WHERE published_at >= ? AND published_at < ?)`,
     ).all(from, to);
+    const merged = this.#mergeMap();
     const by = new Map();
     for (const a of arts) (by.get(a.story_key) ?? by.set(a.story_key, []).get(a.story_key)).push({ title: a.title, outlet: a.outlet, publication: a.publication, url: a.url });
-    return rows.map((r) => {
+    const drops = this.topicDrops();
+    const dupes = this.dupeMap();
+    if (dupes.size) {
+      const present = new Set(rows.map((r) => r.key));
+      for (const [k, canon] of dupes) {
+        if (!by.has(k)) continue;
+        if (canon && present.has(canon)) { const into = by.get(canon) ?? by.set(canon, []).get(canon), seen = new Set(into.map((a) => a.url)); for (const a of by.get(k)) if (!seen.has(a.url)) into.push(a); }
+        by.delete(k);
+      }
+    }
+    return rows.filter((r) => !dupes.has(r.key)).map((r) => {
       const articles = by.get(r.key) ?? [];
       return {
-        id: r.key, title: r.title, url: r.url, snippet: r.snippet, publishedAt: r.published_at,
+        id: r.key, title: r.title, url: r.url, snippet: r.snippet, publishedAt: r.published_at, firstSeen: r.first_seen, readAt: r.read_at ?? null, enrichedAt: r.enriched_at ?? null,
         outlets: [...new Set(articles.map((a) => a.outlet))], articles,
         analysis: r.analysis ? JSON.parse(r.analysis) : null, basis: r.basis ?? "headline",
+        meta: r.content_type || r.topics || r.wire || r.sentiment ? {
+          wire: r.wire || null, contentType: r.content_type || null,
+          entities: JSON.parse(r.entities || "[]"), topics: [...new Set(JSON.parse(r.topics || "[]").map((t) => merged.get(t) ?? t))].filter((t) => !drops.has(r.key + "|" + t)), pathways: JSON.parse(r.pathways || "[]"),
+          sentiment: r.sentiment || null, stance: r.stance || null,
+        } : null,
       };
     });
+  }
+
+  // First and last publication time ever stored, and how many distinct local days have data.
+  span() {
+    const r = this.db.prepare("SELECT MIN(published_at) AS a, MAX(published_at) AS b, MAX(last_seen) AS c, COUNT(DISTINCT day) AS days FROM stories").get();
+    // lastSeen: when the newest collection touched the database (the live view's "now"), never later than the clock.
+    return { first: r.a, last: r.b, days: r.days, lastSeen: r.c ? Math.min(r.c, Date.now()) : r.b };
+  }
+
+  // ---- enrichments: extra labels per story (topics, content type, entities, causal pathways, wire credit) ----
+  hasEnrichment(key) { return !!this.db.prepare("SELECT 1 FROM enrichments WHERE key = ?").get(key); }
+  enrichmentCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM enrichments WHERE topics IS NOT NULL").get().n; }
+  putEnrichment(key, { wire = null, contentType = null, entities = null, topics = null, pathways = null, sentiment = null, stance = null, source = "read" }) {
+    const prev = this.db.prepare("SELECT * FROM enrichments WHERE key = ?").get(key);
+    const j = (v, old) => (v == null ? old ?? null : JSON.stringify(v));
+    this.db.prepare("INSERT OR REPLACE INTO enrichments (key, wire, content_type, entities, topics, pathways, source, enriched_at, sentiment, stance, sentiment_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(key, wire ?? prev?.wire ?? null, contentType ?? prev?.content_type ?? null, j(entities, prev?.entities), j(topics, prev?.topics), j(pathways, prev?.pathways), source, Date.now(),
+        sentiment ?? prev?.sentiment ?? null, stance ?? prev?.stance ?? null, sentiment ? Date.now() : prev?.sentiment_at ?? null);
+  }
+  unenrichedCount() {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM stories s JOIN readings r ON r.key = s.key LEFT JOIN enrichments e ON e.key = s.key WHERE e.topics IS NULL").get().n;
+  }
+  // Read stories that have no topic labels yet, in RANDOM order. A topic can only be given to stories labelled after it was
+  // coined, so a random order makes that eligible set an unbiased sample of every time period; newest-first would leave
+  // late-coined topics with only old stories and no recent history.
+  // (The `enrich` command uses this.)
+  unenriched(limit = 1e9) {
+    return this.db.prepare(
+      `SELECT s.key, s.title, s.published_at, r.analysis FROM stories s JOIN readings r ON r.key = s.key
+       LEFT JOIN enrichments e ON e.key = s.key WHERE e.topics IS NULL ORDER BY RANDOM() LIMIT ?`,
+    ).all(limit).map((r) => ({ key: r.key, title: r.title, publishedAt: r.published_at, analysis: JSON.parse(r.analysis) }));
+  }
+
+  // ---- sentiment and stance (one batch call labels many stories; never touches the impact reading) ----
+  putSentiment(key, { sentiment, stance }) {
+    const now = Date.now();
+    if (this.hasEnrichment(key)) this.db.prepare("UPDATE enrichments SET sentiment = ?, stance = ?, sentiment_at = ? WHERE key = ?").run(sentiment, stance, now, key);
+    else this.db.prepare("INSERT INTO enrichments (key, source, enriched_at, sentiment, stance, sentiment_at) VALUES (?, 'sentiment', ?, ?, ?, ?)").run(key, now, sentiment, stance, now);
+  }
+  putSentiments(list) { this.#tx(() => { for (const x of list) this.putSentiment(x.key, x); }); }
+  sentimentCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM enrichments WHERE sentiment IS NOT NULL").get().n; }
+  unsentimentedCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM readings r LEFT JOIN enrichments e ON e.key = r.key WHERE e.sentiment IS NULL").get().n; }
+  // Newest first: recent stories matter most for trends, so a partly finished backfill is already useful.
+  unsentimented(limit = 1e9) {
+    return this.db.prepare(`SELECT s.key, s.title, s.published_at, r.analysis FROM readings r JOIN stories s ON s.key = r.key LEFT JOIN enrichments e ON e.key = r.key
+      WHERE e.sentiment IS NULL ORDER BY s.published_at DESC LIMIT ?`).all(limit).map((r) => ({ key: r.key, title: r.title, publishedAt: r.published_at, analysis: JSON.parse(r.analysis) }));
+  }
+
+  // ---- topic merges: reversible (the merged topic row stays, pointing at the one that absorbed it) ----
+  #mergeMap() {
+    if (this._mm && Date.now() - this._mm.at < 3000) return this._mm.map;
+    const map = new Map(this.db.prepare("SELECT id, merged_into FROM topics WHERE merged_into IS NOT NULL").all().map((r) => [r.id, r.merged_into]));
+    // follow chains (a to b to c) to the final topic
+    for (const [k, v] of map) { let t = v, n = 0; while (map.has(t) && n++ < 10) t = map.get(t); map.set(k, t); }
+    this._mm = { at: Date.now(), map };
+    return map;
+  }
+  mergeTopics(keepId, dropId, { name = null } = {}) {
+    if (keepId === dropId) return 0;
+    const keep = this.db.prepare("SELECT * FROM topics WHERE id = ?").get(keepId), drop = this.db.prepare("SELECT * FROM topics WHERE id = ?").get(dropId);
+    if (!keep || !drop || keep.merged_into || drop.merged_into) return 0;
+    const aliases = [...new Set([...JSON.parse(keep.aliases), keep.name, drop.name, ...JSON.parse(drop.aliases)].filter((a) => a && a !== (name ?? keep.name)))].slice(0, 40);
+    this.#tx(() => {
+      this.db.prepare("UPDATE topics SET aliases = ?, count = count + ?, name = ?, created_at = MIN(created_at, ?) WHERE id = ?").run(JSON.stringify(aliases), drop.count, name ?? keep.name, drop.created_at, keepId);
+      this.db.prepare("UPDATE topics SET merged_into = ?, merged_at = ? WHERE id = ?").run(keepId, Date.now(), dropId);
+      this.db.prepare("UPDATE topics SET merged_into = ? WHERE merged_into = ?").run(keepId, dropId);
+    });
+    this._mm = null;
+    return 1;
+  }
+  unmergeTopic(id) { this.db.prepare("UPDATE topics SET merged_into = NULL, merged_at = NULL WHERE id = ?").run(id); this._mm = null; }
+  mergedTopicCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM topics WHERE merged_into IS NOT NULL").get().n; }
+
+  // ---- small key/value settings (integration toggles and usage, LLM preferences, per-machine settings) ----
+  getMeta(k, fallback = null) { const r = this.db.prepare("SELECT v FROM meta WHERE k = ?").get(k); return r ? r.v : fallback; }
+  setMeta(k, v) { this.db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)").run(k, String(v)); }
+  getJson(k, fallback = {}) { try { return JSON.parse(this.getMeta(k) ?? "null") ?? fallback; } catch { return fallback; } }
+  setJson(k, v) { this.setMeta(k, JSON.stringify(v)); }
+
+  // ---- journalist directory (synced from the external endpoint; contact details stay in this local file) ----
+  upsertJournalists(list) {
+    const now = Date.now();
+    this.#tx(() => {
+      const st = this.db.prepare(`INSERT OR REPLACE INTO journalists (id, name, publication, beat, designation, city, state, country, email, phone, linkedin, twitter, profile_url, articles, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const j of list) st.run(j.id, j.name, j.publication, j.beat, j.designation, j.city, j.state, j.country, j.email, j.phone, j.linkedin, j.twitter, j.profileUrl, JSON.stringify(j.articles), now);
+    });
+    return list.length;
+  }
+  journalistCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM journalists").get().n; }
+  #jrow(r) { return { id: r.id, name: r.name, publication: r.publication, beat: r.beat, designation: r.designation, city: r.city, state: r.state, country: r.country, email: r.email, phone: r.phone, linkedin: r.linkedin, twitter: r.twitter, profileUrl: r.profile_url, articles: JSON.parse(r.articles) }; }
+  allJournalists() { return this.db.prepare("SELECT * FROM journalists").all().map((r) => this.#jrow(r)); }
+  getJournalist(id) { const r = this.db.prepare("SELECT * FROM journalists WHERE id = ?").get(id); return r ? this.#jrow(r) : null; }
+  searchJournalists({ q = "", beat = "", publication = "", limit = 50, offset = 0 } = {}) {
+    const where = [], args = [];
+    if (q) { where.push("(name LIKE ? OR publication LIKE ? OR beat LIKE ? OR city LIKE ? OR articles LIKE ?)"); args.push(...Array(5).fill(`%${q}%`)); }
+    if (beat) { where.push("beat LIKE ?"); args.push(`%${beat}%`); }
+    if (publication) { where.push("publication LIKE ?"); args.push(`%${publication}%`); }
+    const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM journalists ${w}`).get(...args).n;
+    const rows = this.db.prepare(`SELECT * FROM journalists ${w} ORDER BY name LIMIT ? OFFSET ?`).all(...args, limit, offset).map((r) => this.#jrow(r));
+    return { total, rows };
+  }
+  journalistFacets() {
+    const pubs = this.db.prepare("SELECT publication AS v, COUNT(*) AS n FROM journalists WHERE publication != '' GROUP BY publication ORDER BY n DESC LIMIT 40").all();
+    const beats = {};
+    for (const { beat } of this.db.prepare("SELECT beat FROM journalists WHERE beat != ''").all()) for (const b of beat.split(",")) { const t = b.trim(); if (t) beats[t] = (beats[t] || 0) + 1; }
+    const c = this.db.prepare("SELECT SUM(email != '') AS email, SUM(phone != '') AS phone, SUM(linkedin != '') AS linkedin, SUM(beat != '') AS beat, SUM(articles != '[]') AS articles FROM journalists").get();
+    return { publications: pubs, beats: Object.entries(beats).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([v, n]) => ({ v, n })), coverage: { email: c.email || 0, phone: c.phone || 0, linkedin: c.linkedin || 0, beat: c.beat || 0, articles: c.articles || 0 } };
+  }
+
+  // ---- topic registry rows (merged topics are hidden; their names live on as aliases of the topic that absorbed them) ----
+  loadTopics() { return this.db.prepare("SELECT * FROM topics WHERE merged_into IS NULL").all().map((t) => ({ id: t.id, name: t.name, bracket: t.bracket, aliases: JSON.parse(t.aliases), count: t.count, createdAt: t.created_at })); }
+  saveTopic(t) {
+    // Never un-merge or lose merge state: update the editable fields only.
+    this.db.prepare("INSERT INTO topics (id, name, bracket, aliases, count, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, bracket = excluded.bracket, aliases = excluded.aliases, count = excluded.count")
+      .run(t.id, t.name, t.bracket ?? null, JSON.stringify(t.aliases ?? []), t.count ?? 0, t.createdAt ?? Date.now());
+  }
+
+  // ---- authors ----
+  listAuthors() { return this.db.prepare("SELECT * FROM authors ORDER BY name").all().map((a) => ({ id: a.id, name: a.name, active: !!a.active, ...JSON.parse(a.profile), createdAt: a.created_at, updatedAt: a.updated_at })); }
+  putAuthor(a) {
+    const { id, name, active = true, createdAt, ...profile } = a;
+    const now = Date.now();
+    this.db.prepare("INSERT INTO authors (id, name, profile, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, profile = excluded.profile, active = excluded.active, updated_at = excluded.updated_at")
+      .run(id, name, JSON.stringify(profile), active ? 1 : 0, createdAt ?? now, now);
+  }
+  removeAuthor(id) { return Number(this.db.prepare("DELETE FROM authors WHERE id = ?").run(id).changes); }
+
+  // ---- briefs and editor decisions ----
+  addBrief({ company, oppKey, sector, topic, authorId = null, brief, model }) {
+    return Number(this.db.prepare("INSERT INTO briefs (created_at, company, opp_key, sector, topic, author_id, brief, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(Date.now(), company, oppKey, sector, topic, authorId, JSON.stringify(brief), model).lastInsertRowid);
+  }
+  listBriefs({ oppKey = null, limit = 100 } = {}) {
+    const rows = oppKey
+      ? this.db.prepare("SELECT * FROM briefs WHERE opp_key = ? ORDER BY id DESC LIMIT ?").all(oppKey, limit)
+      : this.db.prepare("SELECT * FROM briefs ORDER BY id DESC LIMIT ?").all(limit);
+    return rows.map((b) => ({ id: b.id, createdAt: b.created_at, company: b.company, oppKey: b.opp_key, sector: b.sector, topic: b.topic, authorId: b.author_id, brief: JSON.parse(b.brief), model: b.model, status: b.status, note: b.note, decidedAt: b.decided_at }));
+  }
+  decideBrief(id, status, note = "") {
+    return Number(this.db.prepare("UPDATE briefs SET status = ?, note = ?, decided_at = ? WHERE id = ?").run(status, note, Date.now(), id).changes);
+  }
+  briefStats() {
+    const r = this.db.prepare("SELECT status, COUNT(*) AS n FROM briefs GROUP BY status").all();
+    return Object.fromEntries(r.map((x) => [x.status, x.n]));
+  }
+
+  // ---- recommendation history ----
+  lastRecommendation(company, oppKey) {
+    const r = this.db.prepare("SELECT * FROM recommendation_log WHERE company = ? AND opp_key = ? ORDER BY id DESC LIMIT 1").get(company, oppKey);
+    return r && { ...r, components: JSON.parse(r.components || "{}") };
+  }
+  addRecommendation(r) {
+    this.db.prepare("INSERT INTO recommendation_log (ts, as_of, company, opp_key, sector, label, level, score, action, stage, kind, components, evidence, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(r.ts ?? Date.now(), r.asOf, r.company, r.oppKey, r.sector, r.label, r.level, r.score, r.action, r.stage, r.kind, JSON.stringify(r.components ?? {}), JSON.stringify(r.evidence ?? []), r.reason ?? "");
+  }
+  recommendationHistory(company, oppKey, limit = 50) {
+    return this.db.prepare("SELECT * FROM recommendation_log WHERE company = ? AND opp_key = ? ORDER BY id DESC LIMIT ?").all(company, oppKey, limit)
+      .map((r) => ({ ...r, components: JSON.parse(r.components || "{}"), evidence: JSON.parse(r.evidence || "[]") }));
+  }
+  recommendationCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM recommendation_log").get().n; }
+
+  // ---- external signals (search interest): kept separate from news coverage, never zero-filled ----
+  putSignal(topic, source, points) {
+    this.#tx(() => { const st = this.db.prepare("INSERT OR REPLACE INTO signals (topic, source, t, value) VALUES (?, ?, ?, ?)"); for (const p of points) st.run(topic, source, p.t, p.value); });
+  }
+  getSignal(topic, source = null) {
+    return (source ? this.db.prepare("SELECT t, value, source FROM signals WHERE topic = ? AND source = ? ORDER BY t").all(topic, source) : this.db.prepare("SELECT t, value, source FROM signals WHERE topic = ? ORDER BY t").all(topic));
+  }
+  signalTopics() { return this.db.prepare("SELECT topic, source, COUNT(*) AS n, MIN(t) AS a, MAX(t) AS b FROM signals GROUP BY topic, source").all(); }
+
+  // Headlines and distinct stories per publication in [from, to): the source-health table.
+  publicationStats(from, to) {
+    return this.db.prepare("SELECT publication, COUNT(*) AS headlines, COUNT(DISTINCT story_key) AS stories, MAX(published_at) AS last FROM articles WHERE published_at >= ? AND published_at < ? GROUP BY publication").all(from, to);
+  }
+
+  // ---- run history (for the collection-health panel) ----
+  runs(limit = 30) {
+    return this.db.prepare("SELECT * FROM runs ORDER BY id DESC LIMIT ?").all(limit).map((r) => ({
+      id: r.id, targetDate: r.target_date, startedAt: r.started_at, finishedAt: r.finished_at, model: r.model, headlines: r.headlines,
+      publications: r.publications, perPublication: JSON.parse(r.per_publication || "[]"), total: r.total, done: r.done,
+    }));
   }
 
   // Days that have data, newest first.
@@ -128,6 +415,7 @@ export class Store {
       "INSERT INTO runs (started_at, updated_at, model, headlines, publications, per_publication, total, done, target_date) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
     ).run(startedAt, startedAt, model, headlines, publications, JSON.stringify(perPublication), total, targetDate).lastInsertRowid);
   }
+  runStats(id) { const r = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id); return r && { headlines: r.headlines, total: r.total, done: r.done, perPublication: JSON.parse(r.per_publication || "[]") }; }
   progressRun(id, done) { this.db.prepare("UPDATE runs SET done = ?, updated_at = ? WHERE id = ?").run(done, Date.now(), id); }
   finishRun(id, done) { const t = Date.now(); this.db.prepare("UPDATE runs SET done = ?, updated_at = ?, finished_at = ? WHERE id = ?").run(done, t, t, id); }
   // kind "any": the most recent run. kind "rolling": the most recent run for the latest window (not a past-day backfill),
@@ -138,6 +426,166 @@ export class Store {
       id: r.id, targetDate: r.target_date, startedAt: r.started_at, updatedAt: r.updated_at, finishedAt: r.finished_at, model: r.model,
       headlines: r.headlines, publications: r.publications, perPublication: JSON.parse(r.per_publication || "[]"), total: r.total, done: r.done,
     };
+  }
+
+  // ---- job log: every automated and manual job, what it did and how it ended (Settings -> Logs) ----
+  startJob({ kind, trigger = "manual", summary = "", stats = {} }) {
+    return Number(this.db.prepare("INSERT INTO job_log (kind, trigger, status, started_at, summary, stats) VALUES (?, ?, 'running', ?, ?, ?)").run(kind, trigger, Date.now(), summary, JSON.stringify(stats)).lastInsertRowid);
+  }
+  finishJob(id, { status = "ok", summary = "", stats = null, error = null } = {}) {
+    const prev = this.db.prepare("SELECT stats FROM job_log WHERE id = ?").get(id);
+    const merged = { ...JSON.parse(prev?.stats || "{}"), ...(stats ?? {}) };
+    this.db.prepare("UPDATE job_log SET status = ?, finished_at = ?, summary = ?, stats = ?, error = ? WHERE id = ?").run(status, Date.now(), summary, JSON.stringify(merged), error, id);
+  }
+  // A server that was stopped mid-job leaves 'running' rows behind; mark them so the log is truthful.
+  closeStaleJobs(aliveKinds = []) {
+    const rows = this.db.prepare("SELECT id, kind FROM job_log WHERE status = 'running'").all().filter((r) => !aliveKinds.includes(r.kind));
+    for (const r of rows) this.finishJob(r.id, { status: "stopped", summary: "Interrupted (the server stopped before this job finished)." });
+    return rows.length;
+  }
+  jobLog({ limit = 100, kind = null, status = null, trigger = null } = {}) {
+    const w = [], a = [];
+    if (kind) { w.push("kind = ?"); a.push(kind); } if (status) { w.push("status = ?"); a.push(status); } if (trigger) { w.push("trigger = ?"); a.push(trigger); }
+    return this.db.prepare(`SELECT * FROM job_log ${w.length ? "WHERE " + w.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`).all(...a, limit).map((r) => ({
+      id: r.id, kind: r.kind, trigger: r.trigger, status: r.status, startedAt: r.started_at, finishedAt: r.finished_at, durationMs: r.finished_at ? r.finished_at - r.started_at : null,
+      summary: r.summary, stats: JSON.parse(r.stats || "{}"), error: r.error }));
+  }
+
+  // ---- API usage (calls and tokens per day, per service). One atomic upsert, safe from several processes. ----
+  addUsage(service, { calls = 1, errors = 0, tokensIn = 0, tokensOut = 0, cacheRead = 0, batchTokens = 0 } = {}) {
+    this.db.prepare(`INSERT INTO usage_daily (day, service, calls, errors, tokens_in, tokens_out, cache_read, batch_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(day, service) DO UPDATE SET calls = calls + excluded.calls, errors = errors + excluded.errors, tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out,
+        cache_read = cache_read + excluded.cache_read, batch_tokens = batch_tokens + excluded.batch_tokens`)
+      .run(dayOf(Date.now()), service, calls, errors, tokensIn, tokensOut, cacheRead, batchTokens);
+  }
+  usage(service, fromDay) {
+    const r = this.db.prepare("SELECT COALESCE(SUM(calls),0) AS calls, COALESCE(SUM(errors),0) AS errors, COALESCE(SUM(tokens_in),0) AS tokensIn, COALESCE(SUM(tokens_out),0) AS tokensOut, COALESCE(SUM(cache_read),0) AS cacheRead, COALESCE(SUM(batch_tokens),0) AS batchTokens FROM usage_daily WHERE service = ? AND day >= ?").get(service, fromDay);
+    return { calls: r.calls, errors: r.errors, tokensIn: r.tokensIn, tokensOut: r.tokensOut, cacheRead: r.cacheRead, batchTokens: r.batchTokens };
+  }
+
+  // ---- live-recommendation outcomes ----
+  pendingOutcomes(beforeTs, limit = 500) {
+    return this.db.prepare("SELECT * FROM recommendation_log WHERE voided = 0 AND ts <= ? AND id NOT IN (SELECT rec_id FROM rec_outcomes) ORDER BY id LIMIT ?").all(beforeTs, limit)
+      .map((r) => ({ ...r, components: JSON.parse(r.components || "{}") }));
+  }
+  putOutcome(recId, o) { this.db.prepare("INSERT OR REPLACE INTO rec_outcomes (rec_id, evaluated_at, hit, peak_ratio, peak_origins, base_share, peak_share) VALUES (?, ?, ?, ?, ?, ?, ?)").run(recId, Date.now(), o.hit ? 1 : 0, o.peakRatio ?? null, o.peakOrigins ?? null, o.baseShare ?? null, o.peakShare ?? null); }
+  outcomes() {
+    return this.db.prepare("SELECT r.*, o.hit, o.peak_ratio, o.peak_origins, o.evaluated_at FROM recommendation_log r LEFT JOIN rec_outcomes o ON o.rec_id = r.id WHERE r.voided = 0 ORDER BY r.id DESC").all()
+      .map((r) => ({ id: r.id, ts: r.ts, company: r.company, oppKey: r.opp_key, sector: r.sector, label: r.label, level: r.level, score: r.score, action: r.action, stage: r.stage, components: JSON.parse(r.components || "{}"),
+        hit: r.evaluated_at ? !!r.hit : null, peakRatio: r.peak_ratio, peakOrigins: r.peak_origins }));
+  }
+
+  // ---- full-text upgrades: the earlier reading is kept before a headline-only reading is replaced ----
+  headlineOnly(limit = 1e9) {
+    return this.db.prepare(`SELECT s.key, s.title, s.url, s.snippet, s.published_at FROM readings r JOIN stories s ON s.key = r.key WHERE r.basis != 'full-text' ORDER BY s.published_at DESC LIMIT ?`).all(limit);
+  }
+  // Stories still worth a second full-text attempt: tried fewer than maxTries times, and not within the last retryAfterHours.
+  fulltextCandidates({ limit, maxTries = 2, retryAfterMs = 12 * 3600e3 }) {
+    return this.db.prepare(`SELECT s.key, s.title, s.url, s.snippet, s.published_at FROM readings r JOIN stories s ON s.key = r.key LEFT JOIN fulltext_tries f ON f.key = r.key
+      WHERE r.basis != 'full-text' AND (f.key IS NULL OR (f.tries < ? AND f.last_at < ?)) ORDER BY s.published_at DESC LIMIT ?`).all(maxTries, Date.now() - retryAfterMs, limit);
+  }
+  noteFulltextTry(key, result) { this.db.prepare("INSERT INTO fulltext_tries (key, tries, last_at, result) VALUES (?, 1, ?, ?) ON CONFLICT(key) DO UPDATE SET tries = tries + 1, last_at = excluded.last_at, result = excluded.result").run(key, Date.now(), result); }
+  fulltextStats() { return this.db.prepare("SELECT result, COUNT(*) AS n FROM fulltext_tries GROUP BY result").all(); }
+  headlineOnlyCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM readings WHERE basis != 'full-text'").get().n; }
+  articlesOf(key) { return this.db.prepare("SELECT title, outlet, publication, url FROM articles WHERE story_key = ?").all(key); }
+  upgradeReading(key, { analysis, basis }) {
+    this.#tx(() => {
+      const prev = this.db.prepare("SELECT basis, analysis FROM readings WHERE key = ?").get(key);
+      if (prev) this.db.prepare("INSERT OR IGNORE INTO reading_versions (key, at, basis, analysis) VALUES (?, ?, ?, ?)").run(key, Date.now(), prev.basis, prev.analysis);
+      this.db.prepare("INSERT OR REPLACE INTO readings (key, basis, analysis, read_at) VALUES (?, ?, ?, COALESCE((SELECT read_at FROM readings WHERE key = ?), ?))").run(key, basis, JSON.stringify(analysis), key, Date.now());
+    });
+  }
+
+  // ---- web checks (Serper / search interest results for hot topics) ----
+  putWebCheck(topic, source, data) { this.db.prepare("INSERT OR REPLACE INTO web_checks (topic, source, at, data) VALUES (?, ?, ?, ?)").run(topic, source, Date.now(), JSON.stringify(data)); }
+  lastWebCheck(topic, source) { const r = this.db.prepare("SELECT at, data FROM web_checks WHERE topic = ? AND source = ? ORDER BY at DESC LIMIT 1").get(topic, source); return r ? { at: r.at, ...JSON.parse(r.data) } : null; }
+  webChecksSince(source, since) { return this.db.prepare("SELECT topic, at FROM web_checks WHERE source = ? AND at >= ?").all(source, since); }
+
+  // ---- judged topic-sector links (a direct model judgement per client sector, instead of inheriting the parent bracket's) ----
+  putTopicMatches(company, topic, list, storyCount = 0) {
+    const now = Date.now();
+    this.#tx(() => {
+      this.db.prepare("DELETE FROM topic_matches WHERE company = ? AND topic = ?").run(company, topic);
+      const st = this.db.prepare("INSERT INTO topic_matches (company, topic, sector, relevance, channel, front, why, angle, judged_at, story_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      for (const m of list) st.run(company, topic, m.sector, m.relevance, m.channel ?? null, m.front ?? null, m.why ?? "", m.write_about ?? "", now, storyCount);
+      if (!list.length) st.run(company, topic, "", 0, null, null, "", "", now, storyCount); // a judgement of 'no relevant sector' is remembered too
+    });
+  }
+  topicMatches(company) {
+    const out = new Map();
+    for (const r of this.db.prepare("SELECT * FROM topic_matches WHERE company = ?").all(company)) {
+      if (!out.has(r.topic)) out.set(r.topic, { judgedAt: r.judged_at, storyCount: r.story_count, sectors: [] });
+      if (r.sector) out.get(r.topic).sectors.push({ sector: r.sector, relevance: r.relevance, channel: r.channel, front: r.front, why: r.why, write_about: r.angle });
+    }
+    return out;
+  }
+
+  // ---- duplicate and junk stories: excluded (canonical NULL) or folded into the story they repeat; reversible, nothing is deleted ----
+  dupeMap() {
+    if (this._dm && Date.now() - this._dm.at < 3000) return this._dm.map;
+    const map = new Map(this.db.prepare("SELECT key, canonical FROM story_dupes").all().map((r) => [r.key, r.canonical]));
+    this._dm = { at: Date.now(), map };
+    return map;
+  }
+  markDupes(list) {
+    this.#tx(() => { const st = this.db.prepare("INSERT OR REPLACE INTO story_dupes (key, canonical, reason, at) VALUES (?, ?, ?, ?)"); for (const d of list) st.run(d.key, d.canonical ?? null, d.reason, Date.now()); });
+    this._dm = null;
+  }
+  clearDupes() { this.db.exec("DELETE FROM story_dupes"); this._dm = null; }
+  dupeCounts() { const r = this.db.prepare("SELECT SUM(canonical IS NULL) AS junk, SUM(canonical IS NOT NULL) AS dupes FROM story_dupes").get(); return { junk: r.junk || 0, duplicates: r.dupes || 0 }; }
+  // Every story's id, title and time (cheap scan used by the duplicate check)
+  storyTitles(since) { return this.db.prepare("SELECT key, title, published_at FROM stories WHERE published_at >= ? ORDER BY published_at").all(since); }
+
+  // ---- topic fit: a headline filed under a topic is checked against it; labels that do not fit are left out of the topic (reversible) ----
+  putTopicChecks(list) {
+    this.#tx(() => { const st = this.db.prepare("INSERT OR REPLACE INTO topic_checks (story_key, topic_id, fits, why, at) VALUES (?, ?, ?, ?, ?)"); for (const c of list) st.run(c.key, c.topic, c.fits ? 1 : 0, c.why ?? "", Date.now()); });
+    this._td = null;
+  }
+  topicDrops() {
+    if (this._td && Date.now() - this._td.at < 3000) return this._td.set;
+    const set = new Set(this.db.prepare("SELECT story_key, topic_id FROM topic_checks WHERE fits = 0").all().map((r) => r.story_key + "|" + r.topic_id));
+    this._td = { at: Date.now(), set };
+    return set;
+  }
+  checkedTopicPairs() { return new Set(this.db.prepare("SELECT story_key, topic_id FROM topic_checks").all().map((r) => r.story_key + "|" + r.topic_id)); }
+  topicFitStats(since) { const r = this.db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(fits), 0) AS fits FROM topic_checks WHERE at >= ?").get(since); return { checked: r.n, fits: r.fits }; }
+  topicDropCount(topicId, sinceMs) {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM topic_checks c JOIN stories s ON s.key = c.story_key WHERE c.topic_id = ? AND c.fits = 0 AND s.published_at >= ?").get(topicId, sinceMs).n;
+  }
+  clearTopicChecks() { this.db.exec("DELETE FROM topic_checks"); this._td = null; }
+
+  // ---- human audit of the AI reading, and a second model's opinion ----
+  putAudit({ key, verdict, note = "", reviewer = "", reason = "" }) { this.db.prepare("INSERT OR REPLACE INTO audits (key, verdict, note, reviewer, reason, at) VALUES (?, ?, ?, ?, ?, ?)").run(key, verdict, String(note).slice(0, 400), reviewer, reason, Date.now()); }
+  auditedKeys() { return new Set(this.db.prepare("SELECT key FROM audits").all().map((r) => r.key)); }
+  auditStats() {
+    const rows = this.db.prepare("SELECT verdict, COUNT(*) AS n FROM audits GROUP BY verdict").all(), o = { reviewed: 0, correct: 0, wrong: 0, unsure: 0 };
+    for (const r of rows) { o[r.verdict] = r.n; o.reviewed += r.n; }
+    const judged = o.correct + o.wrong;
+    return { ...o, accuracy: judged ? o.correct / judged : null };
+  }
+  putReview(key, model, agrees, note = "") { this.db.prepare("INSERT OR REPLACE INTO reading_reviews (key, model, agrees, note, at) VALUES (?, ?, ?, ?, ?)").run(key, model, agrees ? 1 : 0, String(note).slice(0, 300), Date.now()); }
+  reviews(limit = 100) { return this.db.prepare("SELECT r.key, r.model, r.agrees, r.note, r.at, s.title FROM reading_reviews r JOIN stories s ON s.key = r.key ORDER BY r.at DESC LIMIT ?").all(limit).map((r) => ({ key: r.key, model: r.model, agrees: !!r.agrees, note: r.note, at: r.at, title: r.title })); }
+  reviewedKeys(model) { return new Set(this.db.prepare("SELECT key FROM reading_reviews WHERE model = ?").all(model).map((r) => r.key)); }
+
+  // ---- forecast log: what the dashed line said, kept so it can be compared with what happened ----
+  addForecasts(list) {
+    this.#tx(() => { const st = this.db.prepare("INSERT INTO forecast_log (topic, made_at, target_at, horizon, predicted, lo, hi, naive) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"); for (const f of list) st.run(f.topic, f.madeAt, f.targetAt, f.horizon, f.predicted, f.lo, f.hi, f.naive); });
+  }
+  lastForecastAt(topic) { return this.db.prepare("SELECT MAX(made_at) AS t FROM forecast_log WHERE topic = ?").get(topic).t ?? 0; }
+  dueForecasts(now) { return this.db.prepare("SELECT * FROM forecast_log WHERE actual IS NULL AND target_at <= ? LIMIT 2000").all(now); }
+  putForecastActual(id, actual) { this.db.prepare("UPDATE forecast_log SET actual = ?, evaluated_at = ? WHERE id = ?").run(actual, Date.now(), id); }
+  forecastRows() { return this.db.prepare("SELECT * FROM forecast_log WHERE actual IS NOT NULL").all(); }
+  forecastPending() { return this.db.prepare("SELECT COUNT(*) AS n FROM forecast_log WHERE actual IS NULL").get().n; }
+
+  // ---- entity aliases (same entity, different wording) ----
+  entityAliases() { return new Map(this.db.prepare("SELECT alias, canonical FROM entity_aliases").all().map((r) => [r.alias, r.canonical])); }
+  putEntityAlias(alias, canonical) { this.db.prepare("INSERT OR REPLACE INTO entity_aliases (alias, canonical, at) VALUES (?, ?, ?)").run(alias, canonical, Date.now()); }
+
+  // ---- recommendations whose pairing no longer exists are voided so they do not count in the hit rate ----
+  voidRecommendations(pred) {
+    const rows = this.db.prepare("SELECT id, company, opp_key FROM recommendation_log WHERE voided = 0").all(); let n = 0;
+    this.#tx(() => { for (const r of rows) if (pred(r)) { this.db.prepare("UPDATE recommendation_log SET voided = 1 WHERE id = ?").run(r.id); n++; } });
+    return n;
   }
 
   // ---- one-time import of the earlier JSON files ----

@@ -1,4 +1,6 @@
 // Google News RSS per publication, plus best-effort article text retrieval. No dependencies.
+// Set HTTPS_PROXY / HTTP_PROXY (and NODE_USE_ENV_PROXY=1 on Node ≥ 24) in .env to route these requests through a proxy.
+import { detectWire } from "./origins.mjs";
 
 const UA = "Mozilla/5.0 (compatible; DensityTrendBCG/1.0; news research)";
 const NAMED = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", ndash: "–", mdash: "—", hellip: "…" };
@@ -120,8 +122,8 @@ export async function fetchArticleBody(article) {
   try {
     const real = await resolveGoogleUrl(article.url);
     const text = extractArticleText(await getText(real, { timeout: 20000 }));
-    if (text.length > 400) return { text, basis: "full-text", resolvedUrl: real };
-    return { text: "", basis: "headline", resolvedUrl: real };
+    if (text.length > 400) return { text, basis: "full-text", resolvedUrl: real, wire: detectWire(text) };
+    return { text: "", basis: "headline", resolvedUrl: real, wire: null };
   } catch (e) {
     return { text: "", basis: "headline", error: String(e.message || e) };
   }
