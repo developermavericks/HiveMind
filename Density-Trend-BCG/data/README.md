@@ -19,3 +19,15 @@ The app keeps its data in a SQLite database, `data/hivemind.db`. That file is no
 To add more, set `ANTHROPIC_API_KEY` and use the dashboard's Run button (or `node src/cli.mjs run`). New stories are added to the database and stories already in it are not re-read.
 
 Contents are headlines, links and LLM-written summaries only; no article body text is stored. Readings are model judgement, not verified facts. Check publisher and Google News terms before sharing beyond your team.
+
+## Full sample database (2026-10-30)
+
+`hivemind.sample.db.gz` is a copy of the working database from 2026-10-30 (about 20,400 stories with their readings, topics, print-edition matches and the Leadership data), gzipped (44 MB). To use it instead of the small JSON snapshot:
+
+```
+cd Density-Trend-BCG
+gunzip -k data/hivemind.sample.db.gz && mv data/hivemind.sample.db data/hivemind.db    # Windows: 7-Zip, or: node -e "require('fs').writeFileSync('data/hivemind.db', require('zlib').gunzipSync(require('fs').readFileSync('data/hivemind.sample.db.gz')))"
+node src/cli.mjs serve        # the first account you create is the administrator
+```
+
+It is sanitized: user accounts, sessions and login history are removed (the app shows first-run account setup), the journalist contact list is removed, and the article text of the print editions and the text excerpts of online pieces are cleared (headlines, authors, kinds and angle matches are kept). It replaces the earlier 72 MB `hivemind.sample.db`.
