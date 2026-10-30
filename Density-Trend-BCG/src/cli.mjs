@@ -8,41 +8,33 @@
 //     add topic labels / content type / pathways to stories read earlier (one small LLM call each; never re-reads)
 // node src/cli.mjs consolidate
 //     merge duplicate brackets the model added
-import { readFileSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { parseEnv } from "node:util";
+import { readFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchPublication, fetchArticleBody } from "./gnews.mjs";
 import { clusterArticles } from "./cluster.mjs";
-import { Reader } from "./llm.mjs";
+import { Reader, budgetGuard } from "./llm.mjs";
 import { BracketRegistry } from "./brackets.mjs";
-import { Store, dayStart, DAY_MS } from "./db.mjs";
+import { Store, dayStart, dayOf, DAY_MS } from "./db.mjs";
 import { junkMatcher, dedupePass } from "./quality.mjs";
 import { entityId } from "./entities.mjs";
 import { TopicRegistry } from "./topics.mjs";
 import { Integrations } from "./integrations.mjs";
 import { detectSystem, machineId } from "./system.mjs";
+import { ingest as ocrIngest, assemble as ocrAssemble, classify as ocrClassify, findAuthors as ocrAuthors, fixTitles as ocrTitles, matchAngles as ocrMatch } from "./ocrjobs.mjs";
+import { pollSections, candidates as onlineCandidates, confirm as onlineConfirm, matchOnline, capLeft } from "./online.mjs";
+import { CompanyStore } from "./companies.mjs";
+import { registryCache } from "./state.mjs";
+import { SourceRegistry } from "./origins.mjs";
+import { Analytics } from "./analytics.mjs";
+import { enforceTls } from "./tls.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-// Node reads NODE_USE_ENV_PROXY only at startup, so a proxy configured in .env would be ignored. If .env asks for it and
-// this process wasn't started with it, relaunch once with the .env values in place (NO_PROXY keeps Anthropic calls direct).
-{
-  const envPath = join(root, ".env");
-  if (!process.env.NODE_USE_ENV_PROXY && !process.env.HIVEMIND_REEXEC && existsSync(envPath)) {
-    const parsed = parseEnv(readFileSync(envPath, "utf8"));
-    if (parsed.NODE_USE_ENV_PROXY) {
-      // Only Google News needs the proxy. The APIs below are refused from many proxy exit IPs (Anthropic answers 403 "Request not
-      // allowed"), so they are ALWAYS kept direct. The shell may already define its own NO_PROXY, so merge rather than let either win.
-      let publishers = []; try { publishers = JSON.parse(readFileSync(join(root, "config", "publications.json"), "utf8")).map((p) => p.domain).filter(Boolean); } catch { /* none */ }
-      const direct = ["api.anthropic.com", "api.groq.com", "google.serper.dev", "serpapi.com", "api.twitter.com", "api.x.com", "cloudfunctions.net", "localhost", "127.0.0.1", ...publishers];
-      const noProxy = [...new Set([process.env.NO_PROXY, process.env.no_proxy, parsed.NO_PROXY, ...direct].flatMap((v) => String(v ?? "").split(",")).map((h) => h.trim()).filter(Boolean))].join(",");
-      const r = spawnSync(process.execPath, process.argv.slice(1), { stdio: "inherit", env: { ...parsed, ...process.env, NODE_USE_ENV_PROXY: parsed.NODE_USE_ENV_PROXY, NO_PROXY: noProxy, no_proxy: noProxy, HIVEMIND_REEXEC: "1" } });
-      process.exit(r.status ?? 1);
-    }
-  }
-}
+// No proxy for general traffic: Google News polling, the model APIs and everything else connect directly. A proxy is used for exactly one thing,
+// the retry of an article's text that could not be fetched directly (src/gnews.mjs, src/proxyfetch.mjs). The earlier behaviour, which re-launched this
+// program with NODE_USE_ENV_PROXY so that every request went through the proxy, was removed on purpose.
 try { process.loadEnvFile?.(join(root, ".env")); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+enforceTls(); // certificate checking stays on, whatever the machine's environment says
 const readJson = (p) => JSON.parse(readFileSync(join(root, p), "utf8"));
 const DATA = join(root, "data");
 const BRACKETS = join(DATA, "brackets-v3.json");
@@ -57,14 +49,19 @@ function openStore() {
 
 // Background jobs obey the same on/off switches, provider order and Ollama fallback as the dashboard, and record
 // usage and failures (credit exhaustion included) where the Settings page can show them.
-function makeReader(bcg, registry, topics, store) {
+function makeReader(bcg, registry, topics, store, extra = {}) {
   const integrations = new Integrations({ root, store });
+  if (!integrations.enabled("proxy")) process.env.HIVEMIND_NO_PROXY = "1"; // the Settings switch: no article-text retry through the proxy
   return new Reader(bcg, registry, topics, {
-    integrations,
+    integrations, groqOnly: !!extra.groqOnly,
     settings: () => store.getJson(`llm.settings.${machineId()}`, { primary: "anthropic", fallback: true, ollamaModel: null }),
     onEvent: (name, ev) => integrations.recordEvent(name, ev),
     onUsage: (name, u) => store.addUsage(name, u),
     routing: readJson("config/hivemind.json").routing ?? {},
+    models: readJson("config/hivemind.json").models ?? {},
+    effort: readJson("config/hivemind.json").effort ?? {},
+    routingNoClaude: readJson("config/hivemind.json").routingNoClaude ?? {},
+    overBudget: budgetGuard(store, readJson("config/hivemind.json"), () => dayOf(Date.now())),
   });
 }
 // The last line a job prints: the server reads it into the job log (Settings -> Logs).
@@ -119,18 +116,33 @@ async function run(opts) {
   const reader = makeReader(bcg, registry, topics, store);
   console.log(`LLM: ${await reader.detect()}   (${registry.size} brackets in the taxonomy, ${store.readingCount()} readings already in the database)`);
 
+  // The run is recorded from the first second, so the dashboard shows it while Google News is still being polled (it used to appear only after the
+  // polling, about a minute in). Each publication polled is a heartbeat. The counts are filled in below; a run that fails before then leaves no trace.
+  const runId = store.startRun({ model: reader.label, headlines: 0, publications: pubs.length, total: 0, targetDate: date, perPublication: [] });
+  const abandon = (e) => { try { store.discardRun(runId); } catch { /* nothing to remove */ } throw e; };
   console.log(`Polling Google News for ${pubs.length} publications (${date ? `the day ${date}` : `last ${hours}h`})…`);
   const polled = await pool(pubs, 4, async (p) => {
-    try { const items = await fetchPublication(p, { hours, perPub, date }); console.log(`  ${p.name.padEnd(26)} ${items.length}`); return items; }
-    catch (e) { console.warn(`  ${p.name.padEnd(26)} FAILED: ${e.message}`); return Object.assign([], { available: 0 }); }
+    try { const items = await fetchPublication(p, { hours, perPub, date }); console.log(`  ${p.name.padEnd(26)} ${items.length}`); store.progressRun(runId, 0); return items; }
+    catch (e) { console.warn(`  ${p.name.padEnd(26)} FAILED: ${e.message}`); store.progressRun(runId, 0); return Object.assign([], { available: 0 }); }
   });
   const articles = polled.flat();
-  if (!articles.length) throw new Error("No articles retrieved from any publication.");
+  if (!articles.length) abandon(new Error("No articles retrieved from any publication."));
+  // The newspapers' opinion pages (the same kind of Google News query, no model): what is found there is recorded, and the stories already
+  // collected that appear there are marked as opinion. With online.sectionRead the entries not collected otherwise also join the stories to read.
+  const onlineCfg = readJson("config/hivemind.json").online ?? {};
+  let sectionItems = [];
+  if (onlineCfg.sections !== false) {
+    try {
+      sectionItems = await pollSections(pubs, { hours, date, log: (m) => console.log(m) });
+      console.log(`  opinion pages: ${sectionItems.length} entries, ${store.putSectionPieces(sectionItems)} new`);
+      if (onlineCfg.sectionRead === true) { const have = new Set(articles.map((a) => a.url)); const extra = sectionItems.filter((s) => !have.has(s.url)); articles.push(...extra); console.log(`  ${extra.length} opinion-page entries added to the stories to read`); }
+    } catch (e) { console.warn(`  opinion pages skipped: ${e.message}`); }
+  }
   let clusters = clusterArticles(articles).sort((a, b) => b.outlets.length - a.outlets.length || b.publishedAt - a.publishedAt);
   // --window HH:MM-HH:MM (with --date) keeps only stories published in that part of the day: used to fill a collection gap without re-reading the whole day.
   if (opts.window) {
     const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(String(opts.window));
-    if (!m || date === null) throw new Error('--window needs --date and the form HH:MM-HH:MM, e.g. --date 2026-10-26 --window 03:00-04:00');
+    if (!m || date === null) abandon(new Error('--window needs --date and the form HH:MM-HH:MM, e.g. --date 2026-10-26 --window 03:00-04:00'));
     const from = dayStart(date) + (+m[1] * 60 + +m[2]) * 60e3, to = dayStart(date) + (+m[3] * 60 + +m[4]) * 60e3;
     const before = clusters.length;
     clusters = clusters.filter((c) => c.publishedAt >= from && c.publishedAt < to);
@@ -145,10 +157,8 @@ async function run(opts) {
 
   // Stories and headlines are stored before reading, so they are already filed under their day.
   const keys = store.upsertClusters(clusters);
-  const runId = store.startRun({
-    model: reader.label, headlines: articles.length, publications: pubs.length, total: clusters.length, targetDate: date,
-    perPublication: pubs.map((p, i) => ({ name: p.name, available: polled[i].available ?? 0, polled: polled[i].length })),
-  });
+  if (sectionItems.length) { try { store.linkSectionPieces(); } catch (e) { console.warn(`  linking opinion pages failed: ${e.message}`); } }
+  store.planRun(runId, { headlines: articles.length, total: clusters.length, perPublication: pubs.map((p, i) => ({ name: p.name, available: polled[i].available ?? 0, polled: polled[i].length })) });
 
   let fresh = 0, failed = 0, finished = 0, lastFlush = 0, consolidating = null, knownBrackets = registry.size;
   const flush = (final = false) => {
@@ -175,7 +185,7 @@ async function run(opts) {
   const bodies = new Map();
   if (wantFull) {
     await pool(todo, 8, async (i) => { bodies.set(i, await fetchArticleBody(clusters[i])); });
-    console.log(`  article text fetched for ${[...bodies.values()].filter((b) => b.basis === "full-text").length} of ${todo.length} stories`);
+    console.log(`  article text fetched for ${[...bodies.values()].filter((b) => b.basis === "full-text").length} of ${todo.length} stories (${[...bodies.values()].filter((b) => b.viaProxy).length} only after retrying through the proxy)`);
   }
   const batchSize = Math.max(1, Math.min(8, +opts.batch || cfgAll.reading?.batchSize || 4));
   const withText = todo.filter((i) => bodies.get(i)?.basis === "full-text"), noText = todo.filter((i) => bodies.get(i)?.basis !== "full-text");
@@ -225,6 +235,95 @@ async function run(opts) {
 
 // Label stories that were read before topic labels existed (topics, content type, entities, causal pathways).
 // It never re-reads a story or changes its impact reading. One small LLM call per story; resumable (labelled stories are skipped).
+// A consistent copy of the whole database (safe while the server runs), kept under data/backups/, newest N kept. Meant to run on a schedule.
+async function backup(opts) {
+  const store = openStore(), dir = join(DATA, "backups"), keep = Math.max(1, +opts.keep || 7);
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, `hivemind-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.db`);
+  rmSync(dest, { force: true }); // VACUUM INTO refuses to overwrite, and a second backup the same day replaces the first
+  store.backup(dest);
+  const old = readdirSync(dir).filter((f) => /^hivemind-\d{8}\.db$/.test(f)).sort().reverse().slice(keep);
+  for (const f of old) rmSync(join(dir, f), { force: true });
+  console.log(`Backup written: ${dest} (${(statSync(dest).size / 1048576).toFixed(1)} MB); keeping the newest ${keep}${old.length ? `, removed ${old.length} older` : ""}`);
+  store.close();
+}
+
+// Print-edition (OCR) articles: download the editions, find the authored / opinion pieces, match them to the suggested angles.
+// Everything is saved in the database (ocr_articles, ocr_angle_matches) and the raw downloads in data/ocr_archive/.
+async function ocr(opts) {
+  const bcg = readJson("config/bcg.json"), cfg = readJson("config/hivemind.json"), oc = cfg.ocr ?? {};
+  const store = openStore();
+  const today = dayOf(Date.now());
+  const to = opts.to || today, from = opts.from || (oc.startDate ?? dayOf(Date.parse(to + "T00:00:00") - (oc.days ?? 9) * DAY_MS));
+  console.log(`Print editions ${from} to ${to}`);
+  let ing = { editions: 0, articles: 0, added: 0 };
+  if (!opts["no-fetch"]) {
+    ing = await ocrIngest({ store, from, to, dir: join(DATA, "ocr_archive"), refresh: !!opts.refresh, log: (m) => console.log(m) });
+    console.log(`Downloaded ${ing.editions} editions: ${ing.articles} articles (${ing.added} new)`);
+  }
+  let cls = null, au = null, mt = null;
+  if (!opts["no-classify"]) {
+    // The print-edition pipeline uses Groq only. Claude is used only when asked for with --claude (or ocr.allowClaude in the config):
+    // without that, a Groq failure is an error and never a silent Claude call.
+    const groqOnly = !(opts.claude || oc.allowClaude === true);
+    const reader = makeReader(bcg, loadRegistry(), null, store, { groqOnly });
+    console.log(`LLM: ${await reader.detect()}`);
+    const conc = +opts.concurrency || 4, log = (m) => console.log(m);
+    // Articles the OCR cut into columns are put back together first, so the title, the writer and the whole argument are judged as one piece.
+    // --reassemble undoes an earlier assembly (every merged article is dropped, its parts become ordinary blocks again) and does it afresh
+    if (opts.reassemble) { const rs = store.ocrResetAssembly(); console.log(`Reassembling: dropped ${rs.merged} assembled articles, released ${rs.parts} blocks to be read again`); }
+    const asm = await ocrAssemble({ store, reader, concurrency: conc, log });
+    console.log(`Page layout: looked at ${asm.pages} pages, put ${asm.groups} articles back together from ${asm.parts} blocks (${asm.failed} pages failed)`);
+    cls = await ocrClassify({ store, reader, batchSize: oc.batchSize ?? 12, concurrency: conc, limit: +opts.limit || 1e9, model: reader.groqOk && (groqOnly || (cfg.routing?.ocrClassify ?? "claude") === "groq") ? reader.groqModel : reader.model, log });
+    console.log(`Judged ${cls.judged} of ${cls.todo} candidate articles: ${cls.authored} opinion/analysis (${cls.failed} failed)`);
+    // The first judgement often leaves the writer empty; a second pass reads just the start and end of each piece for the printed name.
+    au = await ocrAuthors({ store, reader, concurrency: conc, log });
+    console.log(`Writer names: looked at ${au.checked} authored pieces, named ${au.named} (${au.checked - au.named} unsigned or desk credits, ${au.failed} failed)`);
+    // Headlines the OCR got wrong (a section label, a name, a sentence fragment) are replaced by the article's real title; the original is kept.
+    const tt = await ocrTitles({ store, reader, concurrency: conc, log });
+    console.log(`Headlines: checked ${tt.looked} authored pieces, ${tt.weak} looked wrong: ${tt.printed} real title found in the text, ${tt.generated} written from the text, ${tt.kept} left as they were (${tt.failed} failed)`);
+    if (!opts["no-match"]) {
+      const registryFile = registryCache(BRACKETS, readJson("config/brackets.seed.json")), seedRegistry = new BracketRegistry(null, readJson("config/brackets.seed.json"));
+      const companies = new CompanyStore(join(DATA, "companies")), pubs = readJson("config/publications.json");
+      const analytics = new Analytics({ store, registry: () => registryFile.get() ?? seedRegistry, sources: new SourceRegistry(pubs), cfg, companies, reader, pubs });
+      mt = await ocrMatch({ store, reader, analytics, companyId: opts.company || "bcg", windowDays: oc.windowDays ?? 7, minFit: oc.minFit ?? 0.4, rematch: !!opts.rematch, concurrency: conc, log });
+      console.log(mt.skipped ? `Angle matching skipped: ${mt.skipped}` : `Matched ${mt.matched} of ${mt.authored} authored articles to a suggested angle (${mt.shortlisted} sent to the model, ${mt.failed} failed)`);
+    }
+  }
+  const c = store.ocrCounts();
+  console.log(`Database: ${c.total} print articles (${c.first} to ${c.last}), ${c.authored} authored (${c.opinion} opinion, ${c.analysis} analysis)`);
+  stats({ ...ing, ...(cls ? { judged: cls.judged, authored: cls.authored, named: au?.named ?? 0 } : {}), ...(mt && !mt.skipped ? { matched: mt.matched } : {}) });
+  store.close();
+}
+
+// Online opinion / analysis pieces: read the text of the ones the news reading labelled (or an opinion page listed), confirm the label,
+// find the writer, match each to the exact suggested angle. Groq only, only pieces not yet looked at, never more than the daily cap.
+async function online(opts) {
+  const bcg = readJson("config/bcg.json"), cfg = readJson("config/hivemind.json"), oc = cfg.online ?? {}, log = (m) => console.log(m);
+  const store = openStore();
+  const reader = makeReader(bcg, loadRegistry(), null, store, { groqOnly: !(opts.claude || cfg.ocr?.allowClaude === true) });
+  console.log(`LLM: ${await reader.detect()}`);
+  const registryFile = registryCache(BRACKETS, readJson("config/brackets.seed.json")), seedRegistry = new BracketRegistry(null, readJson("config/brackets.seed.json"));
+  const pubs = readJson("config/publications.json");
+  const analytics = new Analytics({ store, registry: () => registryFile.get() ?? seedRegistry, sources: new SourceRegistry(pubs), cfg, companies: new CompanyStore(join(DATA, "companies")), reader, pubs });
+  const cap = capLeft(store, opts.cap !== undefined && Number.isFinite(+opts.cap) ? +opts.cap : oc.dailyCap ?? 150), c = analytics.context(null);
+  let conf = { looked: 0, fetched: 0, noText: 0, confirmed: 0, demoted: 0, named: 0, failed: 0, viaProxy: 0 };
+  if (!c) console.log("No stories yet.");
+  else if (!cap) console.log(`Daily cap reached (${oc.dailyCap ?? 150} pieces read today); nothing more is read until tomorrow.`);
+  else {
+    const picks = onlineCandidates({ items: c.items, store, windowDays: cfg.ocr?.windowDays ?? 7, asOf: c.asOf, cap });
+    console.log(`${picks.length} online opinion/analysis pieces to read (cap ${cap} left today)`);
+    conf = await onlineConfirm({ store, reader, picks, concurrency: +opts.concurrency || 6, log });
+    console.log(`Online pieces: read ${conf.fetched} of ${conf.looked} (${conf.noText} text not available, ${conf.viaProxy} only after the proxy retry): ${conf.confirmed} confirmed, ${conf.demoted} turned out to be reported news, ${conf.named} writers named (${conf.failed} failed)`);
+  }
+  const mt = opts["no-match"] ? null : await matchOnline({ store, reader, analytics, companyId: opts.company || "bcg", minFit: cfg.ocr?.minFit ?? 0.4, log });
+  if (mt) console.log(mt.skipped ? `Angle matching skipped: ${mt.skipped}` : `Online pieces: matched ${mt.matched} of ${mt.pieces} to a suggested angle (${mt.shortlisted} sent to the model, ${mt.failed} failed)`);
+  const st = store.onlineStats("0000");
+  console.log(`Database: ${st.checked} online pieces looked at (${st.authored} opinion/analysis, ${st.named} with a writer), ${st.sections} opinion-page entries`);
+  stats({ ...conf, ...(mt && !mt.skipped ? { matched: mt.matched } : {}) });
+  store.close();
+}
+
 async function enrich(opts) {
   const bcg = readJson("config/bcg.json");
   const store = openStore();
@@ -349,11 +448,12 @@ async function fulltext(opts) {
   const limit = Math.min(+opts.limit || ft.perPass || 120, left);
   const todo = limit > 0 ? store.fulltextCandidates({ limit, maxTries: ft.maxTries ?? 2, retryAfterMs: (ft.retryAfterHours ?? 12) * 3600e3 }) : [];
   console.log(`${store.headlineOnlyCount()} stories were read from the headline only; trying ${todo.length} now (daily allowance left: ${left})`);
-  let upgraded = 0, blocked = 0, failed = 0;
+  let upgraded = 0, blocked = 0, failed = 0, proxied = 0;
   await pool(todo, 4, async (s) => {
     store.addUsage("fulltext", { calls: 1 });
     try {
       const body = await fetchArticleBody({ url: s.url });
+      if (body.viaProxy) proxied++;
       if (body.basis !== "full-text") { blocked++; store.noteFulltextTry(s.key, body.error ? "fetch-error" : "short-or-blocked"); return; }
       const arts = store.articlesOf(s.key);
       const cluster = { title: s.title, url: s.url, snippet: s.snippet, outlets: [...new Set(arts.map((a) => a.outlet))], articles: arts };
@@ -365,7 +465,7 @@ async function fulltext(opts) {
       store.noteFulltextTry(s.key, "upgraded"); upgraded++;
     } catch (e) { failed++; store.noteFulltextTry(s.key, "error"); }
   });
-  console.log(`Upgraded ${upgraded} stories to full text (${blocked} paywalled or too short, ${failed} failed)`);
+  console.log(`Upgraded ${upgraded} stories to full text (${blocked} paywalled or too short, ${failed} failed; ${proxied} needed the proxy after a failed direct fetch)`);
   stats({ upgraded, blocked, failed, tried: todo.length, remainingHeadlineOnly: store.headlineOnlyCount() });
   store.close();
 }
@@ -411,6 +511,9 @@ const opts = parseArgs(rest);
 try {
   if (cmd === "run") await run(opts);
   else if (cmd === "enrich") await enrich(opts);
+  else if (cmd === "backup") await backup(opts);
+  else if (cmd === "ocr") await ocr(opts);
+  else if (cmd === "online") await online(opts);
   else if (cmd === "sentiment") await sentiment(opts);
   else if (cmd === "topics-merge") await topicsMerge(opts);
   else if (cmd === "fulltext") await fulltext(opts);
@@ -422,8 +525,13 @@ try {
   }
   else if (cmd === "serve") {
     const { serve } = await import("./server.mjs");
-    const scheduleMinutes = +opts.schedule || +process.env.HIVEMIND_SCHEDULE_MINUTES || null; // e.g. 60 = collect hourly while the server runs
-    await serve({ root, bcg: readJson("config/bcg.json"), port: +opts.port || 8788, scheduleMinutes });
+    // --no-auto: serve the dashboard only. No scheduled collection and no start-up follow-ups (labelling, topic checks, matching), so nothing
+    // runs or costs anything until someone presses a button.
+    const auto = !opts["no-auto"] && process.env.HIVEMIND_AUTO !== "0"; // HIVEMIND_AUTO=0 is the same as --no-auto, for containers
+    const scheduleMinutes = auto ? +opts.schedule || +process.env.HIVEMIND_SCHEDULE_MINUTES || null : null; // e.g. 60 = collect hourly while the server runs
+    const server = await serve({ root, bcg: readJson("config/bcg.json"), port: +opts.port || +process.env.PORT || 8788, scheduleMinutes, autoSync: auto });
+    // A container is stopped with SIGTERM: stop taking requests, stop the background jobs and close the database cleanly, then exit.
+    for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => { console.log(`${sig}: shutting down`); server.close(() => process.exit(0)); server.closeAllConnections?.(); setTimeout(() => process.exit(0), 8000).unref(); });
   }
-  else { console.error("usage: run | enrich | sentiment | topics-merge | fulltext | consolidate | serve"); process.exit(2); }
+  else { console.error("usage: run | enrich | ocr | online | sentiment | topics-merge | fulltext | consolidate | backup | serve"); process.exit(2); }
 } catch (e) { console.error(`Error: ${e.message}`); process.exit(1); }

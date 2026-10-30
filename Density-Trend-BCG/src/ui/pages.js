@@ -150,47 +150,156 @@ async function pgSources(el) {
       <h3 style="margin-top:14px">Run history</h3><div class="tw" style="max-height:280px"><table class="t"><thead><tr><th>Started</th><th>Scope</th><th class="r">Headlines</th><th class="r">Stories</th><th>Result</th></tr></thead><tbody>${s.runs.map((r) => `<tr><td class="small">${dt(r.startedAt)}</td><td class="small">${r.targetDate ? fmtDay(r.targetDate) : "last 24h"}</td><td class="r num">${n0(r.headlines)}</td><td class="r num">${n0(r.done)}/${n0(r.total)}</td><td class="small">${r.finishedAt ? `<span class="pill p-ok">done${r.durationMin ? ` · ${Math.round(r.durationMin)} min` : ""}</span>` : `<span class="pill p-muted">unfinished</span>`}${r.failedSources.length ? ` <span class="pill p-bad" title="${esc(r.failedSources.join(", "))}">${r.failedSources.length} source(s) returned nothing</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="mute">No runs recorded.</td></tr>`}</tbody></table></div></div></section>`;
 }
 
-// ---------------------------------------------------------------- Authors & briefs
-async function pgJournalists(el) {
-  const f = (S.jf ??= { q: "", beat: "", publication: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
+// ---------------------------------------------------------------- Leadership
+// One page for leaders: what is trending and why, what people are writing about it (print and online), what nobody has written, what is next.
+// Everything comes from /api/leadership, which is computed from the database: opening this page makes no model call and no web request.
+async function pgLeadership(el) {
+  // The page is fetched once and kept for a minute: switching tabs only swaps the list, with no request and no redraw of the rest.
+  const C = (S.ld ??= { data: null, at: 0, origins: new Map() });
+  if (!C.data || Date.now() - C.at > 60e3 || C.mode !== S.opp.mode) {
+    if (!el.firstElementChild) el.innerHTML = '<div class="skel" style="height:96px"></div><div class="skel" style="height:360px;margin-top:16px"></div>';
+    C.data = await api("/api/leadership?mode=" + encodeURIComponent(S.opp.mode)); C.at = Date.now(); C.mode = S.opp.mode; C.origins.clear();
+  }
+  const L = C.data;
+  if (L.empty) { el.innerHTML = '<div class="empty"><h3>No data yet</h3><p>The Leadership view appears once the first collection has finished.</p></div>'; return; }
+  const c = L.counts, o = L.online;
+  const ageH = (h) => (h < 48 ? Math.round(h) + " h ago" : Math.round(h / 24) + " days ago");
+  const link = (t, u) => (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(t) + "</a>" : esc(t));
+  // the chip is the count of pieces; clicking it lists them all
+  const chip = (r) => (r.print + r.online ? '<button type="button" class="pill p-muted" data-pieces="' + esc(r.key) + '" style="cursor:pointer;white-space:nowrap;border:0" title="Show all ' + (r.print + r.online) + ' pieces">' + r.print + " print · " + r.online + " online</button>" : '<span class="small mute" style="white-space:nowrap">none yet</span>');
+  // "N independent sources": opens the sources behind it, each with its articles as links (loaded when opened, then kept)
+  const sources = (r, open) => (r.sources ? '<details class="ldsrc" data-key="' + esc(r.labelKey) + '"' + (open ? " open" : "") + ' style="margin-top:6px"><summary class="small" style="cursor:pointer;color:var(--accent,#2563eb)">' + r.sources + ' independent sources</summary><div class="ldsrc-body small mute" style="margin:6px 0 0 4px">Loading…</div></details>' : "");
+  const row = (r, { trigger = false, open = false } = {}) =>
+    '<div style="display:flex;gap:16px;justify-content:space-between;align-items:flex-start;padding:16px 0;border-top:1px solid var(--line)"><div style="min-width:0;flex:1">' +
+    '<div style="font-weight:600;font-size:15px">' + esc(r.topic) + ' <span class="mute" style="font-weight:400">· ' + esc(r.sector) + "</span></div>" +
+    '<div class="small" style="margin-top:3px">' + esc(clip(r.angle || "", 130)) + "</div>" +
+    '<div class="small mute" style="margin-top:5px">' + esc(r.why || "momentum building") + "</div>" +
+    (trigger && r.trigger ? '<div class="small mute" style="margin-top:3px">Set off by ' + link(clip(r.trigger.title, 80), r.trigger.url) + " · " + ageH(r.trigger.ageHours) + (r.trigger.verified ? "" : " · unverified") + "</div>" : "") +
+    sources(r, open) + "</div>" + chip(r) + "</div>";
+  const empty = (t) => '<p class="small mute" style="margin:18px 0 6px">' + t + "</p>";
+  const TABS = [
+    ["trending", "Trending now", L.top.length, "The highest-scoring rising angles and what set them off.", () => L.top.map((r) => row(r, { trigger: true })).join("") || empty("Nothing is rising right now.")],
+    ["written", "Written about", c.written, "Trending angles that opinion and analysis writers have already taken up, most written first.", () => L.written.map((r) => row(r)).join("") || empty("No trending angle has an opinion or analysis piece yet.")],
+    ["open", "Not yet written", c.open, "Trending, but no opinion or analysis piece found in print or online. Open “independent sources” to see every source and its articles.", () => L.open.map((r) => row(r)).join("") || empty("Every trending angle has at least one piece.")],
+    ["next", "Next up", L.next.length, "Emerging or speeding up: likely to be bigger soon. Open “independent sources” to see every source and its articles.", () => L.next.map((r) => row(r)).join("") || empty("No angle is clearly accelerating.")],
+    ["hot", "Hot right now", L.hot.length, "Trending angles already checked against the wider web: the web articles found, then open “independent sources” for every source and article of ours.", () => L.hot.map((r) => '<div style="padding:16px 0;border-top:1px solid var(--line)"><div style="font-weight:600;font-size:15px">' + esc(r.topic) + ' <span class="mute" style="font-weight:400">· ' + esc(r.sector) + '</span></div><div class="small mute" style="margin-top:3px">' + r.web.total + " web articles from " + r.web.outlets + " outlets" + (r.web.outside ? ", " + r.web.outside + " outside our sources" : "") + " · checked " + ago(r.web.at) + "</div>" + r.web.top.map((t) => '<div class="small" style="margin-top:4px">' + link(clip(t.title, 110), t.link) + ' <span class="mute">· ' + esc(t.source || "") + "</span></div>").join("") + sources(r, false) + "</div>").join("") || empty("No web check has been run for the current top angles.")],
+  ];
+  const draw = () => {
+    const cur = TABS.find((t) => t[0] === S.ldTab) ?? TABS[0];
+    S.ldTab = cur[0];
+    $$("#ldtab button", el).forEach((b) => b.classList.toggle("on", b.dataset.t === cur[0]));
+    $("#ldpanel", el).innerHTML = '<p class="small mute" style="margin:0 0 6px">' + cur[3] + "</p>" + cur[4]();
+    $$("details.ldsrc", el).forEach((d) => {
+      const fill = async () => {
+        const body = $(".ldsrc-body", d); if (d.dataset.done) return; d.dataset.done = "1";
+        let r = C.origins.get(d.dataset.key);
+        if (!r) { try { r = await api("/api/origins?key=" + encodeURIComponent(d.dataset.key)); C.origins.set(d.dataset.key, r); } catch (e) { body.textContent = e.message; return; } }
+        const when = (t) => new Date(t).toLocaleDateString([], { day: "numeric", month: "short" });
+        body.innerHTML = (r.origins ?? []).map((g) => '<div style="margin:0 0 10px"><div><b style="color:var(--text,inherit)">' + esc(g.name) + '</b> <span class="tiny">' + g.stories + " stor" + (g.stories === 1 ? "y" : "ies") + "</span></div>" + (g.items?.length ? g.items : g.sample ?? []).map((x) => '<div style="margin:2px 0">' + link(x.title, x.url) + ' <span class="tiny">' + when(x.at) + "</span></div>").join("") + "</div>").join("") || "No sources found.";
+      };
+      d.addEventListener("toggle", () => { if (d.open) fill(); });
+      if (d.open) fill();
+    });
+  };
+  if (!$("#ldtab", el)) {
+    el.innerHTML =
+      '<details class="small mute" style="margin:0 0 14px"><summary style="cursor:pointer">How to read this page</summary><p style="margin:8px 0 0;max-width:760px">“Trending” means a topic is rising or emerging in the news right now. “Written about” means opinion or analysis pieces on that angle exist in the print editions or online in the last ' + L.windowDays + " days; “not yet written” means none were found in either. " +
+      (o.analyze ? "Reading the text of online pieces runs after each collection." : "Online pieces are counted from the news reading’s own labels until you read their text (button at the bottom).") + "</p></details>" +
+      '<div class="kpis"><div class="kpi"><div class="v num">' + n0(c.trending) + '</div><div class="l">Trending angles</div></div>' +
+      '<div class="kpi"><div class="v num">' + n0(c.written) + '</div><div class="l">Already written about</div><div class="s">' + n0(c.print) + " print · " + n0(c.online) + " online</div></div>" +
+      '<div class="kpi"><div class="v num">' + n0(c.open) + '</div><div class="l">Not yet written</div></div></div>' +
+      '<section class="card" style="margin-top:16px;padding:20px 24px"><div class="seg" id="ldtab" style="margin-bottom:12px">' + TABS.map((t) => '<button data-t="' + t[0] + '">' + t[1] + ' <span class="mute">' + t[2] + "</span></button>").join("") + '</div><div id="ldpanel"></div></section>' +
+      '<p class="small mute" style="margin:16px 4px 0">Online pieces: ' + n0(o.checked) + " read in the last 7 days (" + n0(o.authored) + " confirmed) · " + o.readToday + " of " + o.dailyCap + ' read today. <button class="btn ghost sm" id="ldAnalyse" style="margin-left:6px">Read online pieces now</button> <span class="mute">Groq only, only pieces not yet read, never more than the daily cap.</span></p>';
+    $$("#ldtab button", el).forEach((b) => (b.onclick = () => { S.ldTab = b.dataset.t; draw(); }));
+    $("#ldAnalyse").onclick = async () => {
+      try { await post("/api/job", { kind: "online" }); C.at = 0; toast("Reading online pieces… the page updates when it finishes (Settings → Logs shows progress)."); } catch (e) { toast(e.message); }
+    };
+  }
+  draw();
+}
+
+// ---------------------------------------------------------------- Authored articles & briefs
+// Opinion and analysis pieces from the print editions (src/ocr.mjs). Takes the place of the journalist directory, and keeps the brief approval queue.
+async function pgAuthored(el) {
+  const f = (S.af ??= { q: "", source: "", kind: "authored", matched: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
   const [st, L, B] = await Promise.all([
-    api("/api/journalists/status"),
-    api("/api/journalists?facets=1&limit=" + PER + "&offset=" + f.offset + "&q=" + enc(f.q) + "&beat=" + enc(f.beat) + "&publication=" + enc(f.publication)),
+    api("/api/authored/status"),
+    api("/api/authored?facets=1&limit=" + PER + "&offset=" + f.offset + "&q=" + enc(f.q) + "&source=" + enc(f.source) + "&kind=" + enc(f.kind) + "&matched=" + enc(f.matched)),
     api("/api/briefs"),
   ]);
-  const fc = L.facets, cov = fc.coverage, total = st.count || 1, bs = B.stats;
-  const decided = (bs.approved || 0) + (bs.rejected || 0) + (bs.needs_evidence || 0);
-  const pg = (st.pages && st.page ? Math.min(100, Math.round((100 * st.page) / st.pages)) : 0);
-  const pc = (n) => Math.round((100 * n) / total) + "%";
-  el.innerHTML = banner("info", "<b>How matching works.</b> Journalists come from the directory endpoint and are stored on this machine only. An opportunity is matched using only what each record states: declared beat, outlet, location and recent articles. Contact details are shown to you but never sent to the AI model, and nothing is ever sent to a journalist: outreach is a human decision.") +
-  '<div class="kpis"><div class="kpi"><div class="v num">' + n0(st.count) + '</div><div class="l">Journalists in directory</div><div class="s">' + (st.lastSync ? "synced " + ago(st.lastSync) : "not synced yet") + '</div></div>' +
-  '<div class="kpi"><div class="v num">' + pc(cov.beat) + '</div><div class="l">With a declared beat</div><div class="s">' + pc(cov.articles) + ' have recent articles</div></div>' +
-  '<div class="kpi"><div class="v num">' + pc(cov.email) + '</div><div class="l">With an email</div><div class="s">' + pc(cov.linkedin) + ' LinkedIn · ' + pc(cov.phone) + ' phone</div></div>' +
+  const c = st.counts, bs = B.stats, decided = (bs.approved || 0) + (bs.rejected || 0) + (bs.needs_evidence || 0);
+  const kindPill = (k) => '<span class="pill ' + (k === "opinion" ? "p-ok" : k === "analysis" ? "p-medium" : "p-muted") + '">' + esc(k) + '</span>';
+  const domId = (id) => "ad-" + String(id).replace(/\W+/g, "_");
+  el.innerHTML = banner("info", "<b>What this counts.</b> Opinion and analysis pieces read from the newspapers' print editions: a named writer's view or argument, an editorial, or an interpretive piece. Reported news does not count, even with a reporter's name on it. Each piece is matched to the suggested angle it takes up, and the number of pieces per angle is the headroom on the Opportunities page: <i>Nobody has written it</i> scores angles higher when fewer pieces exist, <i>Others have written it</i> scores them higher when more do.") +
+  (c.total ? "" : banner("warn", 'No print editions have been read yet. Run <span class="code">node src/cli.mjs ocr</span> to download them and find the authored pieces.')) +
+  '<div class="kpis"><div class="kpi"><div class="v num">' + n0(c.total) + '</div><div class="l">Print articles read</div><div class="s">' + esc(c.first || "–") + ' to ' + esc(c.last || "–") + '</div></div>' +
+  '<div class="kpi"><div class="v num">' + n0(c.authored) + '</div><div class="l">Authored pieces</div><div class="s">' + n0(c.opinion) + ' opinion · ' + n0(c.analysis) + ' analysis</div></div>' +
+  '<div class="kpi"><div class="v num">' + n0(c.matched) + '</div><div class="l">Matched to an angle</div><div class="s">' + n0(c.authored - c.matched) + ' take up no current angle</div></div>' +
   '<div class="kpi"><div class="v num">' + (bs.pending || 0) + '</div><div class="l">Briefs awaiting an editor</div><div class="s">' + (bs.approved || 0) + ' approved · ' + decided + ' decided</div></div></div>' +
-  '<section class="card" style="margin-bottom:16px"><div class="sec-h" style="margin:0"><div><h3>Directory sync</h3><p class="hint" style="margin:0">Source: <span class="code">' + esc(clip(st.url, 70)) + '</span>. Records are saved page by page; a failed sync keeps what it already stored.</p></div><button class="btn sm" id="jsync"' + (st.running ? " disabled" : "") + '>' + (st.running ? "Syncing…" : "Sync now") + '</button></div>' +
-  (st.running ? '<div class="bar" style="margin-top:10px"><i style="width:' + pg + '%"></i></div><p class="small mute" style="margin:6px 0 0">Page ' + st.page + (st.pages ? " of " + st.pages : "") + ' · ' + n0(st.saved) + ' of ' + n0(st.total) + ' records saved</p>' : "") +
-  (st.error ? '<p class="small" style="color:var(--bad);margin:8px 0 0">Last sync failed: ' + esc(st.error) + '</p>' : "") + '</section>' +
-  '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><div class="ctl"><input type="text" id="jq" placeholder="Search name, outlet, beat, city or article title…" value="' + esc(f.q) + '" style="max-width:320px">' +
-  '<label>Beat <select id="jbeat"><option value="">All</option>' + fc.beats.map((b) => '<option value="' + esc(b.v) + '"' + (b.v === f.beat ? " selected" : "") + '>' + esc(b.v) + ' (' + b.n + ')</option>').join("") + '</select></label>' +
-  '<label>Outlet <select id="jpub"><option value="">All</option>' + fc.publications.map((p) => '<option value="' + esc(p.v) + '"' + (p.v === f.publication ? " selected" : "") + '>' + esc(clip(p.v, 34)) + ' (' + p.n + ')</option>').join("") + '</select></label>' +
+  '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><div class="ctl"><input type="text" id="aq" placeholder="Search headline, writer or text…" value="' + esc(f.q) + '" style="max-width:320px">' +
+  '<label>Paper <select id="asrc"><option value="">All</option>' + st.sources.map((x) => '<option value="' + esc(x.source) + '"' + (x.source === f.source ? " selected" : "") + '>' + esc(x.source) + ' (' + (x.authored || 0) + ')</option>').join("") + '</select></label>' +
+  '<label>Kind <select id="akind">' + [["authored", "Opinion + analysis"], ["opinion", "Opinion only"], ["analysis", "Analysis only"], ["news", "Reported news (for checking)"]].map(([k, t]) => '<option value="' + k + '"' + (k === f.kind ? " selected" : "") + '>' + t + '</option>').join("") + '</select></label>' +
+  '<label>Angle <select id="amatch">' + [["", "Any"], ["1", "Takes up a suggested angle"], ["0", "No current angle"]].map(([k, t]) => '<option value="' + k + '"' + (k === f.matched ? " selected" : "") + '>' + t + '</option>').join("") + '</select></label>' +
   '<span class="mute small">' + n0(L.total) + ' match</span></div></div>' +
-  '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Journalist</th><th>Outlet</th><th>Beat</th><th>Location</th><th class="r">Articles</th><th>Contact</th></tr></thead><tbody>' +
-  (L.rows.map((j) => '<tr class="click" data-j="' + esc(j.id) + '"><td><span class="b">' + esc(j.name) + '</span><div class="tiny mute">' + esc(j.designation) + '</div></td><td class="small">' + esc(j.publication) + '</td><td class="small" style="max-width:260px">' + (esc(j.beat) || '<span class="mute">not declared</span>') + '</td><td class="small">' + esc([j.city, j.state].filter(Boolean).join(", ")) + '</td><td class="r num">' + j.articles.length + '</td><td class="tiny">' + contactLinks({ email: j.email, linkedin: j.linkedin, profile: j.profileUrl, phone: "" }) + '</td></tr>' +
-    '<tr class="jd" id="jd-' + esc(j.id) + '" style="display:none"><td colspan="6" style="background:var(--surface2)">' + (j.articles.length ? j.articles.map((a) => '<div class="story"><a class="h" href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.title) + '</a> <span class="mute tiny">' + esc((a.publishDate || "").slice(0, 10)) + (a.website ? " · " + esc(a.website) : "") + '</span>' + (a.summary ? '<div class="small mute">' + esc(a.summary) + '</div>' : "") + '</div>').join("") : '<span class="mute small">No recent articles on record.</span>') + (j.phone ? '<div class="tiny mute" style="margin-top:6px">Phone: ' + esc(j.phone) + '</div>' : "") + '</td></tr>').join("") || '<tr><td colspan="6" class="mute">' + (st.count ? "No journalist matches these filters." : "The directory is empty. Press Sync now.") + '</td></tr>') +
-  '</tbody></table></div><div class="ctl" style="padding:10px 16px;justify-content:space-between;border-top:1px solid var(--line)"><span class="small mute">Showing ' + (L.total ? f.offset + 1 : 0) + '–' + Math.min(L.total, f.offset + PER) + ' of ' + n0(L.total) + '</span><span><button class="btn ghost sm" id="jprev"' + (f.offset <= 0 ? " disabled" : "") + '>Previous</button> <button class="btn ghost sm" id="jnext"' + (f.offset + PER >= L.total ? " disabled" : "") + '>Next</button></span></div></div>' +
-  '<section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Pitch brief queue</h3><p class="hint">Open an opportunity to see its best-fit journalists and draft a brief. Every brief waits for an editor decision.</p></div><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Drafted</th><th>Opportunity</th><th>Headline</th><th>Pitch to</th><th>Status</th></tr></thead><tbody>' +
-  (B.briefs.map((b) => '<tr><td class="small">' + dt(b.createdAt) + '</td><td class="small">' + esc(b.sector) + ' × ' + esc(b.topic) + '</td><td class="b" style="max-width:340px">' + esc(b.brief.headline) + '</td><td class="small">' + esc(b.brief.generatedFor?.recipient?.name ?? "—") + '</td><td>' + statusPill(b.status) + '</td></tr>').join("") || '<tr><td colspan="5" class="mute">No briefs yet.</td></tr>') + '</tbody></table></div></section>';
+  '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Piece</th><th>Writer</th><th>Paper</th><th>Date</th><th>Kind</th><th>Suggested angle it takes up</th></tr></thead><tbody>' +
+  (L.rows.map((a) => '<tr class="click" data-a="' + esc(a.id) + '"><td style="max-width:380px"><span class="b">' + esc(a.headline) + '</span>' + titleTag(a) + (a.page ? '<div class="tiny mute">page ' + a.page + '</div>' : "") + '</td><td class="small" style="min-width:130px">' + (a.author ? '<b>' + esc(a.author) + '</b>' : '<span class="mute" title="No writer is printed: an unsigned editorial or a desk-written piece">unsigned</span>') + '</td><td class="small">' + esc(a.source) + '</td><td class="small">' + esc(a.date) + '</td><td>' + kindPill(a.kind) + '</td><td class="small" style="max-width:380px">' +
+      (a.matches.length ? a.matches.slice(0, 2).map((m) => '<div><b>' + esc(m.sector) + '</b>: ' + esc(clip(m.angle || "", 120)) + ' <span class="mute tiny">fit ' + Number(m.fit).toFixed(2) + '</span></div>').join("") : '<span class="mute">none</span>') + '</td></tr>' +
+    '<tr class="ad" id="' + domId(a.id) + '" style="display:none"><td colspan="6" style="background:var(--surface2)">' + (a.why ? '<div class="small"><b>Why it was judged ' + esc(a.kind) + ':</b> ' + esc(a.why) + '</div>' : "") + '<div class="small mute" style="margin-top:6px;white-space:pre-wrap">' + esc(a.excerpt) + (a.words > 150 ? " …" : "") + '</div><button class="btn sm" style="margin-top:8px" data-read="' + esc(a.id) + '">Read full article</button>' + (a.matches.length > 2 ? '<div class="small" style="margin-top:6px">' + a.matches.slice(2).map((m) => '<div><b>' + esc(m.sector) + '</b>: ' + esc(clip(m.angle || "", 160)) + '</div>').join("") + '</div>' : "") + '</td></tr>').join("") || '<tr><td colspan="6" class="mute" style="text-align:center;padding:22px">Nothing matches these filters.</td></tr>') +
+  '</tbody></table></div><div class="ctl" style="padding:10px 16px;justify-content:space-between;border-top:1px solid var(--line)"><span class="small mute">Showing ' + (L.total ? f.offset + 1 : 0) + '–' + Math.min(L.total, f.offset + PER) + ' of ' + n0(L.total) + '</span><span><button class="btn ghost sm" id="aprev"' + (f.offset <= 0 ? " disabled" : "") + '>Previous</button> <button class="btn ghost sm" id="anext"' + (f.offset + PER >= L.total ? " disabled" : "") + '>Next</button></span></div></div>' +
+  '<section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Brief queue</h3><p class="hint">Open an opportunity to see who has written about its angle and draft a brief. Every brief waits for an editor decision.</p></div><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Drafted</th><th>Opportunity</th><th>Headline</th><th>Window</th><th>Status</th></tr></thead><tbody>' +
+  (B.briefs.map((b) => '<tr><td class="small">' + dt(b.createdAt) + '</td><td class="small">' + esc(b.sector) + ' × ' + esc(b.topic) + '</td><td class="b" style="max-width:340px">' + esc(b.brief.headline) + '</td><td class="small">' + esc(b.brief.publication_window || "—") + '</td><td>' + statusPill(b.status) + '</td></tr>').join("") || '<tr><td colspan="5" class="mute">No briefs yet.</td></tr>') + '</tbody></table></div></section>';
 
   const again = () => { f.offset = 0; render(); };
-  let t; $("#jq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; again(); }, 350); };
-  $("#jbeat").onchange = (e) => { f.beat = e.target.value; again(); };
-  $("#jpub").onchange = (e) => { f.publication = e.target.value; again(); };
-  $("#jprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
-  $("#jnext").onclick = () => { f.offset += PER; render(); };
-  $$("tr[data-j]", el).forEach((r) => (r.onclick = (e) => { if (e.target.closest("a")) return; const d = $("#jd-" + r.dataset.j.replace(/"/g, "")); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
-  $("#jsync").onclick = async () => { try { await post("/api/journalists/sync", {}); toast("Sync started"); render(); } catch (e) { toast(e.message, 5000); } };
-  if (st.running) setTimeout(() => { if (S.tab === "journalists" && !document.activeElement?.matches("input,select,textarea")) render(); }, 2500);
+  let t; $("#aq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; again(); }, 350); };
+  $("#asrc").onchange = (e) => { f.source = e.target.value; again(); };
+  $("#akind").onchange = (e) => { f.kind = e.target.value; again(); };
+  $("#amatch").onchange = (e) => { f.matched = e.target.value; again(); };
+  $("#aprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
+  $("#anext").onclick = () => { f.offset += PER; render(); };
+  $$("tr[data-a]", el).forEach((r) => (r.onclick = () => { const d = document.getElementById(domId(r.dataset.a)); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
 }
+
+// JOURNALISTS DISABLED (kept for later): the journalist directory page that this replaced.
+// async function pgJournalists(el) {
+//   const f = (S.jf ??= { q: "", beat: "", publication: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
+//   const [st, L, B] = await Promise.all([
+//     api("/api/journalists/status"),
+//     api("/api/journalists?facets=1&limit=" + PER + "&offset=" + f.offset + "&q=" + enc(f.q) + "&beat=" + enc(f.beat) + "&publication=" + enc(f.publication)),
+//     api("/api/briefs"),
+//   ]);
+//   const fc = L.facets, cov = fc.coverage, total = st.count || 1, bs = B.stats;
+//   const decided = (bs.approved || 0) + (bs.rejected || 0) + (bs.needs_evidence || 0);
+//   const pg = (st.pages && st.page ? Math.min(100, Math.round((100 * st.page) / st.pages)) : 0);
+//   const pc = (n) => Math.round((100 * n) / total) + "%";
+//   el.innerHTML = banner("info", "<b>How matching works.</b> Journalists come from the directory endpoint and are stored on this machine only. An opportunity is matched using only what each record states: declared beat, outlet, location and recent articles. Contact details are shown to you but never sent to the AI model, and nothing is ever sent to a journalist: outreach is a human decision.") +
+//   '<div class="kpis"><div class="kpi"><div class="v num">' + n0(st.count) + '</div><div class="l">Journalists in directory</div><div class="s">' + (st.lastSync ? "synced " + ago(st.lastSync) : "not synced yet") + '</div></div>' +
+//   '<div class="kpi"><div class="v num">' + pc(cov.beat) + '</div><div class="l">With a declared beat</div><div class="s">' + pc(cov.articles) + ' have recent articles</div></div>' +
+//   '<div class="kpi"><div class="v num">' + pc(cov.email) + '</div><div class="l">With an email</div><div class="s">' + pc(cov.linkedin) + ' LinkedIn · ' + pc(cov.phone) + ' phone</div></div>' +
+//   '<div class="kpi"><div class="v num">' + (bs.pending || 0) + '</div><div class="l">Briefs awaiting an editor</div><div class="s">' + (bs.approved || 0) + ' approved · ' + decided + ' decided</div></div></div>' +
+//   '<section class="card" style="margin-bottom:16px"><div class="sec-h" style="margin:0"><div><h3>Directory sync</h3><p class="hint" style="margin:0">Source: <span class="code">' + esc(clip(st.url, 70)) + '</span>. Records are saved page by page; a failed sync keeps what it already stored.</p></div><button class="btn sm" id="jsync"' + (st.running ? " disabled" : "") + '>' + (st.running ? "Syncing…" : "Sync now") + '</button></div>' +
+//   (st.running ? '<div class="bar" style="margin-top:10px"><i style="width:' + pg + '%"></i></div><p class="small mute" style="margin:6px 0 0">Page ' + st.page + (st.pages ? " of " + st.pages : "") + ' · ' + n0(st.saved) + ' of ' + n0(st.total) + ' records saved</p>' : "") +
+//   (st.error ? '<p class="small" style="color:var(--bad);margin:8px 0 0">Last sync failed: ' + esc(st.error) + '</p>' : "") + '</section>' +
+//   '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><div class="ctl"><input type="text" id="jq" placeholder="Search name, outlet, beat, city or article title…" value="' + esc(f.q) + '" style="max-width:320px">' +
+//   '<label>Beat <select id="jbeat"><option value="">All</option>' + fc.beats.map((b) => '<option value="' + esc(b.v) + '"' + (b.v === f.beat ? " selected" : "") + '>' + esc(b.v) + ' (' + b.n + ')</option>').join("") + '</select></label>' +
+//   '<label>Outlet <select id="jpub"><option value="">All</option>' + fc.publications.map((p) => '<option value="' + esc(p.v) + '"' + (p.v === f.publication ? " selected" : "") + '>' + esc(clip(p.v, 34)) + ' (' + p.n + ')</option>').join("") + '</select></label>' +
+//   '<span class="mute small">' + n0(L.total) + ' match</span></div></div>' +
+//   '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Journalist</th><th>Outlet</th><th>Beat</th><th>Location</th><th class="r">Articles</th><th>Contact</th></tr></thead><tbody>' +
+//   (L.rows.map((j) => '<tr class="click" data-j="' + esc(j.id) + '"><td><span class="b">' + esc(j.name) + '</span><div class="tiny mute">' + esc(j.designation) + '</div></td><td class="small">' + esc(j.publication) + '</td><td class="small" style="max-width:260px">' + (esc(j.beat) || '<span class="mute">not declared</span>') + '</td><td class="small">' + esc([j.city, j.state].filter(Boolean).join(", ")) + '</td><td class="r num">' + j.articles.length + '</td><td class="tiny">' + contactLinks({ email: j.email, linkedin: j.linkedin, profile: j.profileUrl, phone: "" }) + '</td></tr>' +
+//     '<tr class="jd" id="jd-' + esc(j.id) + '" style="display:none"><td colspan="6" style="background:var(--surface2)">' + (j.articles.length ? j.articles.map((a) => '<div class="story"><a class="h" href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.title) + '</a> <span class="mute tiny">' + esc((a.publishDate || "").slice(0, 10)) + (a.website ? " · " + esc(a.website) : "") + '</span>' + (a.summary ? '<div class="small mute">' + esc(a.summary) + '</div>' : "") + '</div>').join("") : '<span class="mute small">No recent articles on record.</span>') + (j.phone ? '<div class="tiny mute" style="margin-top:6px">Phone: ' + esc(j.phone) + '</div>' : "") + '</td></tr>').join("") || '<tr><td colspan="6" class="mute">' + (st.count ? "No journalist matches these filters." : "The directory is empty. Press Sync now.") + '</td></tr>') +
+//   '</tbody></table></div><div class="ctl" style="padding:10px 16px;justify-content:space-between;border-top:1px solid var(--line)"><span class="small mute">Showing ' + (L.total ? f.offset + 1 : 0) + '–' + Math.min(L.total, f.offset + PER) + ' of ' + n0(L.total) + '</span><span><button class="btn ghost sm" id="jprev"' + (f.offset <= 0 ? " disabled" : "") + '>Previous</button> <button class="btn ghost sm" id="jnext"' + (f.offset + PER >= L.total ? " disabled" : "") + '>Next</button></span></div></div>' +
+//   '<section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Pitch brief queue</h3><p class="hint">Open an opportunity to see its best-fit journalists and draft a brief. Every brief waits for an editor decision.</p></div><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Drafted</th><th>Opportunity</th><th>Headline</th><th>Pitch to</th><th>Status</th></tr></thead><tbody>' +
+//   (B.briefs.map((b) => '<tr><td class="small">' + dt(b.createdAt) + '</td><td class="small">' + esc(b.sector) + ' × ' + esc(b.topic) + '</td><td class="b" style="max-width:340px">' + esc(b.brief.headline) + '</td><td class="small">' + esc(b.brief.generatedFor?.recipient?.name ?? "—") + '</td><td>' + statusPill(b.status) + '</td></tr>').join("") || '<tr><td colspan="5" class="mute">No briefs yet.</td></tr>') + '</tbody></table></div></section>';
+
+//   const again = () => { f.offset = 0; render(); };
+//   let t; $("#jq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; again(); }, 350); };
+//   $("#jbeat").onchange = (e) => { f.beat = e.target.value; again(); };
+//   $("#jpub").onchange = (e) => { f.publication = e.target.value; again(); };
+//   $("#jprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
+//   $("#jnext").onclick = () => { f.offset += PER; render(); };
+//   $$("tr[data-j]", el).forEach((r) => (r.onclick = (e) => { if (e.target.closest("a")) return; const d = $("#jd-" + r.dataset.j.replace(/"/g, "")); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
+//   $("#jsync").onclick = async () => { try { await post("/api/journalists/sync", {}); toast("Sync started"); render(); } catch (e) { toast(e.message, 5000); } };
+//   if (st.running) setTimeout(() => { if (S.tab === "journalists" && !document.activeElement?.matches("input,select,textarea")) render(); }, 2500);
+// }
 
 // ---------------------------------------------------------------- Validation
 async function pgValidation(el) {

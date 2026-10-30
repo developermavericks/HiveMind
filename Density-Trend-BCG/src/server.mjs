@@ -2,11 +2,15 @@
 // authors, briefs, backtest), accepts company-sector uploads, and keeps matching new brackets against every company
 // while the pipeline runs. Also exposes the older /api/state used by the first dashboard.
 import { createServer } from "node:http";
+import { gzip, gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import { spawn as nodeSpawn } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync, createReadStream } from "node:fs";
 import { join, extname } from "node:path";
 import { parseSectors, slugify, CompanyStore, matchPending } from "./companies.mjs";
-import { Reader } from "./llm.mjs";
+import { Reader, budgetGuard } from "./llm.mjs";
+import { ocrDue, parseTime } from "./schedule.mjs";
 import { BracketRegistry } from "./brackets.mjs";
 import { buildState, registryCache } from "./state.mjs";
 import { buildBracketDensity } from "./density.mjs";
@@ -21,7 +25,8 @@ import { entityId } from "./entities.mjs";
 import { Integrations } from "./integrations.mjs";
 import { detectSystem, detectOllama, machineId } from "./system.mjs";
 import { buildQuery, fetchCounts, socialStats } from "./social.mjs";
-import { syncJournalists, DEFAULT_URL as JOURNALISTS_URL } from "./journalists.mjs";
+// JOURNALISTS DISABLED for now: the directory, its sync, matching and API are commented out. Re-enable by removing the comment markers.
+// import { syncJournalists, DEFAULT_URL as JOURNALISTS_URL } from "./journalists.mjs";
 import { refreshHot } from "./hot.mjs";
 import { dedupePass } from "./quality.mjs";
 import { usageReport } from "./usage.mjs";
@@ -30,7 +35,7 @@ import { createAuth, setSecurityHeaders } from "./auth.mjs";
 
 const MAX_BODY = 1_000_000;
 const LIVE_FRESH_MS = 90_000; // a run that hasn't touched the database for this long is treated as stopped
-const STATIC = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" };
+const STATIC = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".mp4": "video/mp4" };
 const DECISIONS = new Set(["approved", "rejected", "needs_evidence", "pending"]);
 
 function readBody(req) {
@@ -47,7 +52,7 @@ const dayParam = (u) => (/^\d{4}-\d{2}-\d{2}$/.test(u.searchParams.get("date") |
 const readJson = (p, fallback) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return fallback; } };
 
 // `spawn` is injectable so tests can check the Run button without launching a real pipeline.
-export async function serve({ root, bcg, port = 8788, log = console.log, spawn = nodeSpawn, scheduleMinutes = null, autoSync = true, auth = true }) {
+export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIND_HOST || "127.0.0.1", log = console.log, spawn = nodeSpawn, scheduleMinutes = null, autoSync = true, auth = true }) {
   try { process.loadEnvFile?.(join(root, ".env")); } catch (e) { if (e?.code !== "ENOENT") throw e; }
   const store = new Store(join(root, "data", "hivemind.db"));
   const imported = store.importLegacy(join(root, "data"));
@@ -80,6 +85,10 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     onEvent: (name, ev) => integrations.recordEvent(name, ev),
     onUsage: (name, u) => { try { store.addUsage(name, u); } catch { /* never break a call over a counter */ } },
     routing: cfg.routing ?? {},
+    models: cfg.models ?? {},
+    effort: cfg.effort ?? {},
+    routingNoClaude: cfg.routingNoClaude ?? {},
+    overBudget: budgetGuard(store, cfg, () => dayOf(Date.now())),
   });
   let llm = { ok: false, message: "" };
   try { llm = { ok: true, message: await reader.detect() }; } catch (e) { llm = { ok: false, message: e.message }; }
@@ -96,6 +105,8 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     "topic-merge": { cmd: "topics-merge", summary: /^Merged / },
     "entities-merge": { cmd: "entities-merge", summary: /^Merged \d+ duplicate entity/ },
     fulltext: { cmd: "fulltext", summary: /^Upgraded |^\d+ stories were read/ },
+    ocr: { cmd: "ocr", summary: /^Database: .*print articles/ },
+    online: { cmd: "online", summary: /^Online pieces:|^Database: .*online pieces|^Daily cap/ },
   };
   const jobs = Object.fromEntries(Object.keys(KINDS).map((k) => [k, { running: false, date: null, startedAt: 0, lastExit: null, lastMessage: "", tail: "", child: null, logId: null }]));
   const anyJobRunning = () => Object.values(jobs).some((j) => j.running);
@@ -103,10 +114,9 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   function startJob(kind, args, { date = null, after = null, trigger = "manual", onDone = null } = {}) {
     const j = jobs[kind], spec = KINDS[kind];
     if (j.running) return { code: 409, error: `A ${kind} job is already in progress.` };
-    if (!llm.ok) return { code: 400, error: `Can't ${kind}: ${llm.message}. Start the server with ANTHROPIC_API_KEY set.` };
-    // Article pages are fetched directly (the proxy added nothing for them and costs data); the other jobs inherit the proxy setting.
-    const env = kind === "fulltext" ? { ...process.env, NODE_USE_ENV_PROXY: "0" } : process.env;
-    const child = spawn(process.execPath, [join(root, "src", "cli.mjs"), ...args], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    if (!llm.ok) return { code: 400, error: `Can't ${kind}: ${llm.message}. Add a GROQ_API_KEY or OPENAI_API_KEY, or switch Claude on in Settings → Integrations.` };
+    // No job uses a proxy for general traffic. The one use is inside the jobs themselves: article text that could not be fetched directly is retried through it.
+    const child = spawn(process.execPath, [join(root, "src", "cli.mjs"), ...args], { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const logId = store.startJob({ kind, trigger, summary: date ? `for ${date}` : "", stats: { args: args.slice(1).join(" ") } });
     Object.assign(j, { running: true, date, startedAt: Date.now(), lastExit: null, lastMessage: "", tail: "", child, logId });
     let carry = "", statsLine = null;
@@ -142,6 +152,15 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   const startSentiment = (limit = 0, trigger = "manual", onDone = null) => startJob("sentiment", ["sentiment", ...(limit ? ["--limit", String(limit)] : [])], { trigger, onDone });
   const startEntityMerge = (trigger = "manual", onDone = null) => startJob("entities-merge", ["entities-merge"], { trigger, onDone });
   const startMerge = (trigger = "manual", onDone = null) => startJob("topic-merge", ["topics-merge"], { trigger, onDone });
+  // The print editions: download, find the opinion and analysis pieces, match them to angles. It looks back a few days so that an edition that was not out yet is picked up later.
+  // A successful run, started by hand or by the schedule, counts as that day's run (so the schedule does not repeat what someone has just done).
+  const startOcr = (trigger = "manual") => {
+    const today = dayOf(Date.now());
+    return startJob("ocr", ["ocr", "--from", dayOf(Date.now() - (cfg.ocr?.scheduledDays ?? 3) * 864e5)], { trigger, onDone: (code) => { if (code === 0) store.setMeta("ocr.okDay", today); } });
+  };
+  // Online opinion pieces: read the text, confirm, find writers, match to angles. Only reaches the model (Groq) when started: by the Leadership page's button,
+  // or after a collection when online.analyze is switched on in the config. The daily cap (online.dailyCap) bounds it either way.
+  const startOnline = (trigger = "manual", onDone = null) => startJob("online", ["online"], { trigger, onDone: (code) => { if (code === 0) analytics.cache.clear(); onDone?.(code); } });
   const startFulltext = (trigger = "manual", onDone = null) => startJob("fulltext", ["fulltext"], { trigger, onDone });
 
   // After a collection (or on start) the follow-up work runs one step at a time, each only if there is something to do:
@@ -165,6 +184,7 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
       () => (!light && Date.now() - (+store.getMeta("secondOpinion.lastAt", 0) || 0) > 7 * 864e5 ? (secondOpinionNow(trigger).finally(next), { ok: true }) : null),
       () => (cfg.fulltext?.enabled && store.fulltextCandidates({ limit: 1, maxTries: cfg.fulltext?.maxTries ?? 2, retryAfterMs: (cfg.fulltext?.retryAfterHours ?? 12) * 3600e3 }).length && fulltextAllowanceLeft() > 0 ? startFulltext(trigger, next) : null),
       () => (light ? null : (hotNow(trigger).finally(next), { ok: true })),
+      () => (cfg.online?.analyze === true && trigger !== "startup" ? startOnline(trigger, next) : null),
     ];
     let i = 0;
     function next() {
@@ -193,21 +213,23 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   async function topicVerifyNow(trigger = "manual") {
     if (verifyRunning || closed || !llm.ok) return { skipped: "busy or model unavailable" };
     verifyRunning = true;
-    let id = null, checked = 0, dropped = 0, topicsDone = 0;
+    let id = null, checked = 0, dropped = 0, topicsDone = 0, badBatches = 0, lastError = "", aChecked = 0, aDropped = 0;
     try {
-      const work = analytics.topicVerifyCandidates();
-      if (!work.length) return { skipped: "nothing new to check" };
+      const work = analytics.topicVerifyCandidates(), awork = analytics.angleFitCandidates();
+      if (!work.length && !awork.length) return { skipped: "nothing new to check" };
       id = store.startJob({ kind: "topic-verify", trigger, summary: "" });
       const size = cfg.topicVerify?.batch ?? 25;
-      for (const t of work) {
+      for (const t of [...work, ...awork]) {
         for (let i = 0; i < t.items.length && !closed; i += size) {
           const batch = t.items.slice(i, i + size);
-          const res = await reader.verifyTopicFit(t.name, t.aliases, batch);
-          if (res.length) { store.putTopicChecks(res.map((r) => ({ key: r.key, topic: t.id, fits: r.fits, why: r.why }))); checked += res.length; dropped += res.filter((r) => !r.fits).length; }
+          // one batch that cannot be answered is skipped (and counted), so a single bad answer does not throw away the whole check
+          let res; try { res = await reader.verifyTopicFit(t.name, t.aliases, batch, t.angle ?? null); } catch (e) { badBatches++; lastError = e.message; continue; }
+          if (res.length) { store.putTopicChecks(res.map((r) => ({ key: r.key, topic: t.checkId ?? t.id, fits: r.fits, why: r.why }))); if (t.angle) { aChecked += res.length; aDropped += res.filter((r) => !r.fits).length; } else { checked += res.length; dropped += res.filter((r) => !r.fits).length; } }
         }
         topicsDone++;
       }
-      store.finishJob(id, { status: "ok", summary: `Checked ${checked} headlines across ${topicsDone} topics: ${dropped} did not really fit their topic and are left out`, stats: { checked, dropped, topics: topicsDone } });
+      if (badBatches && !checked && !aChecked) throw new Error(lastError); // nothing could be answered at all: that is a real failure
+      store.finishJob(id, { status: "ok", summary: `Checked ${checked} headlines across ${topicsDone} topics: ${dropped} did not really fit their topic and are left out${aChecked ? `; ${aChecked} checked against the angle, ${aDropped} did not support it and are left out` : ""}${badBatches ? ` (${badBatches} batch${badBatches === 1 ? "" : "es"} skipped after errors; they are checked next time)` : ""}`, stats: { checked, dropped, angleChecked: aChecked, angleDropped: aDropped, topics: topicsDone, skippedBatches: badBatches } });
       analytics.cache.clear(); analytics._q = null;
       return { checked, dropped };
     } catch (e) { if (id != null) { try { store.finishJob(id, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } } return { error: e.message }; }
@@ -219,7 +241,7 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   async function topicMatchNow(trigger = "manual", { force = false } = {}) {
     if (matchRunning || closed || !llm.ok) return { skipped: "busy or model unavailable" };
     matchRunning = true;
-    let id = null, judged = 0;
+    let id = null, judged = 0, badBatches = 0, lastError = "";
     try {
       const size = cfg.topicMatch?.batch ?? 6;
       for (const co of companies.list()) {
@@ -228,12 +250,13 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
         if (id == null) id = store.startJob({ kind: "topic-match", trigger, summary: "" });
         for (let i = 0; i < cands.length && !closed; i += size) {
           const batch = cands.slice(i, i + size);
-          const res = await reader.match(co, batch.map((b) => ({ id: b.key, name: b.name, description: b.description })), new Map(batch.map((b) => [b.key, { storyCount: b.storyCount, stories: b.stories }])));
+          let res; try { res = await reader.match(co, batch.map((b) => ({ id: b.key, name: b.name, description: b.description })), new Map(batch.map((b) => [b.key, { storyCount: b.storyCount, stories: b.stories }]))); } catch (e) { badBatches++; lastError = e.message; continue; } // skip one bad batch, keep the rest
           for (const b of batch) { const r = res.get(b.key); if (r) { store.putTopicMatches(co.id, b.id, r.sectors, b.storyCount); judged++; } }
         }
       }
       if (id == null) return { skipped: "nothing to judge" };
-      store.finishJob(id, { status: "ok", summary: `Judged ${judged} rising topic${judged === 1 ? "" : "s"} against each client's sectors`, stats: { judged } });
+      if (badBatches && !judged) throw new Error(lastError);
+      store.finishJob(id, { status: "ok", summary: `Judged ${judged} rising topic${judged === 1 ? "" : "s"} against each client's sectors${badBatches ? ` (${badBatches} batch${badBatches === 1 ? "" : "es"} skipped after errors)` : ""}`, stats: { judged, skippedBatches: badBatches } });
       analytics.cache.clear();
       return { judged };
     } catch (e) { if (id != null) { try { store.finishJob(id, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } } return { error: e.message }; }
@@ -243,12 +266,12 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   // A stronger model double-checks the readings behind the top opportunities.
   let reviewRunning = false;
   async function secondOpinionNow(trigger = "manual") {
-    const model = cfg.audit?.reviewModel;
+    const model = reader.noClaude ? (reader.openaiOk ? reader.openaiModel : reader.groqModel) : cfg.audit?.reviewModel; // the reviewer is whichever model answers
     if (reviewRunning || closed || !llm.ok || !model) return { skipped: "busy, unavailable or no review model set" };
     reviewRunning = true;
     const id = store.startJob({ kind: "second-opinion", trigger, summary: "" });
     try {
-      const cands = analytics.reviewCandidates({ limit: cfg.audit?.secondOpinionTop ?? 30 });
+      const cands = analytics.reviewCandidates({ limit: cfg.audit?.secondOpinionTop ?? 30, model });
       let agree = 0, disagree = 0;
       for (let i = 0; i < cands.length && !closed; i += 10) {
         const batch = cands.slice(i, i + 10);
@@ -288,21 +311,21 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     const run = store.latestRun();
     return run && !run.finishedAt && Date.now() - run.updatedAt < LIVE_FRESH_MS ? { done: run.done, total: run.total, date: run.targetDate } : null;
   };
-  // Journalist directory: pulled from the external endpoint into the local database (resumable; one sync at a time).
-  const journalistsUrl = () => process.env.JOURNALISTS_API_URL || JOURNALISTS_URL;
   let closed = false; // set when the server shuts down, so background work stops instead of writing to a closed database
-  const jsync = { running: false, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: 0, finishedAt: 0 };
-  async function startJournalistSync(trigger = "manual") {
-    if (jsync.running) return false;
-    Object.assign(jsync, { running: true, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: Date.now() });
-    const logId = store.startJob({ kind: "journalists", trigger, summary: "" });
-    syncJournalists(store, { url: journalistsUrl(), onProgress: (p) => { if (closed) throw new Error("server closed"); Object.assign(jsync, p); } })
-      .then((r) => { if (closed) return; log(`journalist directory synced: ${r.total} records`); integrations.recordEvent("journalists", { ok: true, detail: `${r.total} records` }); store.finishJob(logId, { status: "ok", summary: `Directory synced: ${r.total} journalists`, stats: { total: r.total } }); })
-      .catch((e) => { if (closed) return; jsync.error = e.message; log(`journalist sync failed: ${e.message}`); integrations.recordEvent("journalists", { ok: false, error: e.message }); try { store.finishJob(logId, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } })
-      .finally(() => { jsync.running = false; jsync.finishedAt = Date.now(); });
-    return true;
-  }
-  const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
+  // // Journalist directory: pulled from the external endpoint into the local database (resumable; one sync at a time).
+  // const journalistsUrl = () => process.env.JOURNALISTS_API_URL || JOURNALISTS_URL;
+  // const jsync = { running: false, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: 0, finishedAt: 0 };
+  // async function startJournalistSync(trigger = "manual") {
+  //   if (jsync.running) return false;
+  //   Object.assign(jsync, { running: true, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: Date.now() });
+  //   const logId = store.startJob({ kind: "journalists", trigger, summary: "" });
+  //   syncJournalists(store, { url: journalistsUrl(), onProgress: (p) => { if (closed) throw new Error("server closed"); Object.assign(jsync, p); } })
+  //     .then((r) => { if (closed) return; log(`journalist directory synced: ${r.total} records`); integrations.recordEvent("journalists", { ok: true, detail: `${r.total} records` }); store.finishJob(logId, { status: "ok", summary: `Directory synced: ${r.total} journalists`, stats: { total: r.total } }); })
+  //     .catch((e) => { if (closed) return; jsync.error = e.message; log(`journalist sync failed: ${e.message}`); integrations.recordEvent("journalists", { ok: false, error: e.message }); try { store.finishJob(logId, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } })
+  //     .finally(() => { jsync.running = false; jsync.finishedAt = Date.now(); });
+  //   return true;
+  // }
+  // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
   const status = () => ({
     llm, runner: runnerState(), live: liveRun(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
@@ -316,8 +339,8 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     companies: companies.list().map((c) => ({ id: c.id, name: c.name, builtin: !!c.builtin, sectors: c.sectors.length, matched: Object.keys(c.matches).length })),
     dates: store.days(), recommendations: store.recommendationCount(),
     integrations: integrations.status({ ollama: { reachable: reader.chain.includes("ollama") }, journalists: { count: store.journalistCount() } }),
-    journalists: journalistStatus(),
-    provider: reader.provider,
+    // journalists: journalistStatus(), // JOURNALISTS DISABLED
+    provider: reader.provider, noClaude: reader.noClaude, models: { groq: reader.groqOk ? reader.groqModel : null, openai: reader.openaiOk ? reader.openaiModel : null },
     chain: reader.chain,
     fallbackActive: reader.fallbackActive,
   });
@@ -355,9 +378,9 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     } catch (e) { log(`matching error: ${e.message}`); }
     finally { matching = false; }
   }
-  matchNow();
-  // First start (or a week-old directory): pull the journalist directory in the background.
-  if (autoSync && integrations.enabled("journalists") && (!store.journalistCount() || Date.now() - (+store.getMeta("journalists.lastSync", 0) || 0) > 7 * 864e5)) startJournalistSync("auto");
+  // The pairing check is not run on start: it runs when a company or its sectors change.
+  // // First start (or a week-old directory): pull the journalist directory in the background.
+  // if (autoSync && integrations.enabled("journalists") && (!store.journalistCount() || Date.now() - (+store.getMeta("journalists.lastSync", 0) || 0) > 7 * 864e5)) startJournalistSync("auto");
   const timers = [setInterval(matchNow, 8000)];
   // Recommendation history: re-evaluate every few minutes and log what changed and why.
   timers.push(setInterval(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 5 * 60e3));
@@ -377,9 +400,49 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     setTimeout(tick, 15000).unref(); // catch up right after start if the data is stale
     log(`Scheduled collection: every ${scheduleMinutes} min`);
   }
-  // Keep labelling going: after a restart, carry on with whatever backlog is left (it is resumable, labelled stories are skipped).
+  // Keep the dashboard's views ready: shortly after start and then every minute, the views the pages ask for are built (in the worker thread) whenever the data
+  // has changed, so a person opening a tab reads a finished result. Unchanged data costs almost nothing: the saved answer is still current.
+  // The addresses are the ones the pages request (same arguments, so they hit the same saved answers).
+  let warming = false;
+  const warm = async () => {
+    if (closed || warming) return;
+    warming = true;
+    try {
+      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/backtest"];
+      for (const co of companies.list()) {
+        urls.push(`/api/overview?company=${co.id}`);
+        for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
+      }
+      for (const u of urls) {
+        if (closed) break;
+        const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
+        try { await viewEntry(v.method, v.args); } catch { /* one view failing must not stop the others */ }
+      }
+    } catch (e) { log(`warm-up skipped: ${e.message}`); }
+    warming = false;
+  };
+  try { store.pruneViews(); } catch { /* derived data; nothing depends on it */ }
+  setTimeout(warm, 3000).unref(); timers.push(setInterval(warm, 60e3));
+  // A one-time request (meta "followups.requested") to run the follow-up chain, for when a restart cut it short. Read once at start, then cleared.
+  if (store.getMeta("followups.requested", "") === "1") { store.setMeta("followups.requested", ""); setTimeout(() => followUps("auto"), 5000).unref(); log("follow-ups requested: running them once"); }
+  // Print editions: once a day from ocr.dailyAt (local time, default 11:15; see schedule.mjs). Part of the same automatic mode as the scheduled
+  // collection, so it is off with --no-auto. A time that passed while the server was off is made up when it next runs.
+  if (autoSync && cfg.ocr?.dailyAt !== false) {
+    const tick = () => {
+      if (closed || !llm.ok || jobs.ocr.running) return;
+      const now = new Date(), today = dayOf(now.getTime());
+      const state = { okDay: store.getMeta("ocr.okDay"), tries: +store.getMeta(`ocr.tries.${today}`, 0) || 0, lastTryAt: +store.getMeta("ocr.lastTryAt", 0) || 0 };
+      if (!ocrDue(now, cfg.ocr?.dailyAt, state)) return;
+      const r = startOcr("scheduled");
+      if (r?.error) { log(`print editions not started: ${r.error}`); return; }
+      store.setMeta(`ocr.tries.${today}`, String(state.tries + 1)); store.setMeta("ocr.lastTryAt", String(now.getTime()));
+    };
+    timers.push(setInterval(tick, 5 * 60e3));
+    setTimeout(tick, 30000).unref();
+    log(`Print editions: once a day from ${parseTime(cfg.ocr?.dailyAt).label}`);
+  }
+  // Nothing that reaches a model runs just because the server started (restarts are frequent while developing); the follow-ups run after each collection.
   if (autoSync) {
-    setTimeout(() => { if (llm.ok && !anyJobRunning()) { log(`start-up follow-ups (topics to label: ${store.unenrichedCount()}, sentiment: ${store.unsentimentedCount()})`); followUps("startup"); } }, 20000).unref();
     // One-time clean-up after an upgrade: mark old duplicates and template pages, and void recommendations whose pairing no longer exists.
     setTimeout(() => {
       if (closed) return;
@@ -397,7 +460,7 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   // What the bell shows: recent finished jobs and any service that needs attention. Derived, never stored separately.
   function notifications() {
     const items = [];
-    const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check" };
+    const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check" };
     for (const e of store.jobLog({ limit: 40 })) {
       if (e.status === "running") continue;
       const how = e.trigger === "scheduled" ? "scheduled" : e.trigger === "manual" ? "manual" : "automatic";
@@ -415,7 +478,14 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
     } catch { /* no data yet */ }
     return items.sort((a, b) => b.ts - a.ts).slice(0, 40);
   }
-  const json = (res, code, obj) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(obj)); };
+  // Larger answers are gzipped for browsers that accept it (the opportunity lists are 0.5 to 1.3 MB of text; they shrink about tenfold).
+  const json = (res, code, obj) => {
+    const body = JSON.stringify(obj), head = { "content-type": "application/json", "cache-control": "no-store" };
+    if (body.length > 2048 && /\bgzip\b/.test(String(res.req?.headers["accept-encoding"] || ""))) {
+      return gzip(body, { level: 5 }, (err, buf) => { if (err) { res.writeHead(code, head); return res.end(body); } res.writeHead(code, { ...head, "content-encoding": "gzip", vary: "accept-encoding" }); res.end(buf); });
+    }
+    res.writeHead(code, head); res.end(body);
+  };
   const needJson = (req, res) => { if (!(req.headers["content-type"] || "").startsWith("application/json")) { json(res, 415, { error: "Send application/json" }); return false; } return true; };
   const allowedHosts = new Set(["127.0.0.1", "localhost", "::1", ...String(process.env.HIVEMIND_ALLOWED_HOSTS || "").split(",").map((h) => h.trim()).filter(Boolean)]);
   const labelKey = (k) => (typeof k === "string" && /^[bt]:[a-z0-9&-]+$/i.test(k) ? k : null);
@@ -424,10 +494,86 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
   if (!authOn) log("WARNING: sign-in is switched OFF (HIVEMIND_AUTH=off). Anyone who can reach this server has full access, including the API keys. Use only on a private, single-user machine.");
   const authz = authOn ? createAuth({ store, log, root }) : null;
 
+  // ---------------------------------------------------------------- the dashboard's views: built off the main thread, saved, shared and revalidated
+  // Each read-only view is asked for by name and arguments. Its answer is kept (1) in memory, (2) in the database, so a restart or a second copy starts
+  // warm, and (3) as an ETag, so a browser that already has it gets a tiny "not modified". An answer is current only while the data signature
+  // (analytics.signature) is unchanged. Heavy ones are built in a worker thread with its own read connection; if it is unavailable the server builds them itself.
+  const ROUTES = {
+    "/api/overview": (u, c) => ({ method: "overview", args: { company: c, date: dayParam(u) } }),
+    "/api/leadership": (u, c) => ({ method: "leadership", args: { company: c, date: dayParam(u), mode: u.searchParams.get("mode") } }),
+    "/api/opportunities": (u, c) => ({ method: "opportunities", args: { company: c, date: dayParam(u), limit: Math.min(1000, +u.searchParams.get("limit") || 60), group: u.searchParams.get("group") === "topic", mode: u.searchParams.get("mode"), slim: u.searchParams.get("slim") === "1" } }),
+    "/api/opportunity": (u, c) => { const key = (u.searchParams.get("key") || "").slice(0, 200); return key ? { method: "opportunity", args: { company: c, key, date: dayParam(u), mode: u.searchParams.get("mode"), group: u.searchParams.get("group") === "topic" } } : { error: "Pass key=<opportunity key>" }; },
+    "/api/labels": (u) => ({ method: "labels", args: { date: dayParam(u), level: u.searchParams.get("level") === "topic" ? "topic" : "bracket", limit: Math.min(300, +u.searchParams.get("limit") || 80) } }),
+    "/api/series": (u) => { const keys = (u.searchParams.get("keys") || "").split(",").map(labelKey).filter(Boolean); return keys.length ? { method: "series", args: { keys, gran: u.searchParams.get("gran") === "day" ? "day" : "hour", date: dayParam(u) } } : { error: "Pass keys=b:economy,t:port-disruption" }; },
+    "/api/topic": (u, c) => { const key = labelKey(u.searchParams.get("key")); return key ? { method: "topic", args: { key, company: c, date: dayParam(u) } } : { error: "Bad topic key" }; },
+    "/api/origins": (u) => { const raw = u.searchParams.get("key"), key = !raw || raw === "all" ? "all" : labelKey(raw); return key ? { method: "origins", args: { key, date: dayParam(u) } } : { error: "Pass key=t:port-disruption, b:economy or all" }; },
+    "/api/sources": (u) => ({ method: "sourcesView", args: { date: dayParam(u) } }),
+    "/api/backtest": () => ({ method: "backtest", args: {} }),
+    "/api/entities": (u) => ({ method: "entities", args: { date: dayParam(u), limit: Math.min(500, +u.searchParams.get("limit") || 150) } }),
+    "/api/sentiment": (u) => ({ method: "sentiment", args: { date: dayParam(u) } }),
+  };
+  let worker = null, workerRef = null, wseq = 0;
+  const wait = new Map();
+  const dropWorker = (why) => { if (why) log(`view worker stopped (${why}): the server builds views itself`); worker = null; for (const [, w] of wait) w.reject(new Error(why || "worker stopped")); wait.clear(); };
+  if (process.env.HIVEMIND_NO_WORKER !== "1") {
+    try {
+      const w = new Worker(new URL("./viewworker.mjs", import.meta.url), { workerData: { root } });
+      w.unref();
+      w.on("message", (m) => { if (m.ready) { worker = w; return; } const p = wait.get(m.id); if (p) { wait.delete(m.id); clearTimeout(p.t); m.ok ? p.resolve(m) : p.reject(new Error(m.error)); } });
+      w.on("error", (e) => dropWorker(e.message));
+      w.on("exit", () => { if (!closed) dropWorker("exited"); });
+      analytics.cache.onClear = () => { try { worker?.postMessage({ type: "clear" }); } catch { /* the worker is gone; the server builds views itself */ } };
+      workerRef = w;
+    } catch (e) { log(`view worker not started: ${e.message}`); }
+  }
+  const build = async (method, args) => {
+    if (worker) {
+      try { const m = await new Promise((resolve, reject) => { const id = ++wseq, t = setTimeout(() => { wait.delete(id); reject(new Error("worker timed out")); }, 90e3); wait.set(id, { resolve, reject, t }); worker.postMessage({ id, method, args }); }); return { body: m.body, failed: m.failed }; }
+      catch (e) { log(`view worker failed for ${method} (${e.message}); building it in the server`); }
+    }
+    const v = analytics[method](args);
+    return { body: JSON.stringify(v), failed: !!(v && v.error) };
+  };
+  const mem = new Map(), inflight = new Map();
+  // The answer for (method, args): from memory, else the database, else built once (concurrent askers share the build).
+  async function viewEntry(method, args) {
+    const k = method + "|" + JSON.stringify(args), sig = analytics.signature(args.date ?? null);
+    if (sig == null) { const v = analytics[method](args); return { body: JSON.stringify(v), failed: !!(v && v.error), etag: null }; }
+    let e = mem.get(k);
+    if (e && e.sig === sig) return e;
+    let body = store.getView(k, sig), failed = false;
+    if (body == null) {
+      const ik = k + "@" + sig;
+      let p = inflight.get(ik);
+      if (!p) { p = build(method, args).finally(() => inflight.delete(ik)); inflight.set(ik, p); }
+      ({ body, failed } = await p);
+      if (!failed && body.length < 4e6) { try { store.putView(k, sig, body); } catch { /* a saved copy is only a convenience */ } }
+    }
+    e = { sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` };
+    if (mem.size > 300) mem.clear();
+    mem.set(k, e);
+    return e;
+  }
+  async function view(req, res, method, args) {
+    const e = await viewEntry(method, args);
+    const head = { "content-type": "application/json", "cache-control": e.etag ? "private, no-cache" : "no-store", vary: "accept-encoding", ...(e.etag ? { etag: e.etag } : {}) };
+    if (e.etag && !e.failed && req.headers["if-none-match"] === e.etag) { res.writeHead(304, head); return res.end(); }
+    const code = e.failed ? 404 : 200;
+    if (e.body.length > 2048 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) { e.gz ??= gzipSync(e.body, { level: 5 }); res.writeHead(code, { ...head, "content-encoding": "gzip" }); return res.end(e.gz); }
+    res.writeHead(code, head); res.end(e.body);
+  }
+
   const server = createServer(async (req, res) => {
     setSecurityHeaders(res);
     const url = new URL(req.url, "http://localhost");
     const p = url.pathname, company = slugify(url.searchParams.get("company") || "bcg") || "bcg";
+    // Anything that changes data (matching, briefs, edits, tuning) drops the cached views once it is done; logging in or out does not.
+    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) analytics.cache.clear(); });
+    // Liveness and readiness for containers and load balancers. It answers before the host check and the login, and says nothing but ok / not ok.
+    if (p === "/healthz" && (req.method === "GET" || req.method === "HEAD")) {
+      try { store.db.prepare("SELECT 1").get(); res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(req.method === "HEAD" ? undefined : '{"ok":true}'); }
+      catch { res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" }); return res.end('{"ok":false}'); }
+    }
     // The server holds API keys and contact details with no login, so it must only answer the local machine. A web page
     // on another site can point its own domain at 127.0.0.1 ("DNS rebinding"); refusing foreign Host/Origin values stops that.
     // To serve other machines deliberately, put them in HIVEMIND_ALLOWED_HOSTS (and put a login in front).
@@ -447,6 +593,15 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
       if (req.method === "GET" && p.startsWith("/ui/")) {
         const name = p.slice(4), file = join(root, "src", "ui", name);
         if (!/^[\w.-]+$/.test(name) || !STATIC[extname(name)] || !existsSync(file)) return json(res, 404, { error: "Not found" });
+        if (extname(name) === ".mp4") { // video is streamed in ranges (browsers seek and loop with them; Safari requires them) and cached for a day
+          const size = statSync(file).size, m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+          let start = 0, end = size - 1;
+          if (m) { if (m[1] !== "") { start = +m[1]; if (m[2] !== "") end = Math.min(+m[2], size - 1); } else if (m[2] !== "") start = Math.max(0, size - +m[2]); }
+          if (m && (start > end || start >= size)) { res.writeHead(416, { "content-range": `bytes */${size}` }); return res.end(); }
+          res.writeHead(m ? 206 : 200, { "content-type": STATIC[".mp4"], "accept-ranges": "bytes", "cache-control": "public, max-age=86400", "content-length": end - start + 1, ...(m ? { "content-range": `bytes ${start}-${end}/${size}` } : {}) });
+          if (req.method === "HEAD") return res.end();
+          return createReadStream(file, { start, end }).on("error", () => res.destroy()).pipe(res);
+        }
         res.writeHead(200, { "content-type": STATIC[extname(name)], "cache-control": "no-store" });
         return res.end(readFileSync(file));
       }
@@ -457,23 +612,9 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
         if (req.user && req.user.role !== "admin") { for (const k of ["integrations", "jobs", "activity", "journalists", "llm", "provider", "chain", "fallbackActive", "enrich", "sentiment", "topicMerge", "fulltext", "live", "runner"]) delete st[k]; st.llm = { ok: true }; st.runner = { running: false }; st.live = null; st.enrich = { running: false }; st.integrations = []; }
         return json(res, 200, st);
       }
-      if (req.method === "GET" && p === "/api/overview") return json(res, 200, analytics.overview({ company, date: dayParam(url) }));
-      if (req.method === "GET" && p === "/api/opportunities") return json(res, 200, analytics.opportunities({ company, date: dayParam(url), limit: Math.min(1000, +url.searchParams.get("limit") || 60), group: url.searchParams.get("group") === "topic" }));
+      if (req.method === "GET" && ROUTES[p]) { const v = ROUTES[p](url, company); return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args); }
+      if (req.method === "GET" && p === "/api/leadership/pieces") return json(res, 200, analytics.pieces({ company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) }));
       if (req.method === "GET" && p === "/api/config") return json(res, 200, { weights: cfg.weights, stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
-      if (req.method === "GET" && p === "/api/labels") return json(res, 200, analytics.labels({ date: dayParam(url), level: url.searchParams.get("level") === "topic" ? "topic" : "bracket", limit: Math.min(300, +url.searchParams.get("limit") || 80) }));
-      if (req.method === "GET" && p === "/api/series") {
-        const keys = (url.searchParams.get("keys") || "").split(",").map(labelKey).filter(Boolean);
-        if (!keys.length) return json(res, 400, { error: "Pass keys=b:economy,t:port-disruption" });
-        return json(res, 200, analytics.series({ keys, gran: url.searchParams.get("gran") === "day" ? "day" : "hour", date: dayParam(url) }));
-      }
-      if (req.method === "GET" && p === "/api/topic") {
-        const key = labelKey(url.searchParams.get("key"));
-        if (!key) return json(res, 400, { error: "Bad topic key" });
-        const r = analytics.topic({ key, company, date: dayParam(url) });
-        return json(res, r.error ? 404 : 200, r);
-      }
-      if (req.method === "GET" && p === "/api/sources") return json(res, 200, analytics.sourcesView({ date: dayParam(url) }));
-      if (req.method === "GET" && p === "/api/backtest") return json(res, 200, analytics.backtest());
       if (req.method === "GET" && p === "/api/recommendations") {
         const key = url.searchParams.get("key");
         return json(res, 200, { history: key ? store.recommendationHistory(company, key) : [], total: store.recommendationCount() });
@@ -517,19 +658,12 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
       }
 
       // ---- v2 analytics: origins, entities, sentiment, outcomes, tuning ----
-      if (req.method === "GET" && p === "/api/origins") {
-        const raw = url.searchParams.get("key"), key = !raw || raw === "all" ? "all" : labelKey(raw);
-        if (!key) return json(res, 400, { error: "Pass key=t:port-disruption, b:economy or all" });
-        return json(res, 200, analytics.origins({ key, date: dayParam(url) }));
-      }
-      if (req.method === "GET" && p === "/api/entities") return json(res, 200, analytics.entities({ date: dayParam(url), limit: Math.min(500, +url.searchParams.get("limit") || 150) }));
       if (req.method === "GET" && p === "/api/entity") {
         const id = entityId(url.searchParams.get("id") ?? "");
         if (!id) return json(res, 400, { error: "Bad entity" });
         const r = analytics.entity({ id, date: dayParam(url) });
         return json(res, r.error ? 404 : 200, r);
       }
-      if (req.method === "GET" && p === "/api/sentiment") return json(res, 200, analytics.sentiment({ date: dayParam(url) }));
       if (req.method === "GET" && p === "/api/outcomes") return json(res, 200, analytics.outcomes());
       if (req.method === "GET" && p === "/api/tuning") return json(res, 200, analytics.tuning());
       if (req.method === "POST" && p === "/api/tuning/apply") {
@@ -578,27 +712,38 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
         if (k === "topic-match") { topicMatchNow("manual", { force: true }); return json(res, 200, { ok: true }); }
         if (k === "second-opinion") { secondOpinionNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "dedupe") return json(res, 200, { ok: true, ...dedupeNow("manual") });
-        const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), enrich: () => startEnrich(+body.limit || 0, "manual") }[k];
-        if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, enrich or hot-topics." });
+        const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), ocr: () => startOcr("manual"), online: () => startOnline("manual"), enrich: () => startEnrich(+body.limit || 0, "manual") }[k];
+        if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich or hot-topics." });
         const r = starter();
         return r.ok ? json(res, 200, { ok: true }) : json(res, r.code, { error: r.error });
       }
 
-      // ---- journalist directory ----
-      if (req.method === "GET" && p === "/api/journalists/status") return json(res, 200, journalistStatus());
-      if (req.method === "POST" && p === "/api/journalists/sync") {
-        if (!needJson(req, res)) return;
-        return (await startJournalistSync()) ? json(res, 200, { ok: true }) : json(res, 409, { error: "A sync is already running." });
+      // ---- authored articles (opinion / analysis in the print editions): where the journalist directory used to be ----
+      if (req.method === "GET" && p === "/api/authored/status") return json(res, 200, { ...store.ocrFacets(), window: cfg.ocr?.windowDays ?? 7, saturation: cfg.ocr?.saturationCount ?? 5, mode: cfg.ocr?.mode ?? "whitespace" });
+      if (req.method === "GET" && p === "/api/authored/article") {
+        const a = store.ocrArticle((url.searchParams.get("id") || "").slice(0, 300), company);
+        return a ? json(res, 200, a) : json(res, 404, { error: "That article is not in the database." });
       }
-      if (req.method === "GET" && p === "/api/journalists") {
-        const lim = Math.min(200, Math.max(1, +url.searchParams.get("limit") || 50));
-        const r = store.searchJournalists({ q: (url.searchParams.get("q") || "").slice(0, 80), beat: (url.searchParams.get("beat") || "").slice(0, 60), publication: (url.searchParams.get("publication") || "").slice(0, 80), limit: lim, offset: Math.max(0, +url.searchParams.get("offset") || 0) });
-        return json(res, 200, { ...r, facets: url.searchParams.get("facets") === "1" ? store.journalistFacets() : undefined });
+      if (req.method === "GET" && p === "/api/authored") {
+        const g = (k, n) => (url.searchParams.get(k) || "").slice(0, n), lim = Math.min(100, Math.max(1, +url.searchParams.get("limit") || 25));
+        return json(res, 200, { ...store.ocrSearch({ q: g("q", 80), source: g("source", 40), kind: g("kind", 10) || "authored", matched: g("matched", 1), limit: lim, offset: Math.max(0, +url.searchParams.get("offset") || 0), company }), facets: url.searchParams.get("facets") === "1" ? store.ocrFacets() : undefined });
       }
-      if (req.method === "GET" && p === "/api/journalists/matches") {
-        const r = analytics.journalistMatches({ oppKey: String(url.searchParams.get("opp") || ""), company, date: dayParam(url), limit: Math.min(20, +url.searchParams.get("limit") || 8) });
-        return json(res, r.error ? 404 : 200, r);
-      }
+
+      // // ---- journalist directory ----
+      // if (req.method === "GET" && p === "/api/journalists/status") return json(res, 200, journalistStatus());
+      // if (req.method === "POST" && p === "/api/journalists/sync") {
+      //   if (!needJson(req, res)) return;
+      //   return (await startJournalistSync()) ? json(res, 200, { ok: true }) : json(res, 409, { error: "A sync is already running." });
+      // }
+      // if (req.method === "GET" && p === "/api/journalists") {
+      //   const lim = Math.min(200, Math.max(1, +url.searchParams.get("limit") || 50));
+      //   const r = store.searchJournalists({ q: (url.searchParams.get("q") || "").slice(0, 80), beat: (url.searchParams.get("beat") || "").slice(0, 60), publication: (url.searchParams.get("publication") || "").slice(0, 80), limit: lim, offset: Math.max(0, +url.searchParams.get("offset") || 0) });
+      //   return json(res, 200, { ...r, facets: url.searchParams.get("facets") === "1" ? store.journalistFacets() : undefined });
+      // }
+      // if (req.method === "GET" && p === "/api/journalists/matches") {
+      //   const r = analytics.journalistMatches({ oppKey: String(url.searchParams.get("opp") || ""), company, date: dayParam(url), limit: Math.min(20, +url.searchParams.get("limit") || 8) });
+      //   return json(res, r.error ? 404 : 200, r);
+      // }
 
       // ---- search interest (separate signal) ----
       if (req.method === "POST" && p === "/api/search-interest") {
@@ -677,7 +822,7 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
         const ollamaInfo = await detectOllama().catch(() => null);
         return json(res, 200, {
           integrations: integrations.status({ ollama: ollamaInfo, journalists: { count: store.journalistCount() } }),
-          provider: reader.provider,
+          provider: reader.provider, noClaude: reader.noClaude, models: { groq: reader.groqOk ? reader.groqModel : null, openai: reader.openaiOk ? reader.openaiModel : null },
           chain: reader.chain,
           label: reader.label,
           fallbackActive: reader.fallbackActive,
@@ -776,9 +921,9 @@ export async function serve({ root, bcg, port = 8788, log = console.log, spawn =
       json(res, e instanceof SyntaxError ? 400 : 500, { error: e instanceof SyntaxError ? "Invalid JSON" : e.message });
     }
   });
-  server.on("close", () => { closed = true; authz?.stop(); timers.forEach(clearInterval); for (const j of Object.values(jobs)) j.child?.kill(); try { store.closeStaleJobs(); } catch { /* ignore */ } store.close(); });
+  server.on("close", () => { closed = true; workerRef?.terminate(); authz?.stop(); timers.forEach(clearInterval); for (const j of Object.values(jobs)) j.child?.kill(); try { store.closeStaleJobs(); } catch { /* ignore */ } store.close(); });
 
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
-  log(`Dashboard: http://127.0.0.1:${port}`);
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, host, resolve); });
+  log(`Dashboard: http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}${host === "0.0.0.0" ? " (listening on all interfaces: allowed hosts are set by HIVEMIND_ALLOWED_HOSTS)" : ""}`);
   return server;
 }

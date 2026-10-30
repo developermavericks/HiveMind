@@ -423,6 +423,8 @@ test("server: the Run button validates the day, starts one run at a time, and re
   process.env.HIVEMIND_LLM = "anthropic"; process.env.ANTHROPIC_API_KEY = "test-key-not-real"; // detect() only checks it is set
   const root = mkdtempSync(join(tmpdir(), "run-"));
   mkdirSync(join(root, "src"));
+  mkdirSync(join(root, "data"));
+  { const { Store } = await import("../src/db.mjs"); const st = new Store(join(root, "data", "hivemind.db")); st.setMeta("int.anthropic.enabled", "1"); st.close(); } // Claude is off by default; this test is about the Run button, with the LLM available
   copyFileSync(new URL("../src/dashboard.html", import.meta.url), join(root, "src", "dashboard.html"));
   const { serve } = await import("../src/server.mjs");
   const { EventEmitter } = await import("node:events");

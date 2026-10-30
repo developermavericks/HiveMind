@@ -1,0 +1,9 @@
+{
+  "name": "hivemind-postgres-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-off tools for moving HiveMind from SQLite to PostgreSQL. Kept apart so the application itself stays free of npm dependencies.",
+  "engines": { "node": ">=22.13" },
+  "dependencies": { "pg": "^8.13.0" }
+}

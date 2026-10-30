@@ -89,10 +89,10 @@ export const csrfOk = (req) => {
   try { return new URL(o).host === req.headers.host; } catch { return false; }
 };
 
-const PUBLIC_ASSETS = new Set(["/ui/login.css", "/ui/login.js", "/ui/logo.png", "/ui/wordmark.png"]);
+const PUBLIC_ASSETS = new Set(["/ui/login.css", "/ui/login.js", "/ui/logo.png", "/ui/wordmark.png", "/ui/intro.mp4"]);
 // What a member (non-admin) may change. Everything else that changes state is admin-only.
 // Pages and data a normal (member) account must not read, even by calling the API directly.
-const MEMBER_DENY_GET = [/^\/api\/(integrations|system|usage|logs|quality|tuning|outcomes|forecast-accuracy|backtest|notifications|companies|authors|journalists|sources)(\/|$)/, /^\/api\/audit\//];
+const MEMBER_DENY_GET = [/^\/api\/(integrations|system|usage|logs|quality|tuning|outcomes|forecast-accuracy|backtest|notifications|companies|authors|journalists|sources|leadership)(\/|$)/, /^\/api\/audit\//];
 const MEMBER_WRITES = new Set(["/api/brief", "/api/brief/decide", "/api/audit/review", "/api/auth/logout", "/api/auth/password"]);
 const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const tempPassword = () => Array.from(randomBytes(16), (b) => alphabet[b % alphabet.length]).join("");
@@ -199,6 +199,12 @@ export function createAuth({ store, log = () => {}, root }) {
     try {
       if (!userByEmail(email)) {
         first = userCount() === 0;
+        // On a server other people can reach, the first account becomes the administrator. HIVEMIND_ADMIN_EMAIL says whose that must be, so a
+        // stranger who finds the page first cannot take it. Unset, anyone can create the first account (fine on a local machine).
+        if (first && process.env.HIVEMIND_ADMIN_EMAIL && normEmail(process.env.HIVEMIND_ADMIN_EMAIL) !== email) {
+          db.exec("ROLLBACK");
+          return send(res, 403, { error: "The first account can only be created by the administrator this server was set up for." });
+        }
         db.prepare("INSERT INTO users (id, email, name, pw_hash, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .run(randomUUID(), email, name, hash, first ? "admin" : "member", first ? "active" : "pending", Date.now());
         created = true;

@@ -1,0 +1,48 @@
+# HiveMind on one machine:   docker compose up -d --build        (then open http://localhost:8788)
+#
+# Secrets (API keys) come from a .env file next to this one; it is read by Docker and never copied into the image. Copy .env.example to .env.
+# Nothing is collected or sent to a model until you press a button, unless you set HIVEMIND_AUTO=1 (then collection runs on the schedule below).
+name: hivemind
+
+x-app: &app
+  build: .
+  image: hivemind:latest
+  init: true
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - hivemind-data:/app/data
+
+services:
+  app:
+    <<: *app
+    ports:
+      - "127.0.0.1:${HIVEMIND_PORT:-8788}:8788" # this machine only. To let others in, put an HTTPS reverse proxy in front (see docs/GCP-ROADMAP.md)
+    environment:
+      HIVEMIND_HOST: 0.0.0.0 # inside the container; the port above is what limits who can reach it
+      HIVEMIND_ALLOWED_HOSTS: ${HIVEMIND_ALLOWED_HOSTS:-} # the host names you serve it under, comma separated (localhost is always allowed)
+      HIVEMIND_ADMIN_EMAIL: ${HIVEMIND_ADMIN_EMAIL:-}     # who may create the first account; set it on any server others can reach
+      HIVEMIND_AUTO: ${HIVEMIND_AUTO:-0}                  # 0 = dashboard only; 1 = scheduled collection and background follow-ups
+      HIVEMIND_SCHEDULE_MINUTES: ${HIVEMIND_SCHEDULE_MINUTES:-480} # 480 = three collections a day (only used when HIVEMIND_AUTO=1)
+      HIVEMIND_COOKIE_SECURE: ${HIVEMIND_COOKIE_SECURE:-0} # 1 when users reach it over https
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # A consistent copy of the database every 24 h, 14 kept, in the same volume (data/backups). Copy them off the machine as well.
+  backup:
+    <<: *app
+    depends_on:
+      app:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "while true; do node --no-warnings src/cli.mjs backup --keep 14; sleep 86400; done"]
+    healthcheck:
+      disable: true
+
+volumes:
+  hivemind-data:

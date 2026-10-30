@@ -11,6 +11,64 @@ const fitChip = (o) => {
     : `<span class="pill p-muted" title="The sector link comes from the topic's broader area and has not been judged for this topic yet">Pairing inherited: hypothesis</span>`;
 };
 const flagChips = (o) => (o?.dataFlags ?? []).map((x) => `<span class="pill p-medium">${esc(x)}</span>`).join("");
+// Print-edition opinion / analysis pieces matched to this angle. Two readings of the same count, chosen with the switch on the Opportunities page.
+const authChip = (o) => {
+  const a = o?.authored;
+  if (!a) return "";
+  return a.count
+    ? `<span class="pill ${a.mode === "validated" ? "p-ok" : "p-medium"}" data-pieces="${esc(o.key)}" style="cursor:pointer" title="Click to see the ${a.count} opinion and analysis pieces (print editions and online) that take up this angle, last ${a.windowDays} days">${a.online ? `${a.print} print · ${a.online} online` : `${a.count} authored piece${a.count === 1 ? "" : "s"}`}</span>`
+    : `<span class="pill ${a.mode === "validated" ? "p-muted" : "p-ok"}" title="No opinion or analysis piece in the print editions or online takes up this angle, last ${a.windowDays} days">${a.mode === "validated" ? "No authored pieces yet" : "Nobody has written this"}</span>`;
+};
+// Online pieces on this angle: the exact angle is known only once the piece has been read ("matched"); until then it counts for the topic as a whole.
+const onlineList = (a) => (a?.onlineArticles?.length ? `<div style="margin-top:8px"><div class="small b">Online</div>${a.onlineArticles.map((x) => `<div class="story"><div class="h"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div><div class="small mute">${x.author ? `<b>${esc(x.author)}</b> · ` : ""}${esc(x.outlet || "online")} · ${esc(new Date(x.at).toLocaleDateString([], { day: "numeric", month: "short" }))} · ${esc(x.kind)} <span class="pill p-muted" title="${x.exact ? "Read and matched to this exact angle" : "Counted for the topic as a whole: not yet read and matched to an exact angle"}">${x.exact ? "matched" : x.by === "section" ? "opinion page" : x.by === "cue" ? "headline says so" : x.by === "text" ? "text read" : "labelled"}</span></div></div>`).join("")}</div>` : "");
+// The "N print · M online" chip opens the whole list of pieces behind that count (capture phase, so a table row under it does not also open).
+async function showPieces(key) {
+  const body = xModal("Opinion and analysis pieces", `<div class="skel" style="height:160px;margin-top:12px"></div>`);
+  try {
+    const d = await api("/api/leadership/pieces?key=" + encodeURIComponent(key)), when = (ms) => new Date(ms).toLocaleDateString([], { day: "numeric", month: "short" });
+    body.parentElement.parentElement.querySelector("h3").textContent = d.topic ? `${d.topic} · ${d.sector}` : "Opinion and analysis pieces";
+    const row = (title, meta, act) => `<div style="padding:11px 0;border-top:1px solid var(--line)"><div style="font-weight:600;line-height:1.35">${title}</div><div class="small mute" style="margin-top:3px">${meta}</div>${act ?? ""}</div>`;
+    const who = (x) => (x.author ? `${esc(x.author)} · ` : "");
+    const group = (t, n, rows) => `<h4 style="margin:18px 0 2px;font-size:13px">${t} <span class="mute" style="font-weight:400">(${n})</span></h4>${rows || '<p class="small mute" style="margin:6px 0">None in the last ' + d.windowDays + " days.</p>"}`;
+    body.innerHTML = `<p class="small mute" style="margin:0">Opinion and analysis pieces in the last ${d.windowDays} days, newest first. Reported news is not counted.</p>` +
+      group("Online", d.online.length, d.online.map((x) => row(`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`, `${who(x)}${esc(x.outlet || "online")} · ${when(x.at)} · ${esc(x.kind)}${x.exact ? " · matched to this angle" : ""}`)).join("")) +
+      group("Print editions", d.print.length, d.print.map((x) => row(esc(x.headline) + titleTag(x), `${who(x)}${esc(x.source)} · ${esc(x.date)} · ${esc(x.kind)}`, `<button class="btn ghost sm" style="margin-top:6px" data-read="${esc(x.id)}">Read full article</button>`)).join(""));
+    body.style.maxHeight = "70vh"; body.style.overflow = "auto";
+  } catch (e) { body.innerHTML = `<p class="small mute">${esc(e.message)}</p>`; }
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-pieces]"); if (b) { e.preventDefault(); e.stopPropagation(); showPieces(b.dataset.pieces); } }, true);
+// The whole article as the print edition gave it. The OCR text is tidied for reading only: words split across lines are joined and line wraps become spaces.
+const tidyArticle = (t) => String(t ?? "").replace(/(\w)-\s*\n\s*(?=[a-z])/g, "$1").replace(/(\w)- (?=[a-z])/g, "$1").replace(/(^|\n\s*)([B-HJ-Z])\s+(?=[a-z]{2,})/g, "$1$2").replace(/\n(?!\n)/g, " ").replace(/[ \t]{2,}/g, " ").trim();
+async function readArticle(id) {
+  const body = xModal("Article", `<div class="skel" style="height:160px;margin-top:12px"></div>`);
+  try {
+    const a = await api("/api/authored/article?id=" + encodeURIComponent(id));
+    const paras = tidyArticle(a.body).split(/\n{2,}/).filter(Boolean).map((p) => `<p style="margin:0 0 10px;line-height:1.55">${esc(p)}</p>`).join("");
+    const fixed = a.original && a.original !== a.headline;
+    body.parentElement.parentElement.querySelector("h3").textContent = a.headline.length > 90 ? a.headline.slice(0, 90) + "…" : a.headline;
+    body.innerHTML = `${fixed ? `<p class="tiny mute" style="margin:0 0 8px">${a.titleSource === "printed" ? "Real title found in the text." : "Title written from the text."} The OCR read the headline as “${esc(a.original)}”.</p>` : ""}<div class="small mute" style="margin-bottom:10px">${a.author ? `<b>${esc(a.author)}</b>` : "unsigned"} · ${esc(a.source)} · ${esc(a.date)}${a.page ? ` · page ${a.page}` : ""} · <span class="pill ${a.kind === "opinion" ? "p-ok" : a.kind === "analysis" ? "p-medium" : "p-muted"}">${esc(a.kind || "not judged")}</span> · ${n0(a.words)} words</div>
+      ${a.why ? `<p class="small" style="margin:0 0 10px"><b>Why it was judged ${esc(a.kind)}:</b> ${esc(a.why)}</p>` : ""}
+      ${a.matches?.length ? `<p class="small" style="margin:0 0 12px"><b>Suggested angle it takes up:</b> ${a.matches.slice(0, 3).map((m) => `${esc(m.sector)}: ${esc(m.angle || "")} <span class="mute">(fit ${Number(m.fit).toFixed(2)})</span>`).join("<br>")}</p>` : ""}
+      <div style="max-height:62vh;overflow:auto;padding-right:6px;border-top:1px solid var(--line);padding-top:12px">${paras || '<span class="mute">No text.</span>'}</div>
+      <p class="tiny mute" style="margin:10px 0 0">Text read from the print edition by OCR, so it can contain recognition errors and parts of neighbouring articles.</p>`;
+  } catch (e) { body.innerHTML = `<p class="small mute">${esc(e.message)}</p>`; }
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-read]"); if (b) { e.preventDefault(); e.stopPropagation(); readArticle(b.dataset.read); } });
+
+// When the OCR picked up the wrong headline it was replaced by the article's real title (printed) or one written from the text (generated).
+const titleTag = (x) => (x?.original && x.original !== x.headline ? ` <span class="pill p-muted" title="${esc("Headline as read by OCR: " + x.original)}">${x.titleSource === "printed" ? "headline repaired" : "headline written from text"}</span>` : "");
+const authoredCard = (o) => {
+  const a = o?.authored;
+  if (!a) return `<div class="card"><h3>Who has written about this</h3><p class="small mute" style="margin:6px 0 0">No print-edition articles have been read for this period yet, so the headroom still uses coverage share. Run <b>node src/cli.mjs ocr</b>.</p></div>`;
+  const v = a.mode === "validated";
+  const ask = a.count
+    ? (v ? `<b>${a.count} authored piece${a.count === 1 ? "" : "s"}</b> in the last ${a.windowDays} days already make this case. Do you want to write about it?` : `<b>${a.count} authored piece${a.count === 1 ? "" : "s"}</b> in the last ${a.windowDays} days already take this angle, so there is less room. Is there something new to add?`)
+    : (v ? `No authored piece in the last ${a.windowDays} days takes this angle yet, so nothing validates it.` : `<b>Nobody has written this angle</b> in the last ${a.windowDays} days, as per the current news trend. Do you want to write about it?`);
+  return `<div class="card"><h3>Who has written about this</h3><p style="margin:6px 0">${ask}</p>
+    ${a.articles.length ? `<div style="margin-top:6px">${a.online ? '<div class="small b">Print editions</div>' : ""}${a.articles.map((x) => `<div class="story"><div class="h">${esc(x.headline)}${titleTag(x)}</div><div class="small mute">${x.author ? `<b>${esc(x.author)}</b>` : "unsigned"} · ${esc(x.source)} · ${esc(x.date)}${x.page ? ` · page ${x.page}` : ""} · ${x.kind === "opinion" ? "opinion" : "analysis"} · fit ${Number(x.fit).toFixed(2)}</div><button class="btn ghost sm" style="margin-top:6px" data-read="${esc(x.id)}">Read full article</button></div>`).join("")}</div>` : ""}
+    ${onlineList(a)}
+    <p class="small mute" style="margin:8px 0 0">${v ? "Validated view: more authored pieces score higher." : "Whitespace view: fewer authored pieces score higher."} Counted from the print editions and from online opinion and analysis pieces (not reported news).</p></div>`;
+};
 const holdNotice = (o) => (o?.holdReason ? `<div class="hold"><b>Held back from “write now”.</b> ${esc(o.holdReason)}</div>` : "");
 
 // ---------------------------------------------------------------- data quality

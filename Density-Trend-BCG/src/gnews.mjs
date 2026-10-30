@@ -1,6 +1,8 @@
 // Google News RSS per publication, plus best-effort article text retrieval. No dependencies.
-// Set HTTPS_PROXY / HTTP_PROXY (and NODE_USE_ENV_PROXY=1 on Node ≥ 24) in .env to route these requests through a proxy.
+// Everything here connects directly. The one exception: an article's text that could not be fetched directly is retried once through a proxy
+// (see fetchArticleBody and proxyfetch.mjs); the proxy address comes from HIVEMIND_BODY_PROXY or DATAIMPULSE_PROXY_URL in .env.
 import { detectWire } from "./origins.mjs";
+import { fetchViaProxy, proxyUrl } from "./proxyfetch.mjs";
 
 const UA = "Mozilla/5.0 (compatible; DensityTrendBCG/1.0; news research)";
 const NAMED = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", ndash: "–", mdash: "—", hellip: "…" };
@@ -38,9 +40,13 @@ export function parseGoogleNews(xml, publication) {
 }
 
 // Google throttles with 429/503 when polled heavily; back off and retry a few times rather than failing the whole run.
-async function getText(url, { timeout = 15000, retries = 3, ...init } = {}) {
+// Requests are direct. With `proxy` set (only ever for an article-text retry, see fetchArticleBody) the same request goes through that proxy.
+async function getText(url, { timeout = 15000, retries = 3, proxy = null, proxyFetch = fetchViaProxy, ...init } = {}) {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, { ...init, headers: { "user-agent": UA, "accept-language": "en-IN,en;q=0.9", ...init.headers }, signal: AbortSignal.timeout(timeout), redirect: "follow" });
+    const headers = { "user-agent": UA, "accept-language": "en-IN,en;q=0.9", ...init.headers };
+    const res = proxy
+      ? await proxyFetch(url, { proxyUrl: proxy, method: init.method, body: init.body, headers, timeout })
+      : await fetch(url, { ...init, headers, signal: AbortSignal.timeout(timeout), redirect: "follow" });
     if (res.ok) return res.text();
     if ((res.status === 429 || res.status === 503) && attempt < retries) { await new Promise((r) => setTimeout(r, 3000 * 3 ** attempt)); continue; }
     throw new Error(`HTTP ${res.status}`);
@@ -95,16 +101,16 @@ export async function fetchPublication(pub, { hours = 24, perPub = Infinity, dat
 }
 
 // news.google.com/rss/articles/<id> is not a redirect; the real URL comes from an internal RPC.
-export async function resolveGoogleUrl(link) {
+export async function resolveGoogleUrl(link, net = {}) {
   const id = new URL(link).pathname.split("/").pop();
-  const page = await getText(`https://news.google.com/rss/articles/${id}`);
+  const page = await getText(`https://news.google.com/rss/articles/${id}`, net);
   const sg = page.match(/data-n-a-sg="([^"]+)"/)?.[1];
   const ts = page.match(/data-n-a-ts="([^"]+)"/)?.[1];
   if (!sg || !ts) throw new Error("no signature on Google News page");
   const inner = JSON.stringify(["garturlreq", [["X", "X", ["X", "X"], null, null, 1, 1, "US:en", null, 1, null, null, null, null, null, 0, 1], "X", "X", 1, [1, 1, 1], 1, 1, null, 0, 0, null, 0], id, Number(ts), sg]);
   const body = "f.req=" + encodeURIComponent(JSON.stringify([[["Fbv4je", inner]]]));
   const text = await getText("https://news.google.com/_/DotsSplashUi/data/batchexecute", {
-    method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
+    method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" }, ...net,
   });
   const resp = JSON.parse(JSON.parse(text.split("\n\n")[1])[0][2]);
   if (typeof resp?.[1] !== "string" || !/^https?:/.test(resp[1])) throw new Error("could not decode article URL");
@@ -117,14 +123,27 @@ export function extractArticleText(html, maxChars = 6000) {
   return paras.join("\n").slice(0, maxChars);
 }
 
+async function bodyOnce(article, net) {
+  const real = await resolveGoogleUrl(article.url, net);
+  const text = extractArticleText(await getText(real, { timeout: 20000, ...net }));
+  if (text.length > 400) return { text, basis: "full-text", resolvedUrl: real, wire: detectWire(text) };
+  return { text: "", basis: "headline", resolvedUrl: real, wire: null };
+}
+
 // Returns { text, basis } — basis says what the LLM actually got to read.
-export async function fetchArticleBody(article) {
+// The text is fetched directly. Only when that FAILS (blocked, throttled, timed out) is it tried once more through the proxy, if one is configured;
+// the result then carries viaProxy: true. A page that loads but is short (a paywall teaser, a brief) is not retried: a proxy would not change it.
+export async function fetchArticleBody(article, { proxy = proxyUrl(), proxyFetch = fetchViaProxy } = {}) {
   try {
-    const real = await resolveGoogleUrl(article.url);
-    const text = extractArticleText(await getText(real, { timeout: 20000 }));
-    if (text.length > 400) return { text, basis: "full-text", resolvedUrl: real, wire: detectWire(text) };
-    return { text: "", basis: "headline", resolvedUrl: real, wire: null };
-  } catch (e) {
-    return { text: "", basis: "headline", error: String(e.message || e) };
+    // With a proxy to fall back on, a direct attempt that is refused or throttled fails at once instead of waiting through Google's back-off (3 + 9 + 27 s).
+    return await bodyOnce(article, proxy ? { retries: 0 } : {});
+  } catch (direct) {
+    const why = String(direct.message || direct);
+    if (!proxy) return { text: "", basis: "headline", error: why };
+    try {
+      return { ...(await bodyOnce(article, { proxy, proxyFetch })), viaProxy: true };
+    } catch (viaProxy) {
+      return { text: "", basis: "headline", error: `${why}; again through the proxy: ${String(viaProxy.message || viaProxy)}`, triedProxy: true };
+    }
   }
 }

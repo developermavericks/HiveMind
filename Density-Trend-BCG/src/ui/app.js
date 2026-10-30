@@ -8,11 +8,12 @@ const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { retur
 const S = {
   company: ls.get("company") || "bcg", date: null, page: "overview", status: null, cfg: null,
   gran: ls.get("gran") || "hour", level: "bracket", sel: null, compare: new Set(), show: { bars: true, share: true, avg: true, forecast: true },
-  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false }, oppByKey: new Map(), authors: [],
+  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false, mode: "whitespace" }, oppByKey: new Map(), authors: [],
 };
 // Sidebar groups. Each group with several views shows them as tabs; old routes still work through LEGACY.
 const PAGES = {
   overview: { name: "Overview", title: "Executive overview", sub: "What the news is doing, which topics are gaining attention, and what to write now", fn: (el) => pgOverview(el) },
+  leadership: { name: "Leadership", title: "Leadership view", sub: "What is trending and why, what people are writing about it, and what nobody has written yet", fn: (el) => pgLeadership(el) },
   opportunities: { name: "Opportunities", title: "Opportunities", sub: "Ranked topic opportunities with score, evidence and suggested action", fn: (el) => pgOpportunities(el) },
   trends: { name: "Trends", title: "Trends", sub: "Coverage volume, share and forecast over time", tabs: [
     { k: "topics", t: "Topics", sub: "Specific recurring topics: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
@@ -26,7 +27,8 @@ const PAGES = {
   ] },
   sources: { name: "Sources", title: "Sources", sub: "Where the news comes from", tabs: [
     { k: "collection", t: "Sources & collection", sub: "Approved sources, independence of coverage and collection health", fn: (el) => pgSources(el) },
-    { k: "journalists", t: "Journalists", sub: "Journalist directory, best-fit journalists per opportunity and editor approval", fn: (el) => pgJournalists(el) },
+    // JOURNALISTS DISABLED: { k: "journalists", t: "Journalists", sub: "Journalist directory, best-fit journalists per opportunity and editor approval", fn: (el) => pgJournalists(el) },
+    { k: "authored", t: "Authored articles", sub: "Opinion and analysis pieces from the print editions, the angles they take up, and the editor approval queue", fn: (el) => pgAuthored(el) },
   ] },
   accuracy: { name: "Accuracy", title: "Accuracy", sub: "Does the method predict topics that later gain attention?", tabs: [
     { k: "validation", t: "Validation", sub: "Live hit rate, weight tuning, forecast accuracy and the historical backtest", fn: (el) => pgAccuracy(el) },
@@ -43,11 +45,12 @@ const PAGES = {
     { k: "users", t: "Users", admin: true, sub: "Who can sign in, and who is waiting for approval", fn: (el) => pgUsers(el) },
   ] },
 };
-const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "sources/journalists", validation: "accuracy/validation", method: "accuracy/method" };
-const MEMBER_HIDDEN = new Set(["clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
-const NAV_TOP = ["overview", "opportunities", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "settings"];
+const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "sources/authored", validation: "accuracy/validation", method: "accuracy/method" };
+const MEMBER_HIDDEN = new Set(["leadership", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
+const NAV_TOP = ["overview", "leadership", "opportunities", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "settings"];
 const NAV_ICON = {
   overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  leadership: '<path d="M4 20V9M10 20V4M16 20v-8M22 20H2"/>',
   opportunities: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
   trends: '<path d="M3 17l6-6 4 4 8-9"/><path d="M15 6h6v6"/>',
   clients: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M10 21v-4h4v4"/>',
@@ -130,6 +133,7 @@ function renderProgress(st) {
   if (J["topic-merge"]?.running) rows.push(live2("Merging duplicate topics", "grouping topics that mean the same thing", J["topic-merge"].startedAt));
   if (J["entities-merge"]?.running) rows.push(live2("Merging entity names", "same company or person, different wording", J["entities-merge"].startedAt));
   if (J.fulltext?.running) rows.push(live2("Fetching article text", "second attempt at stories read from the headline", J.fulltext.startedAt));
+  if (J.ocr?.running) rows.push(live2("Reading the print editions", "downloading, finding opinion and analysis pieces, matching them to angles", J.ocr.startedAt));
   const A = st.activity ?? {};
   if (A.topicVerify) rows.push(live2("Checking stories against their topics", "removing headlines that only mention the subject"));
   if (A.topicMatch) rows.push(live2("Judging topics for each client", "checking which sectors each rising topic really matters to"));
@@ -156,7 +160,7 @@ function renderTop() {
   if ($("#dsel").dataset.sig !== dopts) { $("#dsel").innerHTML = dopts; $("#dsel").dataset.sig = dopts; }
   $("#csel").value = S.company; $("#dsel").value = S.date ?? "";
 
-  const prov = st.provider ? (st.provider === "anthropic" ? "Claude Haiku" : `Ollama (${st.llm?.message || "local"})`) : (st.llm.ok ? "LLM ready" : "LLM off");
+  const prov = st.noClaude ? `Claude off · ${[st.models?.openai && "Luna", st.models?.groq && "Groq"].filter(Boolean).join(" + ") || "no model"}` : st.provider ? (st.provider === "anthropic" ? "Claude Haiku" : `Ollama (${st.llm?.message || "local"})`) : (st.llm.ok ? "LLM ready" : "LLM off");
   $("#llm").className = `pill ${st.llm.ok ? "p-ok" : "p-bad"} dot`;
   $("#llm").textContent = st.fallbackActive ? `${prov} [fallback]` : prov;
   $("#llm").title = `LLM Provider: ${st.provider || 'none'} · Click to manage in Settings`;
@@ -207,7 +211,7 @@ async function route() {
   window.scrollTo(0, 0);
   await render();
   const open = qp.get("open"); // deep link: #/opportunities?open=<opportunity key>
-  if (open) { if (!S.oppByKey.has(open)) { const r = await api(`/api/opportunities?${qs("&limit=300&group=pair")}`); r.items.forEach((o) => S.oppByKey.set(o.key, o)); } openOpp(open); }
+  if (open) { if (!S.oppByKey.has(open)) { const r = await api(`/api/opportunities?${qs(`&limit=300&group=pair&mode=${S.opp.mode}&slim=1`)}`); r.items.forEach((o) => S.oppByKey.set(o.key, o)); } openOpp(open); }
 }
 async function render() {
   renderTop();
@@ -285,7 +289,7 @@ const bindTopicRows = (el) => $$("[data-topic]", el).forEach((r) => (r.onclick =
 const moreOf = (o) => o.moreSectors ?? o.otherSectors ?? [];
 async function pgOpportunities(el) {
   const f = S.opp;
-  const r = await api(`/api/opportunities?${qs(`&limit=1000&group=${f.group ? "topic" : "pair"}`)}`);
+  const r = await api(`/api/opportunities?${qs(`&limit=1000&group=${f.group ? "topic" : "pair"}&mode=${f.mode}&slim=1`)}`);
   S.oppByKey = new Map(r.items.map((o) => [o.key, o]));
   if (r.empty || !r.items.length) { el.innerHTML = `<div class="empty">No opportunities yet. ${r.company?.matched ? "" : "Matching the news areas to this company’s sectors is still in progress, or no LLM is available."}</div>`; return; }
   const c = r.counts, open = new Set();
@@ -295,6 +299,7 @@ async function pgOpportunities(el) {
     <input type="text" id="oq" placeholder="Search sector, topic or angle…" value="${esc(f.q)}" style="max-width:280px">
     <div class="seg" id="oact">${["all", "write now", "investigate", "monitor", "skip"].map((a) => `<button data-a="${a}" class="${f.action === a ? "on" : ""}">${a === "all" ? "All" : a}</button>`).join("")}</div>
     <label>Stage <select id="ostage"><option value="all">All</option>${STAGE_ORDER.map((s) => `<option value="${s}"${f.stage === s ? " selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
+    <div class="seg" id="omode" title="Both views count the same opinion and analysis pieces from the print editions">${[["whitespace", "Nobody has written it"], ["validated", "Others have written it"]].map(([k, t]) => `<button data-m="${k}" class="${f.mode === k ? "on" : ""}">${t}</button>`).join("")}</div>
     <label class="chk"><input type="checkbox" id="ogroup" ${f.group ? "checked" : ""}> One row per topic</label>
     <label class="chk"><input type="checkbox" id="otrig" ${f.trigger ? "checked" : ""}> With a verified trigger</label>
     <span class="mute small" id="ocount"></span></div></div>
@@ -302,7 +307,7 @@ async function pgOpportunities(el) {
   <p class="small mute" style="margin-top:10px">Score (0–100) ranks opportunities; it is <b>not</b> a probability. Weights are pilot assumptions — see <a href="#/accuracy/method">Method</a>.</p>`;
   const rowHtml = (o) => {
     const more = moreOf(o), isOpen = open.has(o.key);
-    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)} ${xSentChip(o.sentiment)}${fitChip(o)}${flagChips(o)}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
+    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
       (isOpen ? `<tr class="sub"><td></td><td colspan="8"><div class="chips">${more.map((s) => `<span class="chip" ${s.key && S.oppByKey.has(s.key) ? `data-opp="${esc(s.key)}"` : ""}>${esc(s.sector)} <b class="num">${Math.round(s.score)}</b>${s.action ? ` ${actionPill(s.action)}` : ""}</span>`).join("")}</div></td></tr>` : "");
   };
   const draw = () => {
@@ -323,6 +328,7 @@ async function pgOpportunities(el) {
   $$("#oact button").forEach((b) => (b.onclick = () => setAct(b.dataset.a)));
   $$("[data-act]", el).forEach((k) => { const go = () => setAct(f.action === k.dataset.act ? "all" : k.dataset.act); k.onclick = (e) => { if (!e.target.closest("[data-info]")) go(); }; k.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } }; });
   $("#ostage").onchange = (e) => { f.stage = e.target.value; f.page = 1; draw(); };
+  $$("#omode button").forEach((b) => (b.onclick = () => { f.mode = b.dataset.m; f.page = 1; render(); }));
   $("#ogroup").onchange = (e) => { f.group = e.target.checked; f.page = 1; render(); };
   $("#otrig").onchange = (e) => { f.trigger = e.target.checked; f.page = 1; draw(); };
   $$("#otab th.s").forEach((th) => (th.onclick = (e) => { if (e.target.closest("[data-info]")) return; f.dir = f.sort === th.dataset.s ? -f.dir : -1; f.sort = th.dataset.s; draw(); }));
@@ -333,19 +339,22 @@ async function pgOpportunities(el) {
 const DRAWER_TIP = { "Coverage share": "share", Momentum: "momentum", Acceleration: "accel", "Independent origins": "origins", "Impact breadth": "breadth", "Article text read": "fulltext", "Verified stories": "verified", Baseline: "baseline" };
 function closeDrawer() { $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); xCloseNotifs?.(); tip.hide(); }
 async function openOpp(key) {
-  const o = S.oppByKey.get(key);
+  let o = S.oppByKey.get(key);
   if (!o) return;
   $("#drawer").classList.add("on"); $("#scrim").classList.add("on");
   const d = $("#drawer");
   d.innerHTML = `<div class="drawer-h"><div>${ring(o.score, 64)}</div><div style="min-width:0"><div class="tiny mute b" style="letter-spacing:.06em;text-transform:uppercase">Opportunity</div><h2 style="font-size:18px">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}</h2><div style="margin-top:6px">${actionPill(o.action)} ${stagePill(o.stage)} ${evPill(o.evidence)} <span class="pill p-muted">${o.kind === "forecast" ? "attention forecast" : "editorial suggestion · too little data to forecast"}</span></div></div><button class="x" id="dx" aria-label="Close">✕</button></div><div class="drawer-b">${loading()}</div>`;
   $("#dx").onclick = closeDrawer;
   const lk = o.label.key;
-  const [t, ser, hist, briefs] = await Promise.all([
+  // The list leaves out each row's stories, score components and article lists to stay small; the opened row gets them here (cached after the first open).
+  const [t, ser, hist, briefs, full] = await Promise.all([
     api(`/api/topic?${qs(`&key=${encodeURIComponent(lk)}`)}`).catch(() => null),
     api(`/api/series?keys=${encodeURIComponent(lk)}&gran=hour${S.date ? `&date=${S.date}` : ""}`).catch(() => null),
     api(`/api/recommendations?company=${encodeURIComponent(S.company)}&key=${encodeURIComponent(o.key)}`).catch(() => ({ history: [] })),
     api(`/api/briefs?opp=${encodeURIComponent(o.key)}`).catch(() => ({ briefs: [] })),
+    o.slim ? api(`/api/opportunity?${qs(`&key=${encodeURIComponent(o.key)}&mode=${S.opp.mode}&group=${S.opp.group ? "topic" : "pair"}`)}`).catch(() => null) : null,
   ]);
+  if (full && !full.error) { o = full; S.oppByKey.set(key, full); }
   const m = o.metrics, tr = o.trigger;
   const body = $(".drawer-b", d);
   body.innerHTML = `
@@ -396,7 +405,7 @@ async function openOpp(key) {
       <div id="dxbody" style="margin-top:10px"><div class="skel" style="height:120px"></div></div>
     </div>
 
-    <div class="card"><h3>Author fit <span class="mute" style="font-weight:400">· ranked separately from momentum</span></h3><div id="dfit"></div></div>
+    ${authoredCard(o)}
     <div class="card"><h3>Brief</h3><div id="dbrief"></div></div>
     <div class="card"><h3>Recommendation history</h3><p class="hint">Every logged change, with why it changed. Evidence is stored with each entry.</p>${hist.history.length ? `<div class="timeline">${hist.history.map((h) => `<div class="ev"><div class="small b">${dt(h.ts)} · ${actionPill(h.action)} ${stagePill(h.stage)} score ${h.score.toFixed(0)}</div><div class="small">${esc(h.reason)}</div></div>`).join("")}</div>` : `<p class="mute small">Not logged yet. History is recorded every few minutes while the server runs.</p>`}</div>`;
 
@@ -413,7 +422,7 @@ async function openOpp(key) {
   }));
   searchPanel($("#dsearch", body), t?.searchInterest, o.label.name);
   socialDrawerPanel($("#dxbody", body), $("#dxactions", body), o);
-  fitPanel($("#dfit", body), o);
+  // JOURNALISTS DISABLED: fitPanel($("#dfit", body), o);
   briefPanel($("#dbrief", body), o, briefs.briefs);
 }
 
@@ -467,34 +476,35 @@ function searchPanel(el, si, name) {
   if (b) b.onclick = async () => { b.disabled = true; try { await post("/api/search-interest", { topic: name }); toast("Search interest fetched"); render(); } catch (e) { toast(e.message); b.disabled = false; } };
 }
 
-// Best-matching journalists for this opportunity. Matched only on what each record states (beat, outlet, place, recent articles).
-async function fitPanel(el, o) {
-  if (!isAdmin()) { el.innerHTML = ""; return; } // the journalist directory (with contact details) is for administrators
-  el.innerHTML = `<p class="small mute">Finding journalists…</p>`;
-  S.jm ??= {};
-  let r;
-  try { r = await api(`/api/journalists/matches?${qs(`&opp=${encodeURIComponent(o.key)}&limit=6`)}`); }
-  catch (e) { el.innerHTML = `<p class="small mute">${esc(e.message)}</p>`; return; }
-  S.jm[o.key] = r.matches;
-  if (!r.directory) { el.innerHTML = `<p class="small mute">The journalist directory isn’t loaded yet. Open <a href="#/journalists">Journalists</a> and press Sync.</p>`; S.briefRedraw?.(); return; }
-  el.innerHTML = `<p class="tiny mute" style="margin:0 0 6px">${n0(r.matched)} of ${n0(r.directory)} journalists have a link to this topic. Fit = beat 35 · recent articles 35 · place 15 · outlet already covering it 15.</p>` +
-    (r.matches.map((a) => `<div class="story"><div style="display:flex;gap:10px;align-items:flex-start"><div>${ring(a.score, 44)}</div><div style="min-width:0"><b>${esc(a.name)}</b> <span class="mute small">${esc([a.designation, a.publication].filter(Boolean).join(" · "))}</span>
-      <div class="small mute">${a.why.map(esc).join(" · ") || "Weak match on the available fields."}</div>
-      ${a.evidence.map((x) => `<div class="small">Wrote: ${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(clip(x.title, 90))}</a>` : esc(clip(x.title, 90))}${x.publishDate ? ` <span class="mute tiny">${esc(x.publishDate.slice(0, 10))}</span>` : ""}</div>`).join("")}
-      <div class="tiny" style="margin-top:3px">${contactLinks(a.contact)}</div>${a.missing.length ? `<div class="tiny mute">Record has no: ${a.missing.join(", ")}</div>` : ""}</div></div></div>`).join("") || `<p class="small mute">No journalist in the directory has a recorded link to this topic.</p>`);
-  S.briefRedraw?.();
-}
-const contactLinks = (c) => [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>`;
+// JOURNALISTS DISABLED: best-matching journalists for this opportunity (fitPanel, contactLinks). Authored articles replace it: see authoredCard in quality.js.
+// // Best-matching journalists for this opportunity. Matched only on what each record states (beat, outlet, place, recent articles).
+// async function fitPanel(el, o) {
+//   if (!isAdmin()) { el.innerHTML = ""; return; } // the journalist directory (with contact details) is for administrators
+//   el.innerHTML = `<p class="small mute">Finding journalists…</p>`;
+//   S.jm ??= {};
+//   let r;
+//   try { r = await api(`/api/journalists/matches?${qs(`&opp=${encodeURIComponent(o.key)}&limit=6`)}`); }
+//   catch (e) { el.innerHTML = `<p class="small mute">${esc(e.message)}</p>`; return; }
+//   S.jm[o.key] = r.matches;
+//   if (!r.directory) { el.innerHTML = `<p class="small mute">The journalist directory isn’t loaded yet. Open <a href="#/journalists">Journalists</a> and press Sync.</p>`; S.briefRedraw?.(); return; }
+//   el.innerHTML = `<p class="tiny mute" style="margin:0 0 6px">${n0(r.matched)} of ${n0(r.directory)} journalists have a link to this topic. Fit = beat 35 · recent articles 35 · place 15 · outlet already covering it 15.</p>` +
+//     (r.matches.map((a) => `<div class="story"><div style="display:flex;gap:10px;align-items:flex-start"><div>${ring(a.score, 44)}</div><div style="min-width:0"><b>${esc(a.name)}</b> <span class="mute small">${esc([a.designation, a.publication].filter(Boolean).join(" · "))}</span>
+//       <div class="small mute">${a.why.map(esc).join(" · ") || "Weak match on the available fields."}</div>
+//       ${a.evidence.map((x) => `<div class="small">Wrote: ${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(clip(x.title, 90))}</a>` : esc(clip(x.title, 90))}${x.publishDate ? ` <span class="mute tiny">${esc(x.publishDate.slice(0, 10))}</span>` : ""}</div>`).join("")}
+//       <div class="tiny" style="margin-top:3px">${contactLinks(a.contact)}</div>${a.missing.length ? `<div class="tiny mute">Record has no: ${a.missing.join(", ")}</div>` : ""}</div></div></div>`).join("") || `<p class="small mute">No journalist in the directory has a recorded link to this topic.</p>`);
+//   S.briefRedraw?.();
+// }
+// const contactLinks = (c) => [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>`;
 
 function briefPanel(el, o, briefs) {
   let cur = briefs;
   const draw = (list) => {
-    cur = list; const ms = S.jm?.[o.key] ?? [];
-    el.innerHTML = `<div class="ctl" style="margin-bottom:10px"><label>Pitch to <select id="bauth"><option value="">No journalist selected</option>${ms.map((a, i) => `<option value="${esc(a.id)}"${i === 0 ? " selected" : ""}>${esc(a.name)}${a.publication ? " · " + esc(clip(a.publication, 24)) : ""} (fit ${Math.round(a.score)})</option>`).join("")}</select></label><button class="btn sm" id="bgo" ${S.status?.llm.ok ? "" : "disabled"}>${list.length ? "Draft another brief" : "Draft brief"}</button><span class="small mute" id="bst">An editor must approve before anything is drafted further or pitched. Nothing is sent anywhere.</span></div>
+    cur = list;
+    el.innerHTML = `<div class="ctl" style="margin-bottom:10px"><button class="btn sm" id="bgo" ${S.status?.llm.ok ? "" : "disabled"}>${list.length ? "Draft another brief" : "Draft brief"}</button><span class="small mute" id="bst">An editor must approve before anything is drafted further or pitched. Nothing is sent anywhere.</span></div>
     ${list.map((b) => briefCard(b)).join("")}`;
     $("#bgo", el).onclick = async () => {
       const btn = $("#bgo", el); btn.disabled = true; $("#bst", el).textContent = "Drafting…";
-      try { await post("/api/brief", { oppKey: o.key, company: S.company, journalistId: $("#bauth", el).value || null, date: S.date }); const r = await api(`/api/briefs?opp=${encodeURIComponent(o.key)}`); draw(r.briefs); toast("Brief drafted — pending editor approval"); }
+      try { await post("/api/brief", { oppKey: o.key, company: S.company, date: S.date }); const r = await api(`/api/briefs?opp=${encodeURIComponent(o.key)}`); draw(r.briefs); toast("Brief drafted — pending editor approval"); }
       catch (e) { $("#bst", el).textContent = e.message; btn.disabled = false; }
     };
     $$("[data-decide]", el).forEach((b) => (b.onclick = async () => {

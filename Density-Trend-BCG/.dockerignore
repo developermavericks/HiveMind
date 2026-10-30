@@ -1,0 +1,29 @@
+# Keep the image small and keep secrets and local data out of it.
+.git
+.gitignore
+.github
+node_modules
+npm-debug.log*
+
+# secrets: pass them as environment variables (or a secret manager), never bake them in
+.env
+.env.*
+!.env.example
+
+# local data and backups: the container gets its own, in a volume
+data
+out
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+*.log
+
+# not needed to run
+test
+docs
+deploy
+*.docx
+Dockerfile
+docker-compose*.yml
+.dockerignore

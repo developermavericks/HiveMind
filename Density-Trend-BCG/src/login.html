@@ -8,7 +8,10 @@
 <link rel="icon" type="image/png" href="/ui/logo.png">
 <link rel="stylesheet" href="/ui/login.css">
 </head>
-<body>
+<body class="intro">
+<!-- The intro video plays once, silently (browsers only autoplay muted video), with the sign-in card hidden; when it ends login.js fades the card in over its last frame.
+     Every reload plays it again. People who ask for reduced motion, or whose browser cannot play it, get the card straight away. -->
+<video class="bg" id="bg" autoplay muted playsinline preload="auto" aria-hidden="true" tabindex="-1" src="/ui/intro.mp4#t=0.6"></video>
 <main class="stage">
   <section class="card" aria-labelledby="title">
     <div class="logo-tile"><img src="/ui/logo.png" alt="HiveMind" width="222" height="157"></div>

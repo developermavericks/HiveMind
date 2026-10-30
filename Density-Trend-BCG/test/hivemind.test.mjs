@@ -319,6 +319,12 @@ test("server: analytics API answers, authors and briefs round-trip, invalid inpu
   try {
     const ov = await get("/api/overview?company=bcg");
     assert.equal(ov.kpis.stories, 60);
+    // views carry a version tag: asking again with it gets "not modified"; a missing or unknown opportunity is refused
+    const tagged = await fetch(`${base}/api/overview?company=bcg`), tag = tagged.headers.get("etag");
+    assert.ok(tag && /no-cache/.test(tagged.headers.get("cache-control")));
+    assert.equal((await fetch(`${base}/api/overview?company=bcg`, { headers: { "if-none-match": tag } })).status, 304);
+    assert.equal((await fetch(`${base}/api/opportunity?company=bcg`)).status, 400);
+    assert.equal((await fetch(`${base}/api/opportunity?company=bcg&key=nope`)).status, 404);
     assert.ok(ov.stages.bracket);
     assert.ok(ov.history.days >= 1);
     assert.ok((await get("/api/labels?level=bracket")).rows.length >= 2);

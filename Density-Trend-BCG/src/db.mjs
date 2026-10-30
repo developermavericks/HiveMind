@@ -100,6 +100,23 @@ export class Store {
       CREATE INDEX IF NOT EXISTS topic_checks_at ON topic_checks(at);
       CREATE TABLE IF NOT EXISTS entity_aliases (alias TEXT PRIMARY KEY, canonical TEXT NOT NULL, at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS topic_matches_topic ON topic_matches(topic);
+      CREATE TABLE IF NOT EXISTS ocr_articles (
+        id TEXT PRIMARY KEY, source TEXT NOT NULL, edition_date TEXT NOT NULL, page INTEGER, headline TEXT NOT NULL, body TEXT NOT NULL, hash TEXT,
+        words INTEGER NOT NULL DEFAULT 0, candidate INTEGER NOT NULL DEFAULT 0, signals TEXT,
+        kind TEXT, author TEXT, why TEXT, classified_at INTEGER, model TEXT, fetched_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS ocr_articles_date ON ocr_articles(edition_date);
+      CREATE INDEX IF NOT EXISTS ocr_articles_kind ON ocr_articles(kind, edition_date);
+      CREATE TABLE IF NOT EXISTS ocr_pages (key TEXT PRIMARY KEY, at INTEGER NOT NULL, groups INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS ocr_angle_matches (
+        article_id TEXT NOT NULL, opp_key TEXT NOT NULL, company TEXT NOT NULL, fit REAL NOT NULL, angle TEXT, matched_at INTEGER NOT NULL, PRIMARY KEY (article_id, opp_key));
+      CREATE INDEX IF NOT EXISTS ocr_matches_opp ON ocr_angle_matches(company, opp_key);
+      -- online opinion / analysis pieces (src/online.mjs): what reading the text found, the opinion-section pages seen, and the exact angle each piece takes up
+      CREATE TABLE IF NOT EXISTS online_pieces (story_key TEXT PRIMARY KEY, kind TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', source TEXT, basis TEXT, excerpt TEXT, day TEXT NOT NULL, checked_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS online_pieces_day ON online_pieces(day);
+      CREATE TABLE IF NOT EXISTS section_pieces (url TEXT PRIMARY KEY, title TEXT NOT NULL, publication TEXT, outlet TEXT, section TEXT, published_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, story_key TEXT);
+      CREATE INDEX IF NOT EXISTS stories_title ON stories(title);
+      CREATE TABLE IF NOT EXISTS online_matches (story_key TEXT NOT NULL, opp_key TEXT NOT NULL, company TEXT NOT NULL, fit REAL NOT NULL, angle TEXT, matched_at INTEGER NOT NULL, PRIMARY KEY (story_key, opp_key));
+      CREATE INDEX IF NOT EXISTS online_matches_opp ON online_matches(company, opp_key);
     `);
     // Indexes for every lookup the dashboard, the jobs and the analytics make (IF NOT EXISTS: safe on every start).
     this.db.exec(`
@@ -129,6 +146,13 @@ export class Store {
     // databases created before backfill support lack this column
     if (!this.db.prepare("PRAGMA table_info(runs)").all().some((c) => c.name === "target_date")) this.db.exec("ALTER TABLE runs ADD COLUMN target_date TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS runs_target ON runs(target_date)");
+    if (!this.db.prepare("PRAGMA table_info(ocr_articles)").all().some((c) => c.name === "author_checked")) this.db.exec("ALTER TABLE ocr_articles ADD COLUMN author_checked INTEGER");
+    // an article the OCR cut into columns is put back together: its parts point at the whole (merged_into) and are marked kind = 'part'
+    if (!this.db.prepare("PRAGMA table_info(ocr_articles)").all().some((c) => c.name === "merged_into")) this.db.exec("ALTER TABLE ocr_articles ADD COLUMN merged_into TEXT");
+    // the repaired headline (the original OCR headline stays in "headline") and how it was found: printed | generated | kept
+    if (!this.db.prepare("PRAGMA table_info(ocr_articles)").all().some((c) => c.name === "title")) this.db.exec("ALTER TABLE ocr_articles ADD COLUMN title TEXT; ALTER TABLE ocr_articles ADD COLUMN title_source TEXT");
+    // the collected story an opinion-page entry turned out to be (set once the stories are stored)
+    if (!this.db.prepare("PRAGMA table_info(section_pieces)").all().some((c) => c.name === "story_key")) this.db.exec("ALTER TABLE section_pieces ADD COLUMN story_key TEXT");
   }
 
   // Refresh the query planner's statistics before closing, so indexes keep being chosen well as the data grows.
@@ -144,6 +168,14 @@ export class Store {
 
   // ---- readings (the cache) ----
   hasReading(key) { return !!this.db.prepare("SELECT 1 FROM readings WHERE key = ?").get(key); }
+  // Finished dashboard answers, saved with the data signature they were computed for. A restart or a second copy of the app reads them back
+  // instead of recomputing; they are used only while the signature still matches, and are derived data (safe to drop at any time).
+  #views() { if (!this._viewsReady) { this.db.exec("CREATE TABLE IF NOT EXISTS response_cache (k TEXT PRIMARY KEY, sig TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)"); this._viewsReady = true; } }
+  getView(k, sig) { this.#views(); const r = this.db.prepare("SELECT body FROM response_cache WHERE k = ? AND sig = ?").get(k, sig); return r ? r.body : null; }
+  putView(k, sig, body) { this.#views(); this.db.prepare("INSERT INTO response_cache (k, sig, body, at) VALUES (?, ?, ?, ?) ON CONFLICT(k) DO UPDATE SET sig = excluded.sig, body = excluded.body, at = excluded.at").run(k, sig, body, Date.now()); }
+  pruneViews(maxAgeMs = 3 * 864e5) { this.#views(); return this.db.prepare("DELETE FROM response_cache WHERE at < ?").run(Date.now() - maxAgeMs).changes; }
+  // Changes whenever a background job finishes: part of the dashboard cache's signature, so a longer cache lifetime never serves stale data.
+  jobRev() { const r = this.db.prepare("SELECT COUNT(*) AS n, COALESCE(MAX(finished_at), 0) AS m FROM job_log WHERE status <> 'running'").get(); return r.n + ":" + r.m; }
   readingCount() { return this.db.prepare("SELECT COUNT(*) AS n FROM readings").get().n; }
   putReading(key, { analysis, basis, readAt = Date.now() }) {
     this.db.prepare("INSERT OR REPLACE INTO readings (key, basis, analysis, read_at) VALUES (?, ?, ?, ?)").run(key, basis, JSON.stringify(analysis), readAt);
@@ -415,6 +447,10 @@ export class Store {
       "INSERT INTO runs (started_at, updated_at, model, headlines, publications, per_publication, total, done, target_date) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
     ).run(startedAt, startedAt, model, headlines, publications, JSON.stringify(perPublication), total, targetDate).lastInsertRowid);
   }
+  // A run is recorded before Google News is polled (so the dashboard can show it at once); this fills in its plan once the stories are known.
+  planRun(id, { headlines, total, perPublication }) { this.db.prepare("UPDATE runs SET headlines = ?, total = ?, per_publication = ?, updated_at = ? WHERE id = ?").run(headlines, total, JSON.stringify(perPublication), Date.now(), id); }
+  // A run that failed before it read anything leaves no trace (a finished or started run is never deleted).
+  discardRun(id) { this.db.prepare("DELETE FROM runs WHERE id = ? AND finished_at IS NULL AND done = 0").run(id); }
   runStats(id) { const r = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id); return r && { headlines: r.headlines, total: r.total, done: r.done, perPublication: JSON.parse(r.per_publication || "[]") }; }
   progressRun(id, done) { this.db.prepare("UPDATE runs SET done = ?, updated_at = ? WHERE id = ?").run(done, Date.now(), id); }
   finishRun(id, done) { const t = Date.now(); this.db.prepare("UPDATE runs SET done = ?, updated_at = ?, finished_at = ? WHERE id = ?").run(done, t, t, id); }
@@ -543,16 +579,197 @@ export class Store {
   }
   topicDrops() {
     if (this._td && Date.now() - this._td.at < 3000) return this._td.set;
-    const set = new Set(this.db.prepare("SELECT story_key, topic_id FROM topic_checks WHERE fits = 0").all().map((r) => r.story_key + "|" + r.topic_id));
+    const set = new Set(this.db.prepare("SELECT story_key, topic_id FROM topic_checks WHERE fits = 0").all().map((r) => r.story_key + "|" + r.topic_id.split("@")[0]));
     this._td = { at: Date.now(), set };
     return set;
   }
   checkedTopicPairs() { return new Set(this.db.prepare("SELECT story_key, topic_id FROM topic_checks").all().map((r) => r.story_key + "|" + r.topic_id)); }
   topicFitStats(since) { const r = this.db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(fits), 0) AS fits FROM topic_checks WHERE at >= ?").get(since); return { checked: r.n, fits: r.fits }; }
   topicDropCount(topicId, sinceMs) {
-    return this.db.prepare("SELECT COUNT(*) AS n FROM topic_checks c JOIN stories s ON s.key = c.story_key WHERE c.topic_id = ? AND c.fits = 0 AND s.published_at >= ?").get(topicId, sinceMs).n;
+    return this.db.prepare("SELECT COUNT(DISTINCT c.story_key) AS n FROM topic_checks c JOIN stories s ON s.key = c.story_key WHERE (c.topic_id = ? OR c.topic_id LIKE ?) AND c.fits = 0 AND s.published_at >= ?").get(topicId, topicId + "@%", sinceMs).n;
   }
   clearTopicChecks() { this.db.exec("DELETE FROM topic_checks"); this._td = null; }
+
+  // ---- print-edition (OCR) articles: every article kept, authored/opinion pieces marked, and the suggested angle each one takes ----
+  // rows: [{ id, source, date, page, headline, body, hash, words, candidate, signals }]. A re-download keeps what was already judged.
+  putOcrArticles(rows, now = Date.now()) {
+    return this.#tx(() => {
+      const ins = this.db.prepare("INSERT OR IGNORE INTO ocr_articles (id, source, edition_date, page, headline, body, hash, words, candidate, signals, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      let added = 0;
+      for (const r of rows) added += Number(ins.run(r.id, r.source, r.date, r.page, r.headline, r.body, r.hash, r.words, r.candidate ? 1 : 0, (r.signals ?? []).join(","), now).changes);
+      return added;
+    });
+  }
+  ocrUnclassified(limit = 1e9) {
+    return this.db.prepare("SELECT id, source, edition_date AS date, page, headline, body, signals FROM ocr_articles WHERE candidate = 1 AND kind IS NULL ORDER BY edition_date DESC, id LIMIT ?").all(limit);
+  }
+  putOcrKinds(list, model = "", now = Date.now()) {
+    this.#tx(() => {
+      const st = this.db.prepare("UPDATE ocr_articles SET kind = ?, author = COALESCE(NULLIF(author, ''), NULLIF(?, ''), ''), why = ?, classified_at = ?, model = ? WHERE id = ?");
+      for (const c of list) st.run(c.kind, c.author ?? "", c.why ?? "", now, model, c.id);
+    });
+  }
+  // ---- articles the OCR cut into columns ----
+  // Undoes assembly: the assembled articles are deleted and their parts become ordinary blocks again, to be judged afresh.
+  ocrResetAssembly() {
+    return this.#tx(() => {
+      const merged = Number(this.db.prepare("DELETE FROM ocr_articles WHERE id GLOB '*|g[0-9]*'").run().changes);
+      this.db.prepare("DELETE FROM ocr_angle_matches WHERE article_id GLOB '*|g[0-9]*'").run();
+      const parts = Number(this.db.prepare("UPDATE ocr_articles SET kind = NULL, merged_into = NULL, why = NULL, classified_at = NULL, model = NULL, author = NULL, author_checked = NULL, title = NULL, title_source = NULL WHERE kind = 'part'").run().changes);
+      this.db.prepare("DELETE FROM ocr_pages").run();
+      this.db.prepare("UPDATE ocr_articles SET kind = 'news', classified_at = ?, model = 'rule' WHERE candidate = 0 AND kind IS NULL").run(Date.now());
+      return { merged, parts };
+    });
+  }
+  // Pages that have a block starting mid-sentence (the continuation of a column), or an authored piece whose headline looks wrong,
+  // and have not been looked at yet. isWeak(headline, author) says whether a headline looks wrong.
+  ocrPagesToAssemble(limit = 1e9, isWeak = () => false) {
+    const key = (r) => `${r.source}|${r.date}|${r.page}`, pages = new Map();
+    const done = new Set(this.db.prepare("SELECT key FROM ocr_pages").all().map((r) => r.key));
+    for (const r of this.db.prepare("SELECT DISTINCT source, edition_date AS date, page FROM ocr_articles WHERE page IS NOT NULL AND kind IS NOT 'part' AND words >= 40 AND substr(ltrim(body), 1, 1) GLOB '[a-z]' ORDER BY edition_date DESC, source, page").all()) pages.set(key(r), r);
+    for (const r of this.db.prepare("SELECT source, edition_date AS date, page, headline, author FROM ocr_articles WHERE page IS NOT NULL AND kind IN ('opinion', 'analysis') AND merged_into IS NULL").all()) if (isWeak(r.headline, r.author)) pages.set(key(r), { source: r.source, date: r.date, page: r.page });
+    return [...pages.entries()].filter(([k]) => !done.has(k)).map(([, v]) => v).slice(0, limit);
+  }
+  // The blocks of one page in the order the OCR extracted them (article ids count up through the page).
+  ocrPageBlocks(source, date, page) {
+    return this.db.prepare("SELECT id, words, headline, body FROM ocr_articles WHERE source = ? AND edition_date = ? AND page = ? AND kind IS NOT 'part' AND merged_into IS NULL AND id NOT GLOB '*|g[0-9]*' AND words >= 3 ORDER BY CAST(substr(id, length(source) + length(edition_date) + 3) AS INTEGER)").all(source, date, page);
+  }
+  // groups: [{ ids, headline, writer }] from the model. Each group becomes one article (id "...|g<first block id>"); its parts stay in the table,
+  // marked kind = 'part' so they are not judged or counted on their own, and their angle matches are dropped (the whole article is matched instead).
+  putOcrGroups(pg, groups, blocks, now = Date.now()) {
+    this.#tx(() => {
+      const ins = this.db.prepare("INSERT OR REPLACE INTO ocr_articles (id, source, edition_date, page, headline, body, hash, words, candidate, signals, author, author_checked, title, title_source, fetched_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 1, '', ?, ?, ?, ?, ?)");
+      const part = this.db.prepare("UPDATE ocr_articles SET kind = 'part', merged_into = ? WHERE id = ?"), drop = this.db.prepare("DELETE FROM ocr_angle_matches WHERE article_id = ?");
+      for (const g of groups) {
+        const members = g.ids.map((id) => blocks.find((b) => b.id === id)).filter(Boolean);
+        if (members.length < 2) continue;
+        const id = `${pg.source}|${pg.date}|g${members[0].id.split("|")[2]}`;
+        ins.run(id, pg.source, pg.date, pg.page, members[0].headline, members.map((b) => b.body).join("\n\n"), members.reduce((n, b) => n + b.words, 0), g.writer || "", g.writer ? 1 : null, g.headline || null, g.headline ? "printed" : null, now);
+        for (const m of members) { part.run(id, m.id); drop.run(m.id); }
+      }
+      this.db.prepare("INSERT OR REPLACE INTO ocr_pages (key, at, groups) VALUES (?, ?, ?)").run(`${pg.source}|${pg.date}|${pg.page}`, now, groups.length);
+    });
+  }
+
+  // Authored pieces whose writer has not been looked for yet. The start and end of the text are kept: that is where the name is printed.
+  ocrNeedingAuthor(limit = 1e9) {
+    return this.db.prepare("SELECT id, source, page, headline, substr(body, 1, 420) AS start, substr(body, -280) AS finish FROM ocr_articles WHERE kind IN ('opinion', 'analysis') AND author = '' AND author_checked IS NULL ORDER BY edition_date DESC, id LIMIT ?").all(limit);
+  }
+  ocrNeedingTitle(limit = 1e9) {
+    return this.db.prepare("SELECT id, source, page, author, headline, substr(body, 1, 700) AS start FROM ocr_articles WHERE kind IN ('opinion', 'analysis') AND title_source IS NULL ORDER BY edition_date DESC, id LIMIT ?").all(limit);
+  }
+  putOcrTitles(list) {
+    this.#tx(() => { const st = this.db.prepare("UPDATE ocr_articles SET title = ?, title_source = ? WHERE id = ?"); for (const t of list) st.run(t.title || null, t.source, t.id); });
+  }
+  putOcrAuthors(list) {
+    this.#tx(() => {
+      const st = this.db.prepare("UPDATE ocr_articles SET author = ?, author_checked = 1 WHERE id = ?");
+      for (const a of list) st.run(a.author ?? "", a.id);
+    });
+  }
+  // Articles that were not candidates (short briefs and listings) are recorded as news so each article ends up with a kind.
+  markOcrNonCandidates(now = Date.now()) { return Number(this.db.prepare("UPDATE ocr_articles SET kind = 'news', classified_at = ?, model = 'rule' WHERE candidate = 0 AND kind IS NULL").run(now).changes); }
+  ocrAuthored({ from = "0000", to = "9999", limit = 1e9 } = {}) {
+    return this.db.prepare("SELECT id, source, edition_date AS date, page, COALESCE(title, headline) AS headline, headline AS original, body, kind, author, why FROM ocr_articles WHERE kind IN ('opinion', 'analysis') AND edition_date >= ? AND edition_date <= ? ORDER BY edition_date DESC, id LIMIT ?").all(from, to, limit);
+  }
+  ocrCounts() {
+    const r = this.db.prepare("SELECT COUNT(*) AS total, SUM(kind IN ('opinion', 'analysis')) AS authored, SUM(kind = 'opinion') AS opinion, SUM(kind = 'analysis') AS analysis, SUM(kind IS NOT NULL) AS judged, SUM(candidate = 1) AS candidates, MIN(edition_date) AS first, MAX(edition_date) AS last FROM ocr_articles").get();
+    return { total: r.total, authored: r.authored ?? 0, opinion: r.opinion ?? 0, analysis: r.analysis ?? 0, judged: r.judged ?? 0, candidates: r.candidates ?? 0, first: r.first, last: r.last };
+  }
+  ocrCountsBySource() { return this.db.prepare("SELECT source, COUNT(*) AS total, SUM(kind IN ('opinion', 'analysis')) AS authored FROM ocr_articles GROUP BY source ORDER BY source").all(); }
+  // Replaces a company's matches for the given articles: an article takes up at most the angles listed now.
+  putOcrMatches(company, list, now = Date.now()) {
+    this.#tx(() => {
+      const del = this.db.prepare("DELETE FROM ocr_angle_matches WHERE company = ? AND article_id = ?");
+      const ins = this.db.prepare("INSERT OR REPLACE INTO ocr_angle_matches (article_id, opp_key, company, fit, angle, matched_at) VALUES (?, ?, ?, ?, ?, ?)");
+      for (const id of new Set(list.map((m) => m.articleId))) del.run(company, id);
+      for (const m of list) ins.run(m.articleId, m.oppKey, company, m.fit, m.angle ?? "", now);
+    });
+  }
+  ocrMatchedIds(company) { return new Set(this.db.prepare("SELECT DISTINCT article_id FROM ocr_angle_matches WHERE company = ?").all(company).map((r) => r.article_id)); }
+  ocrHasData(from, to = "9999") { return this.db.prepare("SELECT COUNT(*) AS n FROM ocr_articles WHERE kind IN ('opinion', 'analysis') AND edition_date >= ? AND edition_date <= ?").get(from, to).n > 0; }
+  // The authored-articles page: opinion / analysis pieces (or every judged article with kind = "all"), searchable, with the angles each one takes up.
+  ocrSearch({ q = "", source = "", kind = "authored", matched = "", limit = 25, offset = 0, company = "bcg" } = {}) {
+    const w = [], args = [];
+    if (kind === "opinion" || kind === "analysis") { w.push("a.kind = ?"); args.push(kind); } else if (kind === "news") w.push("a.kind = 'news'"); else if (kind !== "all") w.push("a.kind IN ('opinion', 'analysis')");
+    if (source) { w.push("a.source = ?"); args.push(source); }
+    if (q) { w.push("(a.headline LIKE ? OR a.author LIKE ? OR a.body LIKE ?)"); const l = "%" + q.replace(/[%_]/g, " ") + "%"; args.push(l, l, l); }
+    if (matched === "1") w.push("EXISTS (SELECT 1 FROM ocr_angle_matches m WHERE m.article_id = a.id AND m.company = ? AND m.opp_key <> '-')"); else if (matched === "0") w.push("NOT EXISTS (SELECT 1 FROM ocr_angle_matches m WHERE m.article_id = a.id AND m.company = ? AND m.opp_key <> '-')");
+    if (matched === "1" || matched === "0") args.push(company);
+    const where = w.length ? "WHERE " + w.join(" AND ") : "";
+    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM ocr_articles a ${where}`).get(...args).n;
+    const rows = this.db.prepare(`SELECT a.id, a.source, a.edition_date AS date, a.page, COALESCE(a.title, a.headline) AS headline, a.headline AS original, a.title_source AS titleSource, a.author, a.kind, a.why, a.words, substr(a.body, 1, 900) AS excerpt FROM ocr_articles a ${where} ORDER BY a.edition_date DESC, a.source, a.page LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const by = new Map();
+    if (rows.length) {
+      const ph = rows.map(() => "?").join(",");
+      for (const m of this.db.prepare(`SELECT article_id, opp_key, fit, angle FROM ocr_angle_matches WHERE company = ? AND opp_key <> '-' AND article_id IN (${ph}) ORDER BY fit DESC`).all(company, ...rows.map((r) => r.id)))
+        (by.get(m.article_id) ?? by.set(m.article_id, []).get(m.article_id)).push({ oppKey: m.opp_key, sector: m.opp_key.split("|")[1] ?? "", fit: m.fit, angle: m.angle });
+    }
+    return { total, rows: rows.map((r) => ({ ...r, matches: by.get(r.id) ?? [] })) };
+  }
+  ocrArticle(id, company = "bcg") {
+    const r = this.db.prepare("SELECT id, source, edition_date AS date, page, COALESCE(title, headline) AS headline, headline AS original, title_source AS titleSource, body, kind, author, why, words FROM ocr_articles WHERE id = ?").get(id);
+    if (!r) return null;
+    const matches = this.db.prepare("SELECT opp_key, fit, angle FROM ocr_angle_matches WHERE company = ? AND article_id = ? AND opp_key <> '-' ORDER BY fit DESC").all(company, id).map((m) => ({ oppKey: m.opp_key, sector: m.opp_key.split("|")[1] ?? "", fit: m.fit, angle: m.angle }));
+    return { ...r, matches };
+  }
+  ocrFacets(company = "bcg") { return { counts: { ...this.ocrCounts(), matched: this.db.prepare("SELECT COUNT(DISTINCT article_id) AS n FROM ocr_angle_matches WHERE company = ? AND opp_key <> '-'").get(company).n }, sources: this.ocrCountsBySource() }; }
+  // opp_key -> [{ id, source, date, headline, author, kind, fit }] for authored articles in the window.
+  ocrMatchesByOpp(company, from, to = "9999") {
+    const by = new Map();
+    const rows = this.db.prepare("SELECT m.opp_key, m.fit, a.id, a.source, a.edition_date AS date, a.page, COALESCE(a.title, a.headline) AS headline, a.headline AS original, a.title_source AS titleSource, a.author, a.kind FROM ocr_angle_matches m JOIN ocr_articles a ON a.id = m.article_id WHERE m.company = ? AND a.edition_date >= ? AND a.edition_date <= ? ORDER BY m.fit DESC, a.edition_date DESC").all(company, from, to);
+    for (const r of rows) (by.get(r.opp_key) ?? by.set(r.opp_key, []).get(r.opp_key)).push({ id: r.id, source: r.source, date: r.date, page: r.page, headline: r.headline, original: r.original, titleSource: r.titleSource, author: r.author, kind: r.kind, fit: r.fit });
+    return by;
+  }
+
+  // ---- online opinion / analysis pieces ----
+  onlineChecked() { return new Set(this.db.prepare("SELECT story_key FROM online_pieces").all().map((r) => r.story_key)); }
+  onlineReadOn(day) { return this.db.prepare("SELECT COUNT(*) AS n FROM online_pieces WHERE day = ? AND basis = 'full-text'").get(day).n; }
+  putSectionPieces(list, now = Date.now()) {
+    return this.#tx(() => {
+      const st = this.db.prepare("INSERT OR IGNORE INTO section_pieces (url, title, publication, outlet, section, published_at, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      let added = 0;
+      for (const s of list) added += Number(st.run(s.url, s.title, s.publication ?? "", s.outlet ?? "", s.section ?? "", s.publishedAt, now).changes);
+      return added;
+    });
+  }
+  // Ties each opinion-page entry to the collected story it is (same link, else same headline), once, when the stories have been stored.
+  linkSectionPieces() {
+    return this.#tx(() => {
+      const a = Number(this.db.prepare("UPDATE section_pieces SET story_key = (SELECT story_key FROM articles WHERE articles.url = section_pieces.url LIMIT 1) WHERE story_key IS NULL").run().changes);
+      const b = Number(this.db.prepare("UPDATE section_pieces SET story_key = (SELECT key FROM stories WHERE stories.title = section_pieces.title LIMIT 1) WHERE story_key IS NULL").run().changes);
+      return a + b;
+    });
+  }
+  // Stories found on a newspaper's opinion section page.
+  onlineSectionKeys() { return new Set(this.db.prepare("SELECT DISTINCT story_key FROM section_pieces WHERE story_key IS NOT NULL").all().map((r) => r.story_key)); }
+  putOnlinePieces(rows, now = Date.now()) {
+    const day = dayOf(now);
+    this.#tx(() => { const st = this.db.prepare("INSERT OR REPLACE INTO online_pieces (story_key, kind, author, source, basis, excerpt, day, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"); for (const r of rows) st.run(r.key, r.kind, r.author ?? "", r.source ?? "", r.basis ?? "", r.excerpt ?? "", day, now); });
+  }
+  onlinePieces() { return new Map(this.db.prepare("SELECT story_key, kind, author, source, basis FROM online_pieces").all().map((r) => [r.story_key, { kind: r.kind, author: r.author, source: r.source, basis: r.basis }])); }
+  // Confirmed pieces (opinion / analysis) that no angle has been looked for yet.
+  onlineUnmatched(company, limit = 1e9) {
+    return this.db.prepare("SELECT p.story_key AS key, s.title, p.excerpt FROM online_pieces p JOIN stories s ON s.key = p.story_key WHERE p.kind IN ('opinion', 'analysis') AND NOT EXISTS (SELECT 1 FROM online_matches m WHERE m.story_key = p.story_key AND m.company = ?) ORDER BY s.published_at DESC LIMIT ?").all(company, limit);
+  }
+  putOnlineMatches(company, list, now = Date.now()) {
+    this.#tx(() => {
+      const del = this.db.prepare("DELETE FROM online_matches WHERE company = ? AND story_key = ?");
+      const ins = this.db.prepare("INSERT OR REPLACE INTO online_matches (story_key, opp_key, company, fit, angle, matched_at) VALUES (?, ?, ?, ?, ?, ?)");
+      for (const id of new Set(list.map((m) => m.storyKey))) del.run(company, id);
+      for (const m of list) ins.run(m.storyKey, m.oppKey, company, m.fit, m.angle ?? "", now);
+    });
+  }
+  // story key -> opp keys it was matched to ("-" rows only mark the piece as judged, with no angle)
+  onlineMatches(company) {
+    const by = new Map();
+    for (const r of this.db.prepare("SELECT story_key, opp_key, fit FROM online_matches WHERE company = ?").all(company)) (by.get(r.story_key) ?? by.set(r.story_key, []).get(r.story_key)).push({ oppKey: r.opp_key, fit: r.fit });
+    return by;
+  }
+  onlineStats(sinceDay) {
+    const r = this.db.prepare("SELECT COUNT(*) AS n, SUM(basis = 'full-text') AS read, SUM(kind IN ('opinion', 'analysis')) AS authored, SUM(author <> '') AS named FROM online_pieces WHERE day >= ?").get(sinceDay);
+    return { checked: r.n, read: r.read ?? 0, authored: r.authored ?? 0, named: r.named ?? 0, sections: this.db.prepare("SELECT COUNT(*) AS n FROM section_pieces").get().n };
+  }
 
   // ---- human audit of the AI reading, and a second model's opinion ----
   putAudit({ key, verdict, note = "", reviewer = "", reason = "" }) { this.db.prepare("INSERT OR REPLACE INTO audits (key, verdict, note, reviewer, reason, at) VALUES (?, ?, ?, ?, ?, ?)").run(key, verdict, String(note).slice(0, 400), reviewer, reason, Date.now()); }

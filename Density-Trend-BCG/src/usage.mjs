@@ -46,9 +46,10 @@ export async function usageReport({ store, integrations, cfg, refresh = false })
     proxy: "DataImpulse bills by data used and does not report it to this app; check your DataImpulse dashboard.",
   };
   const services = [];
-  for (const [name, spec] of Object.entries({ anthropic: "Anthropic (Claude)", groq: "Groq (low-cost models)", serper: "Serper (web news)", serpapi: "SerpApi (search interest)", x: "X (Twitter)", ollama: "Ollama (local model)", proxy: "Proxy (DataImpulse)" })) {
+  for (const [name, spec] of Object.entries({ anthropic: "Anthropic (Claude)", groq: "Groq (low-cost models)", openai: "OpenAI (GPT)", serper: "Serper (web news)", serpapi: "SerpApi (search interest)", x: "X (Twitter)", ollama: "Ollama (local model)", proxy: "Proxy (DataImpulse)" })) {
     const t = store.usage(name, today), m = store.usage(name, month), bal = store.getJson(`usage.balance.${name}`, null);
-    const estCost = name === "anthropic" && price.inPerMTok != null && price.outPerMTok != null ? (m.tokensIn * price.inPerMTok + m.tokensOut * price.outPerMTok) / 1e6 : null;
+    const pr = name === "anthropic" ? price : cfg.pricing?.[name] ?? {};
+    const estCost = pr.inPerMTok != null && pr.outPerMTok != null ? (m.tokensIn * pr.inPerMTok + m.tokensOut * pr.outPerMTok) / 1e6 : null;
     services.push({
       name, label: spec, enabled: integrations.enabled(name), configured: integrations.configured(name), today: t, month: m,
       balance: bal && !bal.error ? bal : null, balanceError: bal?.error ?? null, estCostMonth: estCost,

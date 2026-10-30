@@ -3,18 +3,20 @@
 // on/off switches and usage counters live in the database. Everything here is local to this machine.
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { writeFileAtomic } from "./atomic.mjs";
+import { fetchViaProxy, proxyUrl } from "./proxyfetch.mjs";
 
 export const INTEGRATIONS = {
-  anthropic: { label: "Anthropic (Claude)", env: "ANTHROPIC_API_KEY", role: "Reads stories, matches sectors to companies and drafts briefs.", essential: true, docs: "console.anthropic.com" },
-  groq: { label: "Groq (low-cost models)", env: "GROQ_API_KEY", role: "Reads whole articles and checks topic fit at a fraction of the cost. Claude stays the fallback and makes the final decisions.", docs: "console.groq.com" },
+  anthropic: { label: "Anthropic (Claude)", env: "ANTHROPIC_API_KEY", role: "Switched off by default: while it is off, Groq and OpenAI (Luna) do all the work and nothing can fall back to Claude. Switch it on to use Claude (Haiku) again for reading, matching and briefs.", docs: "console.anthropic.com" },
+  groq: { label: "Groq (low-cost models)", env: "GROQ_API_KEY", role: "The low-cost workhorse: reads whole articles, labels topics and sentiment, checks topic fit, merges duplicates and reads the print editions. With Claude off it also takes over from OpenAI when OpenAI fails or reaches its daily cap.", docs: "console.groq.com" },
+  openai: { label: "OpenAI (GPT)", env: "OPENAI_API_KEY", role: "GPT-5.6 Luna for the heavier jobs: reading headlines, company-sector matching, briefs, the second-opinion review and putting the columns of printed articles back together. A daily spend cap (limits.openaiDailyUsd) sends work to Groq once it is reached. Everything else is Groq.", docs: "platform.openai.com" },
   ollama: { label: "Ollama (local model)", env: null, role: "Runs a model on this machine as a fallback when Claude is unavailable, out of credit or switched off.", docs: "ollama.com" },
   x: { label: "X (Twitter) API", env: "X_BEARER_TOKEN", role: "Hourly post volume per topic, shown as a separate social signal. Never mixed into news coverage.", docs: "developer.x.com" },
   serpapi: { label: "SerpApi", env: "SERPAPI_KEY", role: "Google Trends search interest per topic (relative 0–100).", docs: "serpapi.com" },
   serper: { label: "Serper", env: "SERPER_API_KEY", role: "Google search and news results. Stored and testable; not used for collection yet.", docs: "serper.dev" },
-  journalists: { label: "Journalist directory", env: null, role: "Directory of journalists (beat, outlet, recent articles) used to suggest who to pitch each opportunity to. Synced into this machine's database.", docs: "" },
-  proxy: { label: "Proxy", env: "HTTPS_PROXY", role: "Routes Google News collection through a proxy if Google throttles this machine's IP.", docs: "" },
+  // JOURNALISTS DISABLED (directory integration):
+  // journalists: { label: "Journalist directory", env: null, role: "Directory of journalists (beat, outlet, recent articles) used to suggest who to pitch each opportunity to. Synced into this machine's database.", docs: "" },
+  proxy: { label: "Proxy", env: "HTTPS_PROXY", role: "Used for one thing only: an article's text that could not be fetched directly is retried once through it. Google News polling, the model APIs and everything else connect directly.", docs: "" },
 };
 const EXHAUSTED = /credit|quota|insufficient|exhaust|out of (searches|requests)|limit (reached|exceeded)|billing|payment|\b402\b/i;
 const KEY_OK = /^[\w.\-:=+/%~@]{8,400}$/; // no spaces or newlines, so a pasted value can never inject another .env line
@@ -25,11 +27,12 @@ export class Integrations {
   constructor({ root, store }) { this.root = root; this.store = store; this.envPath = join(root, ".env"); }
 
   // ---- toggles ----
-  enabled(name) { return this.store.getMeta(`int.${name}.enabled`) !== "0"; }
+  // Claude is off until someone switches it on (Settings → Integrations): while it is off Groq and OpenAI do the work. Everything else is on by default.
+  enabled(name) { const v = this.store.getMeta(`int.${name}.enabled`); return v == null || v === "" ? name !== "anthropic" : v !== "0"; }
   setEnabled(name, on) { this.store.setMeta(`int.${name}.enabled`, on ? "1" : "0"); }
   key(name) { const e = INTEGRATIONS[name]?.env; return e ? process.env[e] || "" : ""; }
   configured(name) {
-    if (name === "proxy") return !!(process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
+    if (name === "proxy") return !!proxyUrl();
     if (name === "ollama") return true;
     return !!this.key(name);
   }
@@ -62,8 +65,8 @@ export class Integrations {
     if (name === "proxy") { this.removeEnv("HTTPS_PROXY"); this.removeEnv("HTTP_PROXY"); return; }
     this.removeEnv(spec.env);
   }
-  // Node only reads NODE_USE_ENV_PROXY at startup, so the proxy switch takes effect after a restart.
-  setProxyEnabled(on) { this.setEnv("NODE_USE_ENV_PROXY", on ? "1" : "0"); this.setEnabled("proxy", on); }
+  // The switch is read by each job when it starts (HIVEMIND_NO_PROXY), so it takes effect on the next job. No restart and no .env line are involved.
+  setProxyEnabled(on) { this.setEnabled("proxy", on); }
 
   // ---- usage and health ----
   state(name) { return this.store.getJson(`int.${name}.state`, { calls: 0, ok: 0, errors: 0 }); }
@@ -82,13 +85,13 @@ export class Integrations {
   status(extra = {}) {
     return Object.entries(INTEGRATIONS).map(([name, spec]) => {
       const v = this.key(name), s = this.state(name), on = this.enabled(name);
-      const configured = name === "ollama" ? !!extra.ollama?.reachable : name === "journalists" ? (extra.journalists?.count ?? 0) > 0 : name === "proxy" ? !!(process.env.HTTPS_PROXY || process.env.HTTP_PROXY) : !!v;
+      const configured = name === "ollama" ? !!extra.ollama?.reachable : name === "journalists" ? (extra.journalists?.count ?? 0) > 0 : name === "proxy" ? !!proxyUrl() : !!v;
       let health = "off";
       if (on && configured) health = s.exhausted ? "exhausted" : s.lastErrorAt && (!s.lastOkAt || s.lastErrorAt > s.lastOkAt) ? "error" : "ok";
       else if (on && !configured) health = "missing";
       return { name, label: spec.label, role: spec.role, docs: spec.docs, essential: !!spec.essential, hasKey: !!spec.env, configured, enabled: on, health,
-        masked: name === "proxy" ? mask((process.env.HTTPS_PROXY || "").replace(/^https?:\/\/[^@]*@/, "")) : mask(v), envName: spec.env, state: s,
-        needsRestart: name === "proxy" ? (process.env.NODE_USE_ENV_PROXY === "1") !== on : false };
+        masked: name === "proxy" ? mask(proxyUrl().replace(/^https?:\/\/[^@]*@/, "")) : mask(v), envName: spec.env, state: s,
+        needsRestart: false };
     });
   }
 
@@ -104,6 +107,13 @@ export class Integrations {
           body: JSON.stringify({ model: process.env.HIVEMIND_MODEL || "claude-haiku-4-5", max_tokens: 4, messages: [{ role: "user", content: "ok" }] }) });
         if (!r.ok) return fail(`Anthropic ${r.status}: ${(await r.text()).slice(0, 160)}`);
         return pass("Key accepted.");
+      }
+      if (name === "openai") {
+        if (!this.key(name)) return { ok: false, message: "No key set." };
+        const r = await fetch("https://api.openai.com/v1/models", { signal: timeout, headers: { authorization: `Bearer ${this.key(name)}` } });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) return fail(`OpenAI ${r.status}: ${j.error?.message ?? "request refused"}`);
+        return pass(`Key accepted (using ${process.env.OPENAI_MODEL || "gpt-5.6-luna"}).`);
       }
       if (name === "groq") {
         if (!this.key(name)) return { ok: false, message: "No key set." };
@@ -150,14 +160,13 @@ export class Integrations {
         return n ? pass(`Running, ${n} model${n > 1 ? "s" : ""} installed.`) : fail("Ollama is running but no model is installed yet.");
       }
       if (name === "proxy") {
-        const url = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+        const url = proxyUrl();
         if (!url) return { ok: false, message: "No proxy configured." };
-        const code = "Promise.all([fetch('https://api.ipify.org').then(r=>r.text())]).then(([ip])=>console.log(ip)).catch(e=>{console.error(e.message);process.exit(1)})";
-        const via = spawnSync(process.execPath, ["-e", code], { encoding: "utf8", timeout: 30000, env: { ...process.env, NODE_USE_ENV_PROXY: "1" } });
-        const direct = spawnSync(process.execPath, ["-e", code], { encoding: "utf8", timeout: 30000, env: { ...process.env, NODE_USE_ENV_PROXY: "0", HTTPS_PROXY: "", HTTP_PROXY: "" } });
-        if (via.status !== 0) return fail(`Proxy request failed: ${String(via.stderr).trim().slice(0, 140)}`);
-        const a = via.stdout.trim(), b = direct.stdout.trim();
-        return a && a !== b ? pass(`Working: requests leave from ${a} instead of ${b || "your own IP"}.`) : fail("Requests still leave from your own IP; the proxy is not being used.");
+        // the same mechanism the application uses for article-text retries: a tunnel through the proxy to a page that reports the address it sees
+        const seen = async (viaProxy) => { const r = viaProxy ? await fetchViaProxy("https://api.ipify.org", { proxyUrl: url, timeout: 20000 }) : await fetch("https://api.ipify.org", { signal: timeout }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return (await r.text()).trim(); };
+        let a; try { a = await seen(true); } catch (e) { return fail(`Proxy request failed: ${String(e.message).slice(0, 140)}`); }
+        const b = await seen(false).catch(() => "");
+        return a && a !== b ? pass(`Working: article-text retries leave from ${a} instead of ${b || "your own IP"}. Nothing else uses the proxy.`) : fail("Requests still leave from your own IP; the proxy is not being used.");
       }
     } catch (e) { return fail(e.name === "TimeoutError" ? "Timed out." : e.message); }
     return { ok: false, message: "Unknown integration." };

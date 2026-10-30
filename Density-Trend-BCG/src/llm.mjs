@@ -5,6 +5,7 @@
 //   HIVEMIND_LLM=auto|anthropic|ollama   HIVEMIND_MODEL=claude-haiku-4-5
 //   OLLAMA_HOST=http://127.0.0.1:11434   OLLAMA_MODEL=<tag>
 import { norm } from "./brackets.mjs";
+import { isWeakHeadline, sameText, textHas, textHasLoose, startsMidSentence } from "./ocr.mjs";
 
 const clamp01 = (x) => (Number.isFinite(+x) ? Math.min(1, Math.max(0, +x)) : 0);
 const str = (x, max = 400) => (typeof x === "string" ? x.trim().slice(0, max) : "");
@@ -236,11 +237,159 @@ export const entityMergeSystem = `You maintain a list of named entities (organis
 // ---------- Job 1g: does this headline really belong to the topic it was filed under? ----------
 
 export const topicFitSystem = `You check topic labels on news headlines. You are given a topic and numbered headlines that were filed under it. Answer fits=true ONLY if the story is mainly about that subject. Mentioning a related word, institution or place is not enough (for example a crime investigated by the police, a police arrest or a police-led operation is NOT "police misconduct"; a court mentioned in passing is not "court rulings"). When fits=false give a very short reason (under 8 words); for fits=true give none. Call the judge_fit tool once, with an entry for every number.`;
+// A second, stricter question on the same headlines: not "is it about the topic" but "would a writer taking this angle use it".
+export const angleFitSystem = `You check news headlines against an editorial angle. You are given a topic, the angle an editor wants to write about it, and numbered headlines filed under the topic. Answer fits=true ONLY if the story would be real material for a piece taking that angle: it reports an event, decision, figure, risk or development the angle is about. Answer fits=false for stories that share the topic's words but not the angle's subject: greetings and wishes, rituals, recipes, celebrity or lifestyle items, astrology, listings, unrelated local incidents. When fits=false give a very short reason (under 8 words); for fits=true give none. Call the judge_fit tool once, with an entry for every number.`;
 export const topicFitTool = {
   name: "judge_fit",
   description: "Whether each numbered headline is mainly about the topic.",
   input_schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["n", "fits"], properties: { n: { type: "integer" }, fits: { type: "boolean" }, why: { type: "string" } } } } } },
 };
+
+// ---------- Job 4: print-edition articles — authored/opinion or reported news, and which suggested angle an authored piece takes ----------
+
+export const ARTICLE_KINDS = ["opinion", "analysis", "news"];
+export const articleKindSystem = `You sort articles from Indian newspapers (OCR text of the print edition) into three kinds. For each numbered article you get the paper, page, headline, any rule-based signals and an excerpt (start and end of the text).
+- "opinion": a columnist's, editor's, expert's or guest writer's VIEW or ARGUMENT: it takes a position, recommends something, or argues what should happen. Editorials (unsigned, the paper's own view) count. Letters to the editor do not.
+- "analysis": a signed or clearly interpretive piece that explains or weighs a development with the writer's own reasoning, rather than only reporting what happened (explainers, "what it means", features built around a thesis).
+- "news": reported facts: what happened, who said what, figures, quotes, court orders, results, market moves. A reporter's name or credit line ("— Vasantha Kumar", "reuters 20 October", "Mumbai, 20 October") on a news story does NOT make it authored. Also "news" for briefs, listings, tables, advertisements, obituaries, fragments and anything you cannot judge.
+Use only the text given. Judge the writing, not the paper's reputation. When unsure between opinion/analysis and news, answer news. For opinion and analysis give "author" (the writer's name if it appears, else empty) and a "why" of under 12 words. Call the classify_articles tool exactly once with an entry for every number.`;
+export const articleKindTool = {
+  name: "classify_articles",
+  description: "Kind of each numbered article.",
+  input_schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["n", "kind"], properties: { n: { type: "integer" }, kind: { type: "string", enum: ARTICLE_KINDS }, author: { type: "string" }, why: { type: "string" } } } } } },
+};
+const articleKindUser = (batch) => batch.map((a, i) => `${i + 1}. [${a.source}, page ${a.page ?? "?"}] ${a.headline}\n   signals: ${a.signals?.length ? a.signals.join(", ") : "none"}\n   ${a.excerpt.replace(/\s+/g, " ")}`).join("\n\n");
+export function normalizeArticleKinds(raw, batch) {
+  const out = [], seen = new Set();
+  for (const it of Array.isArray(raw?.items) ? raw.items : []) {
+    const a = batch[(+it?.n || 0) - 1];
+    if (!a || seen.has(a.id) || !ARTICLE_KINDS.includes(it.kind)) continue;
+    seen.add(a.id);
+    const authored = it.kind !== "news";
+    out.push({ id: a.id, kind: it.kind, author: authored ? cleanAuthor(it.author) : "", why: authored ? str(it.why, 120) : "" });
+  }
+  return out;
+}
+
+export const authorSystem = `You find the writer's name on opinion and analysis articles from Indian newspapers (OCR text of the print edition). For each numbered article you get the headline, the START of the text and the END of the text.
+Where the name is printed:
+- right after the headline or the deck (sub-headline), before the body starts, often alone on its line: "Seema Sirohi", "TARANJIT SINGH SANDHU", "karthik jerome", "By Jane Doe", sometimes followed by a place and date ("Vinod Mahanta Mumbai:");
+- or in a closing line: "— Name", "Name is a professor of …", "The writer is …", "(Name is former …)".
+The first letter of the body is often split off by a drop cap ("I ndia", "A s", "W ith"), so do not take a stray letter as part of a name.
+Rules: answer with the person's name only, in normal capitalisation (Title Case, not all capitals), with no title or role. Never guess and never use a name that is only mentioned in the story (a minister, a company head quoted). Give "" when no writer is printed: unsigned editorials, desk credits (Staff Reporter, TNN, PTI, Reuters, Times News Network, "The Hindu Bureau") and anything you cannot tell. Call the find_authors tool exactly once with an entry for every number.`;
+export const authorTool = {
+  name: "find_authors",
+  description: "The printed writer of each numbered article, or empty.",
+  input_schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["n", "author"], properties: { n: { type: "integer" }, author: { type: "string" } } } } } },
+};
+const authorUser = (batch) => batch.map((a, i) => `${i + 1}. [${a.source}] ${a.headline}\n   START: ${String(a.start).replace(/\s+/g, " ")}\n   END: ${String(a.finish).replace(/\s+/g, " ")}`).join("\n\n");
+const NOT_A_NAME = /\b(staff|reporter|bureau|desk|correspondent|network|tnn|pti|ani|ians|reuters|editorial|edit page|times|agencies|the hindu|express|mint|invitation|independent|journalist|columnist|writer|author|editor|contributor|guest|special|own)\b/i;
+const titleCase = (n) => (n === n.toUpperCase() || n === n.toLowerCase() ? n.toLowerCase().replace(/(^|[\s.'’-])([a-z])/g, (_, a, b) => a + b.toUpperCase()) : n);
+export function cleanAuthor(x) {
+  let n = typeof x === "string" ? x.replace(/^\s*(by|written by)\s+/i, "").replace(/[“”"()]/g, "").replace(/\s+/g, " ").trim() : "";
+  n = n.replace(/[,;:—–-]+$/, "").trim();
+  if (!n || n.length > 100 || /\d/.test(n) || NOT_A_NAME.test(n)) return "";
+  // one writer, or up to four joined by commas, "&" or "and" (a joint byline)
+  const people = n.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean);
+  if (!people.length || people.length > 4) return "";
+  for (const person of people) { const w = person.split(" "); if (w.length > 5 || (w.length < 2 && person.length < 4)) return ""; }
+  return people.map(titleCase).join(", ");
+}
+export function normalizeAuthors(raw, batch) {
+  const out = [], seen = new Set();
+  for (const it of Array.isArray(raw?.items) ? raw.items : []) {
+    const a = batch[(+it?.n || 0) - 1];
+    if (!a || seen.has(a.id)) continue;
+    seen.add(a.id); out.push({ id: a.id, author: cleanAuthor(it.author) });
+  }
+  return out;
+}
+
+export const titleSystem = `You repair the headlines of newspaper articles read by OCR from the print edition. Each numbered item gives the headline the OCR picked up, which is often wrong (a section label such as "OPINION 7", a column name, the writer's name, a web address, or the tail of the first sentence), the writer if known, and the START of the article text.
+Find the article's real title. It is printed at the top of the text, usually before the writer's name and the first paragraph, sometimes after a small kicker or label and sometimes followed by a deck (a one-sentence sub-headline).
+- If the real title is printed, copy it exactly as it appears (printed = true). Do not include the kicker, the deck, the writer's name or the first sentence of the body.
+- If no title can be found, write a plain descriptive title of at most 14 words that states the article's main point, using only what the text says (printed = false). No quotes, no trailing full stop.
+- Never answer with a section label, a column name on its own, or a person's name. If the OCR headline is already a good title, repeat it.
+Call the repair_headlines tool exactly once with an entry for every number.`;
+export const titleTool = {
+  name: "repair_headlines",
+  description: "The real title of each numbered article.",
+  input_schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["n", "title", "printed"], properties: { n: { type: "integer" }, title: { type: "string" }, printed: { type: "boolean" } } } } } },
+};
+const titleUser = (batch) => batch.map((a, i) => `${i + 1}. [${a.source}] OCR headline: ${a.headline}\n   writer: ${a.author || "(unknown)"}\n   START: ${String(a.start).replace(/\s+/g, " ")}`).join("\n\n");
+// A title claimed as printed must really appear in the text, otherwise it is treated as written by the model.
+// Returns [{ id, title, source }] with source "printed", "generated" or "kept" (the original headline stands; title is "").
+export function normalizeTitles(raw, batch) {
+  const out = [], seen = new Set();
+  for (const it of Array.isArray(raw?.items) ? raw.items : []) {
+    const a = batch[(+it?.n || 0) - 1];
+    if (!a || seen.has(a.id)) continue;
+    seen.add(a.id);
+    const title = typeof it.title === "string" ? it.title.replace(/^["“'‘]+|["”'’]+$/g, "").replace(/\s+/g, " ").trim().slice(0, 160) : "";
+    if (!title || isWeakHeadline(title, a.author) || sameText(title, a.headline)) { out.push({ id: a.id, title: "", source: "kept" }); continue; }
+    out.push({ id: a.id, title, source: it.printed === true && textHas(a.start, title) ? "printed" : "generated" });
+  }
+  return out;
+}
+
+export const groupSystem = `You repair the layout of a newspaper page read by OCR. The numbered text blocks below were cut from ONE page, in the order they were extracted. A long article printed in columns is often cut into several blocks: usually a short block with the headline, the writer's name and a one-line bio, then the body blocks, and some of those start in the middle of a sentence because the column began there. Blocks of other articles can sit in between.
+Find the groups of blocks that are parts of the SAME article. Look at the junctions first: when one block ENDS MID-SENTENCE and another STARTS MID-SENTENCE (or starts with a few capitalised words that read as part of the sentence), see whether the end of the first and the start of the second read as one sentence ("...a surge in stock" + "markets, although that is..."; "...A fortnight ago, I" + "wrote about the strain..."). A block that starts with a name in capitals followed by a lowercase verb may be the next column picking up after a name that the OCR mistook for a heading. Text inside one block can be jumbled across neighbouring columns, so also use the subject, the voice and repeated names. Every block that begins or ends mid-sentence belongs to some article: find it. Rules:
+- A block that starts mid-sentence continues an earlier block, or one near it, that is about the same subject in the same voice. A short block holding only a headline, a writer's name and a bio belongs with the body blocks it introduces.
+- Only group when you are confident from the subject and the sentence flow. Never merge two different stories. A block belongs to at most one group. Blocks that are complete articles on their own stay out of every group.
+- For each group give "blocks" (the block numbers in reading order: title block first, then the columns in order), "headline" (the article's real printed title, copied exactly from the text of the blocks; empty if none is printed) and "writer" (the printed writer's name, in normal spelling and capitalisation, with words the OCR ran together separated, e.g. "RAHULJACOB" -> "Rahul Jacob"; empty if none).
+- Do not use a section label ("OUR VIEW", "MY VIEW | WORLD APART", "OPINION"), a column name or a person quoted in the story as the headline or the writer.
+Call the group_blocks tool exactly once. An empty list is fine.`;
+export const groupTool = {
+  name: "group_blocks",
+  description: "Groups of blocks that belong to the same article.",
+  input_schema: { type: "object", required: ["groups"], properties: { groups: { type: "array", items: { type: "object", required: ["blocks"], properties: { blocks: { type: "array", items: { type: "integer" } }, headline: { type: "string" }, writer: { type: "string" } } } } } },
+};
+// A column cut usually leaves one block ending in the middle of a sentence and another starting in the middle of the next words
+// ("...a surge in stock" / "markets, although..."), so the model is shown both junctions in full and told which blocks have them.
+// "ANNIE LOWREY wrote about the strain…": a name in capitals (a pull-quote or caption the OCR ran into the text) followed by running text.
+export const startsWithCapsName = (body) => /^[A-Z][A-Z.'’-]+(?: [A-Z][A-Z.'’-]+){1,3} [a-z]{2,}/.test(String(body ?? "").trim());
+export const endsMidSentence = (body) => !/[.?!"”’)\]:;]\s*$/.test(String(body ?? "").trim());
+const groupUser = (blocks) => blocks.map((b, i) => {
+  const t = String(b.body).replace(/\s+/g, " ").trim();
+  const flags = [startsMidSentence(b.body) ? "STARTS MID-SENTENCE" : startsWithCapsName(b.body) ? "STARTS WITH A NAME IN CAPITALS THEN LOWERCASE TEXT" : "", endsMidSentence(b.body) ? "ENDS MID-SENTENCE" : ""].filter(Boolean).join(", ");
+  return `[${i + 1}] ${b.words} words${flags ? ", " + flags : ""}\n    START: ${t.length <= 520 ? t : t.slice(0, 230)}${t.length <= 520 ? "" : `\n    END:   ${t.slice(-190)}`}`;
+}).join("\n");
+// Checks the model's grouping against the text: block numbers must exist and be used once, a headline must really be printed in the
+// group's text and a writer must appear in it (spaces ignored). Returns [{ ids, headline, writer }].
+export function normalizeGroups(raw, blocks) {
+  const used = new Set(), out = [];
+  for (const g of Array.isArray(raw?.groups) ? raw.groups : []) {
+    const nums = [...new Set((Array.isArray(g?.blocks) ? g.blocks : []).map(Number))].filter((n) => Number.isInteger(n) && n >= 1 && n <= blocks.length && !used.has(n));
+    if (nums.length < 2 || nums.length > 8) continue;
+    nums.forEach((n) => used.add(n));
+    const members = nums.map((n) => blocks[n - 1]), text = members.map((b) => b.body).join("\n\n");
+    const h = typeof g.headline === "string" ? g.headline.replace(/^["“'‘]+|["”'’]+$/g, "").replace(/\s+/g, " ").trim().slice(0, 160) : "";
+    const w = cleanAuthor(g.writer);
+    out.push({ ids: members.map((b) => b.id), headline: h && !isWeakHeadline(h) && textHas(text, h) ? h : "", writer: w && textHasLoose(text, w) ? w : "" });
+  }
+  return out;
+}
+
+export const angleMatchSystem = `You match opinion and analysis articles from Indian newspapers to the story angles an editorial team is considering. For each numbered article you get its headline, an excerpt and a short list of candidate angles (each has an id, a topic, a business sector and the suggested angle).
+Pick the ONE candidate whose suggested angle the article actually takes up: it argues or analyses substantially the same question for that sector. Sharing a topic word is not enough, and an article about the topic from a different angle is not a match. Answer "none" when no candidate fits. Give "fit" 0-1: 1 means the article is essentially that angle, 0.5 means it covers a large part of it, below 0.4 means do not match. Call the match_angles tool exactly once with an entry for every number.`;
+export const angleMatchTool = {
+  name: "match_angles",
+  description: "For each numbered article, the candidate angle it takes up (or none).",
+  input_schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["n", "angle"], properties: { n: { type: "integer" }, angle: { type: "string", description: "candidate id, or none" }, fit: { type: "number" } } } } } },
+};
+const angleMatchUser = (batch) => batch.map((a, i) => `${i + 1}. ${a.headline}\n   ${a.excerpt.replace(/\s+/g, " ")}\n   Candidates:\n${a.candidates.map((c) => `   - id ${c.id} | topic: ${c.topic} | sector: ${c.sector} | angle: ${c.angle}`).join("\n")}`).join("\n\n");
+export function normalizeAngleMatches(raw, batch, minFit = 0.4) {
+  const out = [], seen = new Set();
+  for (const it of Array.isArray(raw?.items) ? raw.items : []) {
+    const a = batch[(+it?.n || 0) - 1];
+    if (!a || seen.has(a.id)) continue;
+    seen.add(a.id);
+    const c = a.candidates.find((x) => x.id === String(it.angle));
+    const fit = clamp01(it.fit);
+    if (c && fit >= minFit) out.push({ id: a.id, oppKey: c.oppKey, fit });
+  }
+  return out;
+}
 
 // ---------- Job 3: drafting an author brief (editor approves before anything is used) ----------
 
@@ -471,6 +620,31 @@ export function extractJson(text) {
 //   opts.settings()      -> { primary: "anthropic"|"ollama", fallback: boolean, ollamaModel, ollamaHost }   (per-machine)
 //   opts.integrations    -> Integrations (is Claude switched on?)
 //   opts.onEvent(name, { ok, error })  -> usage and credit tracking
+// Groq answers HTTP 400 "tool_use_failed" when the model wrote a tool call that Groq's own parser rejected, and puts the model's attempt in
+// error.failed_generation. Often that attempt is perfectly good JSON that was only shaped wrongly (the arguments written as an object, not as a
+// string), so it is used; if it is not usable JSON, or is for another tool, this returns null and the caller asks again.
+export function salvageToolCall(body, toolName) {
+  try {
+    const g = JSON.parse(body)?.error?.failed_generation;
+    if (typeof g !== "string") return null;
+    const call = extractJson(g);
+    if (!call || typeof call !== "object" || (call.name && call.name !== toolName)) return null;
+    const args = call.arguments ?? call.parameters ?? null;
+    const out = typeof args === "string" ? extractJson(args) : args;
+    return out && typeof out === "object" && !Array.isArray(out) ? out : null;
+  } catch { return null; }
+}
+
+// A daily spend cap for a paid provider. Returns true once today's tokens, at the price in the config, reach limits.<provider>DailyUsd; it is
+// checked before every call, so a job routed there quietly goes to the next provider (Groq) instead of spending more.
+export function budgetGuard(store, cfg, today) {
+  return (p) => {
+    const limit = cfg.limits?.[p + "DailyUsd"], pr = cfg.pricing?.[p];
+    if (limit == null || !pr || pr.inPerMTok == null || pr.outPerMTok == null) return false;
+    const u = store.usage(p, today());
+    return (u.tokensIn * pr.inPerMTok + u.tokensOut * pr.outPerMTok) / 1e6 >= limit;
+  };
+}
 const FATAL = /\b(401|402|403)\b|credit|billing|api key|authentication|permission/i;
 
 // Groq rejects a whole answer when one value is outside an enum. Our own validators already drop or default bad values, so for Groq the
@@ -492,6 +666,8 @@ export class Reader {
     this.ollamaModel = process.env.OLLAMA_MODEL || "";
     this.apiKey = process.env.ANTHROPIC_API_KEY || "";
     this.groqKey = ""; this.groqModel = process.env.GROQ_MODEL || "openai/gpt-oss-120b"; this.groqOk = false;
+    this.openaiKey = ""; this.openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna"; this.openaiOk = false;
+    this._noClaude = false;
     this.provider = null; this.chain = []; this.down = {}; this.lastOk = {};
     this.readSys = readSystem(bcg); this.readTool = readTool(bcg);
     // Several stories per call: the shared instructions and context are sent (and cached) once, not once per story.
@@ -500,7 +676,10 @@ export class Reader {
     this.matchSys = matchSystem(bcg); this.matchTool = matchTool(bcg);
   }
 
-  get label() { return this.provider === "anthropic" ? this.model : this.provider ? "ollama:" + this.ollamaModel : ""; }
+  get label() { return this.provider === "anthropic" ? this.model : this.provider === "groq" ? "groq:" + this.groqModel : this.provider === "openai" ? "openai:" + this.openaiModel : this.provider ? "ollama:" + this.ollamaModel : ""; }
+  // True when Claude (and the local model) cannot answer: a run started in Groq-only mode, or Claude switched off in Settings / without a key
+  // while Groq or OpenAI is available. Then every job goes to Groq or OpenAI and a failure is an error, never a Claude call.
+  get noClaude() { return !!this.opts.groqOnly || this._noClaude; }
   get fallbackActive() { return this.chain.length > 1 && this.provider !== this.chain[0]; }
 
   // Works out which providers can be used right now. Safe to call again after a key, toggle or setting changes.
@@ -515,7 +694,7 @@ export class Reader {
     if (mode === "anthropic" && !this.apiKey) throw new Error("HIVEMIND_LLM=anthropic but ANTHROPIC_API_KEY is not set");
     const primary = mode === "ollama" ? "ollama" : s.primary || "anthropic";
     const claudeOk = mode !== "ollama" && !!this.apiKey && claudeSwitch;
-    const wantOllama = ollamaSwitch && (mode === "ollama" || mode === "auto" || primary === "ollama" || s.fallback !== false);
+    const wantOllama = !this.opts.groqOnly && ollamaSwitch && (mode === "ollama" || mode === "auto" || primary === "ollama" || s.fallback !== false);
     let ollamaOk = false;
     if (wantOllama) {
       try {
@@ -528,6 +707,20 @@ export class Reader {
     this.groqKey = process.env.GROQ_API_KEY || "";
     this.groqModel = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
     this.groqOk = !!this.groqKey && (this.opts.integrations ? this.opts.integrations.enabled("groq") : true);
+    this.openaiKey = process.env.OPENAI_API_KEY || "";
+    this.openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna";
+    this.openaiOk = !!this.openaiKey && (this.opts.integrations ? this.opts.integrations.enabled("openai") : true);
+    // No-Claude mode: jobs go to Groq, or to OpenAI where routing says so, and nothing else. There is no Claude or local-model fallback, so a
+    // failure there is an error, never a Claude call. It applies to a run started in groqOnly mode and, with no flag at all, whenever Claude is
+    // switched off in Settings (or has no key) and Groq or OpenAI is available. Claude is used again only after it is toggled on.
+    this._noClaude = false;
+    const fast = this.groqOk || this.openaiOk;
+    if (this.opts.groqOnly || (mode !== "ollama" && fast && (!claudeSwitch || !this.apiKey))) {
+      if (!fast) throw new Error("Groq is not available (no GROQ_API_KEY, or it is switched off), nor is OpenAI, and Claude is switched off for this run");
+      this._noClaude = true; this.chain = []; this.down = {}; this.provider = this.groqOk ? "groq" : "openai";
+      return [this.groqOk && "groq:" + this.groqModel, this.openaiOk && "openai:" + this.openaiModel].filter(Boolean).join(" + ") +
+        (this.opts.groqOnly ? " (Claude and the local model are switched off for this run)" : " (Claude is switched off: turn it on in Settings → Integrations to use it again)");
+    }
     const chain = [];
     if (claudeOk) chain.push("anthropic");
     if (ollamaOk) chain.push("ollama");
@@ -582,7 +775,7 @@ export class Reader {
     const user = clusters.map((c, i) => `Story ${i + 1} (reported by ${c.outlets.length} outlet${c.outlets.length > 1 ? "s" : ""}: ${c.outlets.slice(0, 6).join(", ")})\nHeadline: ${c.title}\n` +
       (c.articles.length > 1 ? `Other headlines for the same story:\n${c.articles.slice(0, 4).map((a) => `- ${a.title}`).join("\n")}\n` : "") + (c.snippet ? `Snippet: ${c.snippet}\n` : "(Headline only.)\n")).join("\n");
     const extra = this.extraTopics(text, ctx);
-    const raw = await this.#call(this.readBatchSys, this.readBatchTool, user + (extra.length ? `\nOther existing topic labels that may fit:\n${extra.map((t) => `- ${t.name}`).join("\n")}` : ""), 600 + clusters.length * 1100, { context: ctx.text, prefer: this.routeFor("readHeadlines") });
+    const raw = await this.#call(this.readBatchSys, this.readBatchTool, user + (extra.length ? `\nOther existing topic labels that may fit:\n${extra.map((t) => `- ${t.name}`).join("\n")}` : ""), 600 + clusters.length * 1100, { context: ctx.text, prefer: this.routeFor("readHeadlines"), effort: this.opts.effort?.readHeadlines });
     const out = new Array(clusters.length).fill(null);
     for (const it of Array.isArray(raw?.stories) ? raw.stories : []) {
       const k = (+it?.n || 0) - 1;
@@ -594,7 +787,7 @@ export class Reader {
   // Topic labels for a story that was read before topics existed. Never re-reads or changes the impact reading.
   async enrich(story) {
     const text = story.title + " " + story.analysis.summary;
-    const raw = await this.#call(enrichSystem, enrichTool, enrichUser(story, this.topics ? this.topics.candidates(text) : []), 900);
+    const raw = await this.#call(enrichSystem, enrichTool, enrichUser(story, this.topics ? this.topics.candidates(text) : []), 900, { prefer: this.routeFor("enrich") });
     return normalizeEnrichment(raw, this.topics, story.analysis.impacts.find((i) => i.bracket)?.bracket ?? null);
   }
 
@@ -607,38 +800,68 @@ export class Reader {
   // Groups of topics (one broad bracket at a time, or the top topics overall) that name the same subject.
   async mergeTopics(pool) {
     const list = pool.map((t) => "- " + t.id + " | " + t.name + " | " + t.count + " stories").join("\n");
-    const raw = await this.#call(topicMergeSystem, topicMergeTool, "Topics:\n" + list, 3000);
+    const raw = await this.#call(topicMergeSystem, topicMergeTool, "Topics:\n" + list, 3000, { prefer: this.routeFor("mergeTopics") });
     return normalizeTopicMerges(raw, pool);
   }
 
   // A stronger model's opinion on a batch of readings. batch: [{title, snippet, analysis, sentiment, stance, topics}]. Returns [{ n, agrees, note }].
   async reviewReadings(batch, model) {
-    const raw = await this.#call(reviewSystem, reviewTool, reviewUser(batch), 200 + batch.length * 60, { model, only: "anthropic" });
+    const raw = await this.#call(reviewSystem, reviewTool, reviewUser(batch), 200 + batch.length * 60, this.noClaude ? { prefer: this.routeFor("review"), effort: this.opts.effort?.review } : { model, only: "anthropic" });
     return (Array.isArray(raw?.items) ? raw.items : []).filter((x) => Number.isInteger(+x?.n) && +x.n >= 1 && +x.n <= batch.length && typeof x.agrees === "boolean").map((x) => ({ n: +x.n, agrees: x.agrees, note: str(x.note, 200) }));
   }
 
+  // batch: [{ id, source, page, headline, excerpt, signals }]. Returns [{ id, kind, author, why }] for those the model answered.
+  async classifyArticles(batch) {
+    const raw = await this.#call(articleKindSystem, articleKindTool, articleKindUser(batch), 200 + batch.length * 60, { prefer: this.routeFor("ocrClassify") });
+    return normalizeArticleKinds(raw, batch);
+  }
+
+  // batch: [{ id, source, headline, start, finish }]. Returns [{ id, author }] ("" when no writer is printed).
+  async findAuthors(batch) {
+    const raw = await this.#call(authorSystem, authorTool, authorUser(batch), 150 + batch.length * 30, { prefer: this.routeFor("ocrAuthor") });
+    return normalizeAuthors(raw, batch);
+  }
+
+  // blocks: [{ id, words, body }] in extraction order, all from one page. Returns [{ ids, headline, writer }] (see normalizeGroups).
+  async groupBlocks(blocks, model = this.opts.models?.ocrAssemble ?? null) {
+    const raw = await this.#call(groupSystem, groupTool, groupUser(blocks), 300 + blocks.length * 25 + (model ? 3000 : 0), { prefer: this.routeFor("ocrAssemble"), model, effort: this.opts.effort?.ocrAssemble ?? "low" }); // a stronger model may think aloud before the tool call
+    return normalizeGroups(raw, blocks);
+  }
+
+  // batch: [{ id, source, headline, author, start }]. Returns [{ id, title, source }] (see normalizeTitles).
+  async fixHeadlines(batch) {
+    const raw = await this.#call(titleSystem, titleTool, titleUser(batch), 150 + batch.length * 60, { prefer: this.routeFor("ocrTitle") });
+    return normalizeTitles(raw, batch);
+  }
+
+  // batch: [{ id, headline, excerpt, candidates: [{ id, oppKey, topic, sector, angle }] }]. Returns [{ id, oppKey, fit }] for the matches.
+  async matchAngles(batch, minFit = 0.4) {
+    const raw = await this.#call(angleMatchSystem, angleMatchTool, angleMatchUser(batch), 200 + batch.length * 50, { prefer: this.routeFor("ocrMatch") });
+    return normalizeAngleMatches(raw, batch, minFit);
+  }
+
   // headlines: [{ key, title }] filed under `topic` (name, optional aliases). Returns [{ key, fits, why }] for those the model answered.
-  async verifyTopicFit(topic, aliases, headlines) {
-    const user = `Topic: "${topic}"${aliases?.length ? ` (also called: ${aliases.slice(0, 5).join("; ")})` : ""}\nHeadlines:\n${headlines.map((h, i) => `${i + 1}. ${h.title}`).join("\n")}`;
-    const raw = await this.#call(topicFitSystem, topicFitTool, user, 200 + headlines.length * 24, { prefer: this.routeFor("topicFit") });
+  async verifyTopicFit(topic, aliases, headlines, angle = null) {
+    const user = `Topic: "${topic}"${aliases?.length ? ` (also called: ${aliases.slice(0, 5).join("; ")})` : ""}${angle ? `\nAngle: ${String(angle).slice(0, 240)}` : ""}\nHeadlines:\n${headlines.map((h, i) => `${i + 1}. ${h.title}`).join("\n")}`;
+    const raw = await this.#call(angle ? angleFitSystem : topicFitSystem, topicFitTool, user, 200 + headlines.length * 24, { prefer: this.routeFor("topicFit") });
     return (Array.isArray(raw?.items) ? raw.items : []).filter((x) => Number.isInteger(+x?.n) && +x.n >= 1 && +x.n <= headlines.length && typeof x.fits === "boolean")
       .map((x) => ({ key: headlines[+x.n - 1].key, fits: x.fits, why: str(x.why, 80) }));
   }
 
   async mergeEntities(pool) {
     const list = pool.map((t) => "- " + t.id + " | " + t.name + " | " + t.count + " stories").join("\n");
-    const raw = await this.#call(entityMergeSystem, topicMergeTool, "Entities:\n" + list, 3000);
+    const raw = await this.#call(entityMergeSystem, topicMergeTool, "Entities:\n" + list, 3000, { prefer: this.routeFor("mergeEntities") });
     return normalizeTopicMerges(raw, pool);
   }
 
   // pairs: [{a, b}] of topic names. Returns a Set of the (1-based) pair numbers the reviewer accepts.
   async verifyMerges(pairs) {
-    const raw = await this.#call(mergeVerifySystem, mergeVerifyTool, pairs.map((p, i) => `${i + 1}. "${p.a}" <-> "${p.b}"`).join("\n"), 200 + pairs.length * 20);
+    const raw = await this.#call(mergeVerifySystem, mergeVerifyTool, pairs.map((p, i) => `${i + 1}. "${p.a}" <-> "${p.b}"`).join("\n"), 200 + pairs.length * 20, { prefer: this.routeFor("verifyMerges") });
     return new Set((Array.isArray(raw?.items) ? raw.items : []).filter((x) => x?.interchangeable === true).map((x) => +x.n));
   }
 
   async brief(input) {
-    const raw = await this.#call(briefSystem, briefTool, briefUser(input), 1800);
+    const raw = await this.#call(briefSystem, briefTool, briefUser(input), 1800, { prefer: this.routeFor("brief") });
     return normalizeBrief(raw, input.stories.map((s) => s.url), { audience: input.author?.audience, window: input.opp.window.label, review: input.opp.review });
   }
 
@@ -646,12 +869,12 @@ export class Reader {
   async consolidate(brackets) {
     const pool = [...brackets].sort((a, b) => b.count - a.count).slice(0, 400).sort((a, b) => a.name.localeCompare(b.name));
     const list = pool.map((b) => "- " + b.id + " | " + b.name + " | " + b.keywords.slice(0, 6).join(", ") + " | " + b.count + " stories").join("\n");
-    const raw = await this.#call(consolidateSystem, consolidateTool, "Brackets:\n" + list, 4000);
+    const raw = await this.#call(consolidateSystem, consolidateTool, "Brackets:\n" + list, 4000, { prefer: this.routeFor("consolidate") });
     return normalizeMerges(raw, pool);
   }
 
   async match(company, batch, evidence) {
-    const raw = await this.#call(this.matchSys, this.matchTool, matchUser(company, batch, evidence), 6000);
+    const raw = await this.#call(this.matchSys, this.matchTool, matchUser(company, batch, evidence), 6000, { prefer: this.routeFor("match"), effort: this.opts.effort?.match });
     return normalizeMatches(raw, this.bcg, company, batch);
   }
 
@@ -664,19 +887,66 @@ export class Reader {
   }
 
   // Jobs routed to the cheap provider (config routing.<job> = "groq") try it first and fall back to the normal chain if it fails.
-  routeFor(job) { return this.groqOk && (this.opts.routing?.[job] ?? "claude") === "groq" ? "groq" : null; }
+  // Which fast provider a job tries first: "openai", "groq", or null (the normal chain). In no-Claude mode every job gets one of the two.
+  routeFor(job) {
+    if (this.noClaude) { // routingNoClaude names the jobs worth OpenAI; everything else is Groq
+      const want = this.opts.routingNoClaude?.[job] ?? this.opts.routing?.[job];
+      return want === "openai" && this.openaiOk ? "openai" : this.groqOk ? "groq" : this.openaiOk ? "openai" : null;
+    }
+    const want = this.opts.routing?.[job] ?? "claude";
+    if (want === "openai") return this.openaiOk ? "openai" : this.groqOk ? "groq" : null;
+    return this.groqOk && want === "groq" ? "groq" : null;
+  }
 
-  async #groq(system, tool, user, maxTokens, context = null) {
+  // OpenAI through the Responses endpoint: the chat endpoint refuses function tools together with reasoning on the newer models.
+  // effort: none | low | medium | high. A forced tool call returns the same one-record answer as the other providers.
+  async #openai(system, tool, user, maxTokens, context = null, effort = "low") {
     const body = {
-      model: this.groqModel, max_completion_tokens: maxTokens + 2500, reasoning_effort: "low", temperature: 0.1,
+      model: this.openaiModel, instructions: context ? system + "\n\n" + context : system, input: user,
+      tools: [{ type: "function", name: tool.name, description: tool.description, parameters: tool.input_schema, strict: false }],
+      tool_choice: { type: "function", name: tool.name }, reasoning: { effort },
+      store: false, // do not keep the request and answer on OpenAI's side
+      prompt_cache_key: tool.name, // jobs with the same shared prompt prefix are sent to the same cache, billed at a tenth of the input price
+      max_output_tokens: maxTokens + (effort === "none" ? 0 : effort === "low" ? 2500 : 9000), // the reasoning counts against this
+    };
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const res = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: "Bearer " + this.openaiKey, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(120000) });
+      if (res.status === 429 || res.status >= 500) { const ra = +res.headers.get("retry-after") || 0; await new Promise((r) => setTimeout(r, Math.max(1500 * 2 ** attempt, ra * 1000))); continue; }
+      if (!res.ok) throw new Error("OpenAI " + res.status + ": " + (await res.text()).slice(0, 200));
+      const j = await res.json(), u = j.usage ?? {};
+      try { this.opts.onUsage?.("openai", { tokensIn: u.input_tokens ?? 0, tokensOut: u.output_tokens ?? 0, cacheRead: u.input_tokens_details?.cached_tokens ?? 0 }); } catch { /* ignore */ }
+      const call = (j.output ?? []).find((o) => o.type === "function_call");
+      if (call?.arguments) { try { return JSON.parse(call.arguments); } catch { /* no usable answer */ } }
+      return null;
+    }
+    throw new Error("OpenAI: retries exhausted (rate limited or overloaded)");
+  }
+
+  // effort: how much the model may reason before answering ("low" by default; the layout job asks for more, since it has to read junctions between columns)
+  async #groq(system, tool, user, maxTokens, context = null, effort = "low") {
+    // Groq accepts low, medium or high. "none" is OpenAI's word for no reasoning and arrives here when a job routed to OpenAI falls back to Groq.
+    const eff = ["low", "medium", "high"].includes(effort) ? effort : "low";
+    const body = {
+      model: this.groqModel, max_completion_tokens: maxTokens + (eff === "low" ? 2500 : 9000), reasoning_effort: eff, temperature: 0.1,
       messages: [{ role: "system", content: context ? system + "\n\n" + context : system }, { role: "user", content: user }],
       tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: relaxEnums(tool.input_schema) } }],
       tool_choice: { type: "function", function: { name: tool.name } },
     };
+    let toolFails = 0;
     for (let attempt = 0; attempt < 4; attempt++) {
       const res = await fetch("https://api.groq.com/openai/v1/chat/completions", { method: "POST", headers: { authorization: "Bearer " + this.groqKey, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(90000) });
       if (res.status === 429 || res.status >= 500) { const ra = +res.headers.get("retry-after") || 0; await new Promise((r) => setTimeout(r, Math.max(1500 * 2 ** attempt, ra * 1000))); continue; }
-      if (!res.ok) throw new Error("Groq " + res.status + ": " + (await res.text()).slice(0, 200));
+      if (!res.ok) {
+        const text = await res.text();
+        // "Failed to parse tool call arguments as JSON" (tool_use_failed): use the model's own attempt when it is valid JSON, else ask again (the
+        // generation is random, so the next one usually parses). Only then is it an error.
+        if (res.status === 400 && /tool_use_failed/.test(text)) {
+          const salvaged = salvageToolCall(text, tool.name);
+          if (salvaged) return salvaged;
+          if (toolFails++ < 2) continue;
+        }
+        throw new Error("Groq " + res.status + ": " + text.slice(0, 200));
+      }
       const j = await res.json();
       try { this.opts.onUsage?.("groq", { tokensIn: j.usage?.prompt_tokens ?? 0, tokensOut: j.usage?.completion_tokens ?? 0 }); } catch { /* ignore */ }
       const m = j.choices?.[0]?.message, args = m?.tool_calls?.[0]?.function?.arguments;
@@ -688,15 +958,19 @@ export class Reader {
 
   async #call(system, tool, user, maxTokens, opts = {}) {
     const now = Date.now();
-    if (opts.prefer === "groq" && this.groqOk && (this.down.groq ?? 0) <= now) {
+    // The fast providers a job asked for, in order: OpenAI falls back to Groq; with Claude off, Groq falls back to OpenAI (under its daily cap). After that comes the normal chain
+    // (Claude, local model), which does not exist in no-Claude mode. A provider that just failed rests for a while (not in no-Claude mode, where nothing else could answer).
+    for (const p of opts.prefer === "openai" ? ["openai", "groq"] : opts.prefer === "groq" ? (this.noClaude ? ["groq", "openai"] : ["groq"]) : []) {
+      if (!(p === "openai" ? this.openaiOk : this.groqOk) || this.opts.overBudget?.(p) || (!this.noClaude && (this.down[p] ?? 0) > now)) continue; // over its daily cap: the next provider answers
+      const name = p === "openai" ? "OpenAI" : "Groq";
       try {
-        const out = await this.#groq(system, tool, user, maxTokens, opts.context);
-        if (out) { delete this.down.groq; this.#event("groq", { ok: true }); return out; }
-        throw new Error("Groq returned no usable answer");
+        const out = p === "openai" ? await this.#openai(system, tool, user, maxTokens, opts.context, opts.effort) : await this.#groq(system, tool, user, maxTokens, opts.context, opts.effort);
+        if (out) { delete this.down[p]; this.#event(p, { ok: true }); return out; }
+        throw new Error(name + " returned no usable answer");
       } catch (e) {
-        this.#event("groq", { ok: false, error: e.message });
-        try { this.opts.onUsage?.("groq", { calls: 0, errors: 1 }); } catch { /* ignore */ }
-        this.down.groq = Date.now() + (FATAL.test(e.message) ? 600000 : 30000); // then the normal chain answers this call
+        this.#event(p, { ok: false, error: e.message });
+        try { this.opts.onUsage?.(p, { calls: 0, errors: 1 }); } catch { /* ignore */ }
+        this.down[p] = Date.now() + (FATAL.test(e.message) ? 600000 : 30000);
       }
     }
     let order = this.chain.filter((p) => (this.down[p] ?? 0) <= now && (!opts.only || p === opts.only));

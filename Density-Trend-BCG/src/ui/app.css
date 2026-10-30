@@ -311,7 +311,7 @@ input:checked + .slider:before{transform:translateX(16px)}
 
 /* normal users see the reading pages only */
 html[data-role="member"] #llm, html[data-role="member"] #bell, html[data-role="member"] #runtoggle, html[data-role="member"] #runpanel, html[data-role="member"] #job,
-html[data-role="member"] label:has(#dsel), html[data-role="member"] #nav a[data-p="clients"], html[data-role="member"] #nav a[data-p="sources"],
+html[data-role="member"] label:has(#dsel), html[data-role="member"] #nav a[data-p="leadership"], html[data-role="member"] #nav a[data-p="clients"],html[data-role="member"] #nav a[data-p="sources"],
 html[data-role="member"] #nav a[data-p="accuracy"], html[data-role="member"] #nav2 a[data-p="settings"], html[data-role="member"] #side-foot { display: none !important; }
 
 html[data-role="member"] .admin-only { display: none !important; }

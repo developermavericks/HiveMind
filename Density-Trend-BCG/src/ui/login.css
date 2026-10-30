@@ -18,7 +18,18 @@ body {
   font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
   background: radial-gradient(1200px 700px at 15% -10%, var(--bg1), transparent 60%), radial-gradient(900px 600px at 100% 110%, var(--bg1), transparent 60%), var(--bg2);
 }
-.stage { min-height: 100%; display: grid; place-items: center; align-content: center; gap: 18px; padding: 32px 16px; }
+/* Intro video: fills the page behind everything, undimmed (no dark layer). If it cannot play, the gradient above shows instead. */
+.bg { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: -2; background: transparent; transition: opacity 0.7s ease; }
+/* When the clip ends the video fades out and the page behind the card is plain white (its last frame is a large logo that would show through the card). */
+body.after { background: #fff; }
+body.after .bg { opacity: 0; }
+/* While the intro plays the card is hidden (and out of reach of the keyboard and screen readers) and the video is shown clear; login.js lifts "intro" when it ends.
+   If the script never runs, the card appears anyway after 30 s. */
+.stage { transition: opacity 0.7s ease; }
+body.intro .stage { opacity: 0; visibility: hidden; animation: reveal 0s 30s forwards; }
+@keyframes reveal { to { opacity: 1; visibility: visible; } }
+.bg.off { display: none; }
+.stage { position: relative; min-height: 100%; display: grid; place-items: center; align-content: center; gap: 18px; padding: 32px 16px; }
 .card {
   width: 100%; max-width: 440px; padding: 36px 32px 28px; border: 1px solid var(--line); border-radius: 28px; background: var(--card);
   -webkit-backdrop-filter: saturate(1.4) blur(20px); backdrop-filter: saturate(1.4) blur(20px); box-shadow: var(--shadow);

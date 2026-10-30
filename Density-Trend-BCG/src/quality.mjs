@@ -21,13 +21,29 @@ const jaccard = (a, b) => { let i = 0; for (const x of a) if (b.has(x)) i++; ret
 export function findDuplicates(rows, cfg) {
   const d = cfg.dedupe ?? {}, minJ = d.minJaccard ?? 0.7, win = (d.withinHours ?? 36) * HOUR, minLen = d.minTokenLength ?? 3;
   const toks = rows.map((r) => tokens(r.title, minLen)), root = new Map(), out = [];
+  // A pair can only be a repeat if it shares words, so a story is not compared with every earlier one (tens of millions of comparisons for two days
+  // of news, about 20 seconds) but only with earlier ones that share one of its rarest words (prefix filtering). A set x needs at least
+  // ceil(minJ * |x|) words in common with any set it matches, so one of its |x| - ceil(minJ * |x|) + 1 rarest words must be shared. The answer is
+  // the same as comparing all pairs: the nearest earlier story inside the window whose jaccard reaches minJ.
+  const freq = new Map();
+  for (const t of toks) if (t.size >= 3) for (const w of t) freq.set(w, (freq.get(w) ?? 0) + 1);
+  const prefix = toks.map((t) => (t.size < 3 ? [] : [...t].sort((a, b) => freq.get(a) - freq.get(b) || (a < b ? -1 : 1)).slice(0, t.size - Math.ceil(minJ * t.size) + 1)));
+  const index = new Map();
   for (let i = 0; i < rows.length; i++) {
     if (toks[i].size < 3) continue; // too short to compare safely
-    for (let j = i - 1; j >= 0 && rows[i].published_at - rows[j].published_at <= win; j--) {
-      if (toks[j].size < 3 || Math.abs(toks[i].size - toks[j].size) > Math.max(toks[i].size, toks[j].size) * 0.5) continue;
-      const jac = jaccard(toks[i], toks[j]);
-      if (jac >= minJ) { const canon = root.get(rows[j].key) ?? rows[j].key; root.set(rows[i].key, canon); out.push({ key: rows[i].key, canonical: canon, jaccard: jac, a: rows[i].title, b: rows[j].title }); break; }
+    let best = -1;
+    const seen = new Set();
+    for (const w of prefix[i]) {
+      for (const j of index.get(w) ?? []) {
+        if (j < best || seen.has(j)) continue; // a nearer match is already known, or this one was checked
+        seen.add(j);
+        if (rows[i].published_at - rows[j].published_at > win) continue;
+        if (Math.abs(toks[i].size - toks[j].size) > Math.max(toks[i].size, toks[j].size) * 0.5) continue;
+        if (jaccard(toks[i], toks[j]) >= minJ) best = j;
+      }
     }
+    if (best >= 0) { const canon = root.get(rows[best].key) ?? rows[best].key; root.set(rows[i].key, canon); out.push({ key: rows[i].key, canonical: canon, jaccard: jaccard(toks[i], toks[best]), a: rows[i].title, b: rows[best].title }); }
+    for (const w of prefix[i]) (index.get(w) ?? index.set(w, []).get(w)).push(i);
   }
   return out;
 }

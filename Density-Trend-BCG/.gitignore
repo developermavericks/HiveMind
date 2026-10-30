@@ -5,3 +5,5 @@ node_modules/
 # the live database is local; the JSON snapshot in data/ is imported into it on first start
 data/hivemind.db*
 data/*.tmp
+data/backups/
+data/ocr_archive/

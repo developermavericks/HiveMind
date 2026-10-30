@@ -1,19 +1,26 @@
 // Assembles everything the dashboard shows. Pure orchestration: the calculations live in metrics.mjs,
 // opportunity.mjs and backtest.mjs; the stories come from the database as of a chosen moment.
-import { dayStart, DAY_MS } from "./db.mjs";
+import { readdirSync, statSync } from "node:fs";
+import { dayStart, dayOf, DAY_MS } from "./db.mjs";
 import { prepareItems, analyse, seriesFor, buildSeasonality, HOUR } from "./metrics.mjs";
 import { buildEntities, itemsWithEntity, entityId } from "./entities.mjs";
 import { evaluatePending, outcomeSummary, tuneWeights } from "./outcomes.mjs";
 import { isWeakLabel } from "./topics.mjs";
 import { qualityReport } from "./quality.mjs";
-import { buildOpportunities, itemsByLabel } from "./opportunity.mjs";
-import { journalistFit, toAuthor, toks } from "./journalists.mjs";
+import { buildOpportunities, itemsByLabel, onlineOnAngle } from "./opportunity.mjs";
+// JOURNALISTS DISABLED: import { journalistFit, toAuthor, toks } from "./journalists.mjs";
 import { runBacktest } from "./backtest.mjs";
 import { norm } from "./brackets.mjs";
 import { TopicRegistry } from "./topics.mjs";
 
 const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily chart
-const TTL_MS = 5000;
+// The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
+// labels, a finished job) and dropped by cache.clear() (jobs, edits), so a longer life only saves work, it never shows older data.
+const TTL_MS = 300000;
+// Part of every signature: when any source file changes (a new version is deployed) the saved views from the old code are not reused.
+const CODE_STAMP = (() => { try { const d = new URL(".", import.meta.url); return String(Math.max(...readdirSync(d).filter((f) => f.endsWith(".mjs")).map((f) => statSync(new URL(f, d)).mtimeMs))); } catch { return "0"; } })();
+// The heavy read-only views, remembered per (view, arguments) against the context they were computed from.
+const MEMO = ["overview", "opportunities", "opportunity", "series", "entities", "sentiment", "sourcesView", "labels", "backtest", "topic", "origins"];
 const SENT = ["positive", "negative", "neutral", "mixed"];
 const tallySentiment = (list) => {
   const t = { pos: 0, neg: 0, neu: 0, mixed: 0 };
@@ -26,15 +33,37 @@ const STAGES = ["emerging", "rising", "steady", "crowded", "declining", "watch"]
 export class Analytics {
   constructor({ store, registry, sources, cfg, companies, reader, pubs = [] }) {
     Object.assign(this, { store, registry, sources, cfg, companies, reader, pubs });
-    this.cache = new Map();
+    // clear() also moves the saved-views revision on, so views saved before an edit or a job are never served afterwards (also after a restart).
+    const store_ = store;
+    this.cache = new (class extends Map { clear() { super.clear(); try { store_?.setMeta?.("cache.rev", String(Date.now()) + Math.random().toString(36).slice(2, 6)); } catch { /* a counter must not break an edit */ } this.onClear?.(); } })();
+    for (const name of MEMO) {
+      const raw = this[name].bind(this);
+      this[name] = (args = {}) => {
+        const c = this.context(name === "backtest" ? null : args.date ?? null);
+        if (!c) return raw(args);
+        const key = "memo|" + name + "|" + JSON.stringify(args), hit = this.cache.get(key);
+        if (hit && hit.ctx === c) return hit.value;
+        const value = raw(args);
+        if (this.cache.size > 600) for (const k of this.cache.keys()) if (k.startsWith("memo|")) this.cache.delete(k);
+        this.cache.set(key, { ctx: c, value, at: Date.now() });
+        return value;
+      };
+    }
   }
 
   // ---------------------------------------------------------------- shared context (cached for a few seconds)
+  // A short fingerprint of everything the views are computed from: it changes when stories, readings, labels or weights change, when a job finishes, or
+  // when cache.clear() is called after an edit. Cheap (a few counts), so it can decide whether a saved view is still current without building anything.
+  signature(date = null) {
+    const span = this.store.span();
+    if (!span.last) return null;
+    return `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${this.store.jobRev()}|${this.registry().size}|${JSON.stringify(this.cfg.weights)}|${this.store.getMeta("cache.rev", "0")}|${CODE_STAMP}`;
+  }
   context(date = null) {
     const span = this.store.span();
     if (!span.last) return null;
     const registry = this.registry();
-    const sig = `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${registry.size}|${JSON.stringify(this.cfg.weights)}`;
+    const sig = this.signature(date);
     const hit = this.cache.get(date ?? "live");
     if (hit && hit.sig === sig && Date.now() - hit.at < TTL_MS) return hit.value;
 
@@ -77,11 +106,35 @@ export class Analytics {
 
   company(id) { return this.companies.get(id) ?? this.companies.list()[0] ?? null; }
 
+  // Authored (opinion / analysis) print articles matched to each suggested angle, within the window. Null until print articles have been
+  // read for that window, so the headroom falls back to coverage share rather than treating "no data" as "nobody has written it".
+  ocrHeadroom(companyId, asOf, mode = null) {
+    const cfg = this.cfg.ocr ?? {}, days = cfg.windowDays ?? 7;
+    const to = dayOf(asOf), from = dayOf(asOf - days * 864e5);
+    if (!this.store.ocrHasData(from, to)) return null;
+    return { byOpp: this.store.ocrMatchesByOpp(companyId, from, to), cap: cfg.saturationCount ?? 5, windowDays: days, mode: mode === "validated" || mode === "whitespace" ? mode : cfg.mode === "validated" ? "validated" : "whitespace" };
+  }
+
+  // Online opinion / analysis pieces: the stored readings of their text, the angles matched, and the stories found on a paper's opinion page.
+  onlineContext(companyId) {
+    const pieces = this.store.onlinePieces();
+    for (const k of this.store.onlineSectionKeys()) if (!pieces.has(k)) pieces.set(k, { source: "section" });
+    return { pieces, matches: this.store.onlineMatches(companyId), windowDays: (this.cfg.ocr ?? {}).windowDays ?? 7, count: this.cfg.online?.countInHeadroom !== false };
+  }
+
   // ---------------------------------------------------------------- opportunities
-  opportunities({ company: companyId = "bcg", date = null, limit = 60, group = false } = {}) {
+  // slim: the list the Opportunities page shows. The heavy parts only the opened row needs (its stories, score components and the lists of print and
+  // online articles; the counts stay) are left out and fetched by opportunity() when a row is opened.
+  opportunities({ company: companyId = "bcg", date = null, limit = 60, group = false, mode = null, slim = false } = {}) {
+    if (slim) {
+      const full = this.opportunities({ company: companyId, date, limit, group, mode });
+      if (!full.items) return full;
+      // otherSectors repeats moreSectors (the list reads moreSectors); the row filter only needs to know whether the trigger is verified.
+      return { ...full, items: full.items.map(({ stories, components, authored, otherSectors, trigger, ...o }) => ({ ...o, ...(otherSectors && !o.moreSectors ? { otherSectors } : {}), trigger: trigger && { verified: trigger.verified }, slim: true, authored: authored && { ...authored, articles: [], onlineArticles: [] } })) };
+    }
     const c = this.context(date), company = this.company(companyId);
     if (!c || !company) return { empty: true, items: [], counts: { total: 0, action: {}, stage: {} } };
-    const res = buildOpportunities({ company, matches: company.matches, analysisResult: c.analysis, byLabel: c.byLabel, ctx: c.ctx, asOf: c.asOf, limit, topicMatches: this.store.topicMatches(company.id), qualityRed: this.qualityRed(c) });
+    const res = buildOpportunities({ company, matches: company.matches, analysisResult: c.analysis, byLabel: c.byLabel, ctx: c.ctx, asOf: c.asOf, limit, topicMatches: this.store.topicMatches(company.id), qualityRed: this.qualityRed(c), ocr: this.ocrHeadroom(company.id, c.asOf, mode), online: this.onlineContext(company.id) });
     const briefs = new Map();
     for (const b of this.store.listBriefs({ limit: 500 })) if (!briefs.has(b.oppKey)) briefs.set(b.oppKey, { id: b.id, status: b.status });
     for (const o of res.items) o.brief = briefs.get(o.key) ?? null;
@@ -97,6 +150,64 @@ export class Analytics {
       items = [...best.values()].map((o) => ({ ...o, moreSectors: o.otherSectors }));
     }
     return { ...res, items, asOf: c.asOf, company: { id: company.id, name: company.name, matched: Object.keys(company.matches).length } };
+  }
+
+  // Every print and online piece counted on one angle (the opportunity's list is cut at 12; this is the whole set the count came from).
+  pieces({ company: companyId = "bcg", key, date = null } = {}) {
+    const c = this.context(date), company = this.company(companyId);
+    if (!c || !company || !key) return { print: [], online: [] };
+    const labelKey = String(key).split("|")[2] ?? "";
+    const print = this.ocrHeadroom(company.id, c.asOf)?.byOpp.get(key) ?? [];
+    const online = onlineOnAngle(c.byLabel.get(labelKey) ?? [], key, this.onlineContext(company.id), c.asOf);
+    const [, sector = "", label = ""] = String(key).split("|");
+    return { key, sector, topic: this.labelName(c, labelKey) || label, windowDays: (this.cfg.ocr ?? {}).windowDays ?? 7, print, online };
+  }
+
+  // ---------------------------------------------------------------- leadership view
+  // For leaders: what is trending and why, what people are writing about it (print and online), what nobody has written, and what is next.
+  // Built from the same opportunities as every other page; no model call.
+  // The result is kept for a minute (and dropped whenever the analytics cache is cleared by a job): switching tabs or reopening the page costs nothing.
+  leadership({ company: companyId = "bcg", date = null, mode = null } = {}) {
+    const ck = `lead|${companyId}|${date ?? ""}|${mode ?? ""}`, hit = this.cache?.get(ck), c = this.context?.(date) ?? null;
+    if (hit && Date.now() - hit.at < 300e3 && (hit.ctx ?? null) === c) return hit.value;
+    const value = this._leadership(companyId, date, mode);
+    if (!value.empty) this.cache?.set(ck, { at: Date.now(), value, ctx: c });
+    return value;
+  }
+  _leadership(companyId, date, mode) {
+    const c = this.context(date);
+    if (!c) return { empty: true };
+    const res = this.opportunities({ company: companyId, date, limit: 1000, group: true, mode });
+    const trending = res.items.filter((o) => (o.stage === "rising" || o.stage === "emerging") && o.action !== "skip" && o.authored).sort((a, b) => b.score - a.score);
+    // only what the page shows; the pieces behind a count and the articles behind a source count are fetched when opened (/api/leadership/pieces, /api/origins)
+    const row = (o) => {
+      const a = o.authored ?? {}, why = [];
+      if (o.metrics.ratio != null) why.push(`${o.metrics.ratio.toFixed(1)}× its usual share of coverage`);
+      if ((o.metrics.accel ?? 0) > 0.3) why.push("still accelerating");
+      return { key: o.key, labelKey: o.label.key, topic: o.label.name, sector: o.sector, angle: o.angle, score: Math.round(o.score), stage: o.stage,
+        ratio: o.metrics.ratio, accel: o.metrics.accel, sources: o.metrics.originsRecent, why: why.join(" · "),
+        trigger: o.trigger ? { title: o.trigger.title, url: o.trigger.url, ageHours: o.trigger.ageHours, verified: o.trigger.verified } : null,
+        print: a.print ?? 0, online: a.online ?? 0 };
+    };
+    const rows = trending.map(row);
+    const written = rows.filter((r) => r.print + r.online > 0).sort((a, b) => b.print + b.online - (a.print + a.online) || b.score - a.score);
+    const open = rows.filter((r) => r.print + r.online === 0);
+    const next = rows.filter((r) => r.stage === "emerging" || (r.accel ?? 0) > 0.3).sort((a, b) => (b.accel ?? 0) - (a.accel ?? 0)).slice(0, 8);
+    for (const r of rows.slice(0, 12)) { const w = this.store.lastWebCheck(norm(r.topic), "serper:news"); if (w) r.web = { at: w.at, total: w.total, outlets: w.outlets, outside: (w.outsideOurSources ?? []).length, top: (w.top ?? []).slice(0, 5) }; }
+    const st = this.store.onlineStats(dayOf(c.asOf - 7 * DAY_MS)), cfg = this.cfg.online ?? {};
+    return { asOf: c.asOf, windowDays: (this.cfg.ocr ?? {}).windowDays ?? 7, mode: res.items[0]?.authored?.mode ?? "whitespace",
+      counts: { trending: rows.length, written: written.length, open: open.length, print: written.reduce((n, r) => n + r.print, 0), online: written.reduce((n, r) => n + r.online, 0) },
+      written: written.slice(0, 15), open: open.slice(0, 15), next, hot: rows.filter((r) => r.web).slice(0, 5), top: rows.slice(0, 8),
+      online: { ...st, analyze: cfg.analyze === true, dailyCap: cfg.dailyCap ?? 150, readToday: this.store.onlineReadOn(dayOf(Date.now())), sectionsOn: this.pubs.filter((p) => p.opinionPath).length } };
+  }
+
+  // One opportunity in full (what a slim list row leaves out), found among the same list the page showed.
+  opportunity({ company: companyId = "bcg", key, date = null, mode = null, group = false } = {}) {
+    for (const g of [group, !group]) {
+      const hit = this.opportunities({ company: companyId, date, limit: 1000, group: g, mode }).items?.find((o) => o.key === key);
+      if (hit) return hit;
+    }
+    return { error: "Unknown opportunity" };
   }
 
   // ---------------------------------------------------------------- overview (executive summary)
@@ -123,7 +234,8 @@ export class Analytics {
         fullTextPct: items.length ? sum((i) => (i.fullText ? 1 : 0)) / items.length : 0,
         verifiedTriggers: items.filter((i) => i.verified && c.asOf - i.at <= 72 * HOUR).length,
         brackets: rows.filter((r) => r.level === "bracket").length, topics: rows.filter((r) => r.level === "topic").length, labelledStories: labelled,
-        opportunities: opps.counts.total, actions: opps.counts.action, journalists: this.store.journalistCount(),
+        opportunities: opps.counts.total, actions: opps.counts.action, // journalists: this.store.journalistCount(), (JOURNALISTS DISABLED)
+       
         briefs: this.store.briefStats(),
       },
       history: { ...analysis.history, days: this.store.days().length, params: analysis.params, reconstructed: analysis.reconstructed },
@@ -301,22 +413,22 @@ export class Analytics {
     return runBacktest({ stories, ctx: c.ctx, days: this.store.days(), briefStats: this.store.briefStats() });
   }
 
-  // ---------------------------------------------------------------- journalists
-  // Best-matching journalists for one opportunity, computed on demand from the cached directory.
-  journalistMatches({ oppKey, company: companyId = "bcg", date = null, limit = 8 }) {
-    const c = this.context(date);
-    const opp = this.opportunities({ company: companyId, date, limit: 300 }).items.find((o) => o.key === oppKey) ?? this.opportunities({ company: companyId, date, limit: 300, group: false }).items.find((o) => o.key === oppKey);
-    if (!c || !opp) return { error: "That opportunity is no longer in the ranked list." };
-    if (!this.journalistCache || this.journalistCache.n !== this.store.journalistCount()) this.journalistCache = { n: this.store.journalistCount(), list: this.store.allJournalists() };
-    const items = (c.byLabel.get(opp.label.key) ?? []).filter((i) => c.asOf - i.at <= 7 * 24 * HOUR);
-    const kw = c.ctx.registry.get(opp.label.parent ?? "")?.keywords ?? [];
-    const topicTokens = toks([...kw, opp.label.name, ...opp.stories.map((s) => s.title)].join(" "));
-    const ctx = { topicTokens, geography: [...new Set(items.flatMap((i) => i.geography))].slice(0, 25), outlets: new Set(items.flatMap((i) => i.outlets.map((o) => norm(o)))), now: c.asOf };
-    const fits = [];
-    for (const j of this.journalistCache.list) { const f = journalistFit(j, opp, ctx); if (f.parts.beat.score > 0 || f.parts.articles.score > 0) fits.push(f); } // place or outlet alone is not a topical link
-    fits.sort((a, b) => b.score - a.score);
-    return { opportunity: { key: opp.key, sector: opp.sector, topic: opp.label.name }, directory: this.journalistCache.n, matched: fits.length, matches: fits.slice(0, limit) };
-  }
+  // // ---------------------------------------------------------------- journalists
+  // // Best-matching journalists for one opportunity, computed on demand from the cached directory.
+  // journalistMatches({ oppKey, company: companyId = "bcg", date = null, limit = 8 }) {
+  //   const c = this.context(date);
+  //   const opp = this.opportunities({ company: companyId, date, limit: 300 }).items.find((o) => o.key === oppKey) ?? this.opportunities({ company: companyId, date, limit: 300, group: false }).items.find((o) => o.key === oppKey);
+  //   if (!c || !opp) return { error: "That opportunity is no longer in the ranked list." };
+  //   if (!this.journalistCache || this.journalistCache.n !== this.store.journalistCount()) this.journalistCache = { n: this.store.journalistCount(), list: this.store.allJournalists() };
+  //   const items = (c.byLabel.get(opp.label.key) ?? []).filter((i) => c.asOf - i.at <= 7 * 24 * HOUR);
+  //   const kw = c.ctx.registry.get(opp.label.parent ?? "")?.keywords ?? [];
+  //   const topicTokens = toks([...kw, opp.label.name, ...opp.stories.map((s) => s.title)].join(" "));
+  //   const ctx = { topicTokens, geography: [...new Set(items.flatMap((i) => i.geography))].slice(0, 25), outlets: new Set(items.flatMap((i) => i.outlets.map((o) => norm(o)))), now: c.asOf };
+  //   const fits = [];
+  //   for (const j of this.journalistCache.list) { const f = journalistFit(j, opp, ctx); if (f.parts.beat.score > 0 || f.parts.articles.score > 0) fits.push(f); } // place or outlet alone is not a topical link
+  //   fits.sort((a, b) => b.score - a.score);
+  //   return { opportunity: { key: opp.key, sector: opp.sector, topic: opp.label.name }, directory: this.journalistCache.n, matched: fits.length, matches: fits.slice(0, limit) };
+  // }
 
   // ---------------------------------------------------------------- data quality, judged links, audit, forecasts
   aliases() { if (!this._al || Date.now() - this._al.at > 30000) this._al = { at: Date.now(), map: this.store.entityAliases() }; return this._al.map; }
@@ -391,6 +503,27 @@ export class Analytics {
     return out;
   }
 
+  // For each topic feeding an opportunity: its best-scoring angle and the recent headlines not yet checked against THAT angle. Limited per topic and in total.
+  // The check id carries a short hash of the angle, so a rewritten angle is checked again.
+  angleFitCandidates() {
+    const c = this.context(null), v = this.cfg.angleFit ?? {};
+    if (!c || v.enabled === false) return [];
+    const checked = this.store.checkedTopicPairs(), seen = new Set(), out = [];
+    const hash = (s) => { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h.toString(36); };
+    for (const co of this.companies.list()) {
+      for (const o of this.opportunities({ company: co.id, limit: 400, group: true }).items) {
+        const key = o.label.key;
+        if (o.label.level !== "topic" || seen.has(key) || !o.angle) continue;
+        seen.add(key);
+        const id = key.slice(2), checkId = id + "@" + hash(o.angle), t = c.ctx.topics.get(id);
+        const items = (c.byLabel.get(key) ?? []).filter((i) => c.asOf - i.at <= (v.windowHours ?? 168) * HOUR && !checked.has(i.id + "|" + checkId)).sort((a, b) => b.at - a.at).slice(0, v.maxPerTopic ?? 40);
+        if (items.length) out.push({ id, checkId, angle: o.angle, name: this.labelName(c, key), aliases: t?.aliases ?? [], items: items.map((i) => ({ key: i.id, title: i.title })) });
+        if (out.length >= (v.maxTopics ?? 40)) return out;
+      }
+    }
+    return out;
+  }
+
   // Recommendations logged under a pairing that no longer exists are voided, so they cannot count in the hit rate.
   voidStalePairings() {
     const keys = new Set();
@@ -426,8 +559,8 @@ export class Analytics {
     return { summary: { checked: rows.length, agree: rows.filter((r) => r.agrees).length, disagree: rows.filter((r) => !r.agrees).length, model }, items: rows };
   }
   // The stories to ask the stronger model about: those behind today's top opportunities, not yet reviewed by it.
-  reviewCandidates({ company = "bcg", limit = 30 } = {}) {
-    const c = this.context(null), model = this.cfg.audit?.reviewModel ?? "", done = this.store.reviewedKeys(model);
+  reviewCandidates({ company = "bcg", limit = 30, model: reviewer = null } = {}) {
+    const c = this.context(null), model = reviewer ?? this.cfg.audit?.reviewModel ?? "", done = this.store.reviewedKeys(model);
     if (!c) return [];
     const byId = new Map(c.items.map((i) => [i.id, i])), out = new Map();
     for (const o of this.opportunities({ company, limit: 60, group: true }).items) {
@@ -493,12 +626,12 @@ export class Analytics {
 
   // ---------------------------------------------------------------- briefs
   async makeBrief({ oppKey, company: companyId = "bcg", authorId = null, journalistId = null, date = null }) {
-    if (!this.reader?.provider) throw new Error("No LLM available to draft a brief. Start the server with ANTHROPIC_API_KEY set.");
+    if (!this.reader?.provider) throw new Error("No LLM available to draft a brief. Add a GROQ_API_KEY or OPENAI_API_KEY (or switch Claude on in Settings).");
     const opp = this.opportunities({ company: companyId, date, limit: 300 }).items.find((o) => o.key === oppKey);
     if (!opp) throw new Error("That opportunity is no longer in the ranked list. Refresh and try again.");
     let author = null;
-    if (journalistId) { const j = this.store.getJournalist(journalistId); if (!j) throw new Error("Unknown journalist"); author = toAuthor(j); } // declared fields only, never contact details
-    else if (authorId) { author = this.store.listAuthors().find((a) => a.id === authorId) ?? null; if (!author) throw new Error("Unknown author"); }
+    // JOURNALISTS DISABLED: if (journalistId) { const j = this.store.getJournalist(journalistId); if (!j) throw new Error("Unknown journalist"); author = toAuthor(j); }
+    if (authorId) { author = this.store.listAuthors().find((a) => a.id === authorId) ?? null; if (!author) throw new Error("Unknown author"); }
     const brief = await this.reader.brief({ opp, stories: opp.stories.slice(0, this.cfg.briefs.maxStories), author });
     if (!brief) throw new Error("The model did not return a usable brief. Try again.");
     const id = this.store.addBrief({ company: companyId, oppKey, sector: opp.sector, topic: opp.label.name, authorId: authorId ?? journalistId, brief: { ...brief, generatedFor: { score: opp.score, stage: opp.stage, action: opp.action, window: opp.window.label, recipient: author ? { id: author.id, name: author.name, publication: (author.publications ?? [])[0] ?? "" } : null } }, model: this.reader.label });

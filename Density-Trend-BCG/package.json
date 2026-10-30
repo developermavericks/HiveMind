@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "density-trend-bcg",
   "version": "1.0.0",
   "description": "Google News per-publication headline poll -> LLM impact reading -> density fields -> exposure map for BCG practice areas.",
@@ -7,6 +7,8 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node src/cli.mjs run",
+    "dev": "node src/dev.mjs --no-auto",
+    "dev:auto": "node src/dev.mjs --schedule 480",
     "report": "node src/cli.mjs report",
     "test": "node --test \"test/*.test.mjs\""
   }

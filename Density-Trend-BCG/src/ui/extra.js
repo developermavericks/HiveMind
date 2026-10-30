@@ -26,7 +26,7 @@ const INFO = {
   c_sourceBreadth: { t: "Independent sources (15 points)", d: "How many separate origins report the topic. Outlets under one owner, and copies of a wire report, count once. The bar fills at 8 or more.", ex: "7 independent origins → about 13 of 15." },
   c_sectorEvidence: { t: "Sector evidence (20 points)", d: "How much the topic really matters to this client sector, from 0 to 1, judged from the topic's own stories. A little lower when the link is only inherited from the broader area.", ex: "Relevance 0.75 → 15 of 20." },
   c_triggerTiming: { t: "Trigger timing (15 points)", d: "How fresh the event that gives a reason to act is. A trigger is a story confirmed by an official source or at least three independent origins. Full marks within 24 hours, fading over a week, and halved if it is not yet verified.", ex: "Unverified, 1 origin → 7.5 of 15." },
-  c_headroom: { t: "Editorial headroom (10 points)", d: "Room left to say something new. A topic that already takes a large share of coverage is crowded, so it scores low; a topic few have written about scores high. Crowded and declining topics are capped.", ex: "Share percentile 88 (crowded) → 1.2 of 10." },
+  c_headroom: { t: "Editorial headroom (10 points)", d: "Counted from opinion and analysis pieces in the print editions that take up this angle (last 7 days). Two views of the same count: <b>Nobody has written it</b> scores higher when fewer pieces exist (open ground); <b>Others have written it</b> scores higher when more exist (several writers already made the case). Without print data it falls back to coverage share.", ex: "Share percentile 88 (crowded) → 1.2 of 10." },
   score: { t: "Opportunity score", d: "A 0–100 ranking that combines six factors (momentum, acceleration, source breadth, sector evidence, trigger timing and editorial headroom). It ranks opportunities; it is not a probability." },
   forecast: { t: "Forecast", d: "A simple extrapolation of recent share with an 80% uncertainty band. It is a pilot estimate and has not been validated against outcomes." },
   momentumChart: { t: "Momentum chart", d: "Bars are the story count, the blue line is coverage share and the green line a rolling average. Diamonds mark verified triggers; the dashed orange area is the unvalidated forecast." },
@@ -295,7 +295,7 @@ async function pgSentiment(el) {
 }
 
 // ---------------------------------------------------------------- Logs
-const LOG_KIND = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment", "topic-merge": "Topic merge", fulltext: "Full-text retry", "second-opinion": "Second opinion", "entities-merge": "Entity merge", "topic-match": "Pairing check", "hot-topics": "Hot-topic signals", journalists: "Journalist sync" };
+const LOG_KIND = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "second-opinion": "Second opinion", "entities-merge": "Entity merge", "topic-match": "Pairing check", "hot-topics": "Hot-topic signals", journalists: "Journalist sync" };
 const dur = (ms) => (ms == null ? "–" : ms < 1000 ? "<1 s" : ms < 90e3 ? `${Math.round(ms / 1000)} s` : ms < 90 * 60e3 ? `${Math.round(ms / 60e3)} min` : `${(ms / 3600e3).toFixed(1)} h`);
 async function pgLogs(el) {
   const f = (S.logf ??= { kind: "", trigger: "", status: "" });

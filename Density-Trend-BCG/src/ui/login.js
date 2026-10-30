@@ -4,6 +4,26 @@
   const form = $("form"), msg = $("msg"), submit = $("submit"), tabs = $("tabs"), pw = $("password"), eye = $("eye");
   let mode = "signin", setup = false, busy = false;
 
+  // The intro video plays once with the card hidden, then the card fades in over its last frame. A reload plays it again. The card appears at once for reduced
+  // motion or Data Saver, if the video cannot be loaded or autoplay is refused, and in any case a few seconds after the video should have ended.
+  const bg = $("bg"), START = 0.6;
+  let shown = false;
+  const reveal = () => { if (shown) return; shown = true; document.body.classList.remove("intro"); document.body.classList.add("after"); };
+  if (!bg) reveal();
+  else {
+    const calm = matchMedia("(prefers-reduced-motion: reduce)").matches || navigator.connection?.saveData;
+    const off = () => { bg.pause?.(); bg.classList.add("off"); reveal(); };
+    if (calm) off();
+    else {
+      bg.addEventListener("ended", reveal);
+      bg.addEventListener("error", off);
+      // The first 0.6 s of the clip is skipped (the #t=0.6 in the address does it; this covers a browser that ignores it).
+      bg.addEventListener("loadedmetadata", () => { if (bg.currentTime < START) bg.currentTime = START; if (isFinite(bg.duration)) setTimeout(reveal, bg.duration * 1000 + 3000); });
+      setTimeout(() => { if (bg.paused || bg.currentTime <= START) off(); }, 6000); // nothing has played after 6 s: do not keep people waiting
+      bg.play?.().catch(off);
+    }
+  }
+
   const say = (text, ok = false) => { msg.textContent = text || ""; msg.hidden = !text; msg.classList.toggle("ok", !!ok); };
   const post = async (path, body) => {
     const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-requested-with": "hivemind" }, body: JSON.stringify(body) });

@@ -6,11 +6,16 @@
 //   source breadth  100 × min(1, independent origins / 8)
 //   sector evidence 100 × relevance × (0.6 + 0.4 × min(1, full-text stories / 3)), ×0.85 when inherited from the parent bracket
 //   trigger timing  100 within 24h of a verified trigger, → 60 at 72h, → 0 at 7 days; halved when the trigger is unverified
-//   headroom        100 × (1 − coverage-share percentile), capped when the topic is crowded or declining
+//   headroom        two views of the same count of authored articles on this angle (mode, chosen by the reader):
+//                     whitespace  100 × (1 − count / saturation): nobody has written it yet, so the angle is open
+//                     validated   100 × min(1, count / saturation): several writers already made the case, so the angle is proven
+//                   Authored = opinion or analysis pieces from the print editions (src/ocr.mjs) matched to this suggested angle.
+//                   Without print data it falls back to 100 × (1 − coverage-share percentile), capped when the topic is crowded or declining
 // The score ranks opportunities. It is not a probability. Evidence strength is reported separately.
 import { HOUR } from "./metrics.mjs";
 import { isWeakLabel } from "./topics.mjs";
 import { norm } from "./brackets.mjs";
+import { onlineKind } from "./online.mjs";
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const r1 = (x) => Math.round(x * 10) / 10;
@@ -42,20 +47,30 @@ const timingScore = (age, verified) => {
 
 // The six scored components for one label. `sector` carries the sector-evidence input (a score and a note), which
 // differs between a company opportunity (relevance-based) and the company-free backtest (impact breadth).
-export function labelComponents(m, { trigger, sector }, cfg) {
+export function labelComponents(m, { trigger, sector, authored = null }, cfg) {
   const W = cfg.weights, wSum = Object.values(W).reduce((a, b) => a + b, 0);
-  const headroomRaw = 100 * (1 - (m.sharePercentile ?? 0.5));
-  const headroom = m.stage === "crowded" ? Math.min(headroomRaw, 30) : m.stage === "declining" ? Math.min(headroomRaw, 25) : headroomRaw;
+  // `authored` = { count, cap } when print-edition data covers the window: the headroom is then the share of the angle not yet taken.
+  // "Nobody has written it" is not proof of open ground (the print read can miss a piece), so even zero pieces earns at most whitespaceMax (default 60).
+  // In the validated view an angle with no authored piece at all has nothing validating it, so its whole score is scaled by unvalidatedFactor (default 0.75).
+  const oc = cfg.ocr ?? {}, wsMax = oc.whitespaceMax ?? 60, unvalidated = oc.unvalidatedFactor ?? 0.75;
+  const share = authored ? Math.min(1, authored.count / Math.max(1, authored.cap)) : 0;
+  const headroomRaw = authored ? (authored.mode === "validated" ? 100 * share : wsMax * (1 - share)) : 100 * (1 - (m.sharePercentile ?? 0.5));
+  const headroom = authored ? headroomRaw : m.stage === "crowded" ? Math.min(headroomRaw, 30) : m.stage === "declining" ? Math.min(headroomRaw, 25) : headroomRaw;
   const comp = {
     momentum: { score: m.ratio == null ? 0 : 100 * clamp(Math.log2(m.ratio) / 2, 0, 1), raw: m.ratio, note: m.ratio == null ? "no baseline yet" : `×${m.ratio.toFixed(2)} vs baseline share` },
     acceleration: { score: m.accel == null ? 0 : 50 + 50 * clamp(m.accel / 1.5, -1, 1), raw: m.accel, note: m.accel == null ? "needs two comparable steps" : `Δlog₂ ${m.accel >= 0 ? "+" : ""}${m.accel.toFixed(2)}` },
     sourceBreadth: { score: 100 * Math.min(1, m.originsRecent / cfg.evidence.originsForFullScore), raw: m.originsRecent, note: `${m.originsRecent} independent origins` },
     sectorEvidence: { score: sector.score, raw: sector.raw, note: sector.note },
     triggerTiming: { score: trigger ? timingScore(trigger.ageHours, trigger.verified) : 0, raw: trigger?.ageHours ?? null, note: trigger ? `${trigger.reason}, ${Math.round(trigger.ageHours)}h ago` : "no trigger found" },
-    headroom: { score: headroom, raw: m.sharePercentile, note: `share percentile ${Math.round((m.sharePercentile ?? 0) * 100)}, stage ${m.stage}` },
+    headroom: authored
+      ? { score: headroom, raw: authored.count, note: authored.mode === "validated" ? `${authored.count} authored article${authored.count === 1 ? "" : "s"} already on this angle: validated (full at ${authored.cap}+)` : `${authored.count} authored article${authored.count === 1 ? "" : "s"} on this angle: ${authored.count ? "room left" : "open ground, capped at " + wsMax + " until proven"} (none left at ${authored.cap}+)` }
+      : { score: headroom, raw: m.sharePercentile, note: `share percentile ${Math.round((m.sharePercentile ?? 0) * 100)}, stage ${m.stage}` },
   };
+  const factor = authored?.mode === "validated" && authored.count === 0 ? unvalidated : 1;
   let score = 0;
-  for (const [k, c] of Object.entries(comp)) { c.weight = W[k]; c.points = (W[k] * c.score) / wSum; score += c.points; }
+  for (const [k, c] of Object.entries(comp)) { c.weight = W[k]; c.points = (factor * W[k] * c.score) / wSum; score += c.points; }
+  if (authored?.online) comp.headroom.note += ` (${authored.print} print, ${authored.online} online)`;
+  if (factor !== 1) comp.headroom.note += `; score scaled ×${factor} because no authored piece validates it`;
   return { comp, score, headroom };
 }
 
@@ -85,7 +100,24 @@ export function actionFor({ score, stage, evidence, headroom, trigger, evidenceS
   return { action: "monitor", why };
 }
 
-export function buildOpportunities({ company, matches, analysisResult, byLabel, ctx, asOf, minRelevance = 0.3, limit = 60, topicMatches = new Map(), qualityRed = false }) {
+// Online opinion / analysis pieces on this topic within the window. `onl` = { pieces, matches, windowDays }: pieces are the stored judgements
+// (story key -> { kind, author, source }), matches the exact angles found (story key -> [{ oppKey }]). A piece that has been matched counts only
+// for the angles it was matched to; one not yet matched counts for the topic as a whole, but only for a specific topic (t:): a broad area
+// (b:) holds hundreds of pieces, which says nothing about one angle, so there only a piece matched to the angle counts.
+export function onlineOnAngle(list, oppKey, onl, asOf) {
+  const out = [], from = asOf - (onl.windowDays ?? 7) * 864e5, broad = (oppKey.split("|")[2] ?? "").startsWith("b:");
+  for (const i of list) {
+    if (i.at < from || i.at > asOf) continue;
+    const k = onlineKind(i, onl.pieces.get(i.id) ?? null);
+    if (!k) continue;
+    const m = onl.matches.get(i.id);
+    if (m ? !m.some((x) => x.oppKey === oppKey) : broad) continue;
+    out.push({ id: i.id, title: i.title, url: i.url, at: i.at, outlet: i.outlets?.[0] ?? "", kind: k.kind, by: k.by, author: onl.pieces.get(i.id)?.author ?? "", exact: !!m });
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+
+export function buildOpportunities({ company, matches, analysisResult, byLabel, ctx, asOf, minRelevance = 0.3, limit = 60, topicMatches = new Map(), qualityRed = false, ocr = null, online = null }) {
   const { cfg, registry, topics, signals = {} } = ctx;
   const headlineMode = cfg.reading?.mode === "headline", tm = cfg.topicMatch ?? {};
   const labelName = (key) => (key.startsWith("b:") ? registry.get(key.slice(2))?.name : topics.get(key.slice(2))?.name) ?? key;
@@ -105,12 +137,16 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
     const inherited = m.level === "topic" && !judged;
     for (const h of match.sectors.filter((s) => s.relevance >= minRelevance)) {
       const ftFactor = headlineMode ? 1 : 0.6 + 0.4 * Math.min(1, m.fullTextCount / 3);
+      const oppKey = `${company.id}|${h.sector}|${m.key}`, printed = ocr ? ocr.byOpp.get(oppKey) ?? [] : null;
+      const onlinePieces = ocr && online ? onlineOnAngle(byLabel.get(m.key) ?? [], oppKey, online, asOf) : [];
+      const taken = printed, counted = printed ? printed.length + (online?.count === false ? 0 : onlinePieces.length) : 0;
       const { comp, score, headroom } = labelComponents(m, {
-        trigger,
+        trigger, authored: taken ? { count: counted, cap: ocr.cap, mode: ocr.mode, print: printed.length, online: onlinePieces.length } : null,
         sector: { score: 100 * h.relevance * ftFactor * (inherited ? 0.85 : 1), raw: h.relevance, note: `relevance ${h.relevance.toFixed(2)}, ${m.fullTextCount} full-text stor${m.fullTextCount === 1 ? "y" : "ies"}${inherited ? ", inherited from parent bracket" : ""}` },
       }, cfg);
       const evidenceStatus = !inherited && h.relevance >= (judged ? tm.supportedRelevance ?? 0.5 : 0.5) && m.count >= (tm.minStories ?? 2) && (headlineMode || m.fullTextCount >= 1) ? "supported" : "hypothesis";
-      const decision = actionFor({ score, stage: m.stage, evidence: m.evidence, headroom, trigger, evidenceStatus, baselineHours: m.baselineHours, origins: m.originsRecent, qualityRed }, cfg);
+      // The write-now and skip rules ask for room to say something new; in the validated view that question is not asked, so they ignore headroom.
+      const gateHeadroom = taken && ocr.mode === "validated" ? 100 : headroom;      const decision = actionFor({ score, stage: m.stage, evidence: m.evidence, headroom: gateHeadroom, trigger, evidenceStatus, baselineHours: m.baselineHours, origins: m.originsRecent, qualityRed }, cfg);
       const horizons = list.map((i) => i.horizon);
       const immediate = horizons.filter((x) => x === "immediate").length >= horizons.length / 2;
       const window = immediate || (trigger && trigger.ageHours <= 48) ? { label: "Next 24–72 hours", kind: "immediate" } : { label: "Next 3–7 days", kind: "analysis" };
@@ -126,12 +162,13 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
         .map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType }));
       const bracketName = bracketId ? registry.get(bracketId)?.name : null;
       out.push({
-        key: `${company.id}|${h.sector}|${m.key}`, company: company.id, sector: h.sector,
+        key: oppKey, company: company.id, sector: h.sector,
         label: { key: m.key, name: labelName(m.key), level: m.level, parent: bracketId ?? null, parentName: bracketName },
         angle: h.write_about, why: h.why, relevance: h.relevance, channel: h.channel, front: h.front, evidenceStatus,
         score, components: comp, stage: m.stage, stageRule: m.stageRule, evidence: m.evidence, spark: m.spark,
         kind: m.stage === "watch" || m.ratio == null ? "editorial" : "forecast",
         action: decision.action, actionWhy: decision.why, window, trigger, headroom, holdReason: decision.hold ?? null,
+        authored: taken ? { count: counted, print: printed.length, online: onlinePieces.length, cap: ocr.cap, mode: ocr.mode, windowDays: ocr.windowDays, articles: taken.slice(0, 12), onlineArticles: onlinePieces.slice(0, 12) } : null,
         fit: m.level === "topic" ? { mode: judged ? "judged" : "inherited", relevance: h.relevance, judgedAt: judged?.judgedAt ?? null } : { mode: "judged", relevance: h.relevance, judgedAt: null },
         dataFlags: [...(m.baselineHours < (cfg.action.writeNowMinBaselineHours ?? 0) ? ["Thin history"] : []), ...(m.originsRecent < (cfg.action.writeNowMinOrigins ?? 0) ? ["Few independent origins"] : []), ...(inherited ? ["Sector link inherited"] : [])],
         metrics: { count: m.count, countPrev: m.countPrev, total: m.total, share: m.share, baseShare: m.baseShare, ratio: m.ratio, ratioPrev: m.ratioPrev, accel: m.accel,

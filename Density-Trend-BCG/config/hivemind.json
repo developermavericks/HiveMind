@@ -165,6 +165,16 @@
     "anthropic": {
       "inPerMTok": null,
       "outPerMTok": null
+    },
+    "openai": {
+      "inPerMTok": 0.2,
+      "outPerMTok": 1.2,
+      "_note": "GPT-5.6 Luna, list price per million tokens (cached input is 0.02)."
+    },
+    "groq": {
+      "inPerMTok": 0.15,
+      "outPerMTok": 0.6,
+      "_note": "gpt-oss-120b list price per million tokens; check Groq's pricing page, it may have changed."
     }
   },
   "reading": {
@@ -220,7 +230,17 @@
       "Today.s (Wordle|Connections|Strands) (hints?|answers?)",
       "Live Updates?: .*(Score|Match)",
       "Playing XI|Dream 11|My11Circle",
-      "OTT releases? this week|Web series to watch"
+      "OTT releases? this week|Web series to watch",
+      "\\b(wishes|greetings?)\\b[^|]*\\b(quotes|messages|images|status|whatsapp|facebook)\\b",
+      "\\bbest (wishes|quotes|greetings)\\b",
+      "\\bmehn?e?hn?di\\b|\\bmehendi\\b",
+      "\\bpuja (muhurat|muhurta|vidhi|timings?)\\b|\\bvrat katha\\b|\\barghya\\b",
+      "\\bmoon ?rise (time|today)|when will the moon rise",
+      "^(karwa|karva) chauth( 20\\d\\d)?:?\\s*-?\\s*$",
+      "\\b(food|fasting) rules\\b|\\b(spiritual|hidden) meaning\\b",
+      "\\b(history|significance)\\b.*\\b(jayanti|chauth|diwali|navratri|dussehra|puja|ekadashi|purnima)\\b|\\b(jayanti|chauth|ekadashi|purnima)\\b.*\\bsignificance\\b",
+      "\\b(horoscope|rashifal|zodiac signs?)\\b",
+      "\\bdate and time\\b.*\\b(puja|moon|muhurat|festival)\\b"
     ],
     "_note": "Template pages (topic landing pages, scoreboards) that are not news: skipped at collection and excluded from analysis."
   },
@@ -289,11 +309,67 @@
     "maxPerTopic": 150,
     "_note": "Headlines filed under the topics behind today's opportunities are checked against the topic; those that do not fit are left out (reversibly)."
   },
+  "angleFit": {
+    "enabled": true,
+    "maxTopics": 40,
+    "maxPerTopic": 40,
+    "windowHours": 168,
+    "_note": "Second check in the same job as topicVerify: each topic's recent headlines are checked against the topic's best angle (not just the topic name). Headlines that do not support the angle are left out of that topic (reversibly). At most maxTopics x maxPerTopic headlines in a pass, Groq only, each headline checked once per angle."
+  },
+  "online": {
+    "countInHeadroom": true,
+    "sections": true,
+    "sectionRead": false,
+    "analyze": false,
+    "dailyCap": 150,
+    "_note": "Online opinion/analysis pieces. countInHeadroom: they are added to the print count in the headroom. sections: the newspapers' opinion pages are polled (free, no model) and the stories found there are marked opinion. sectionRead: also read the opinion-page stories that were not collected otherwise (adds model cost, off). analyze: after each collection read the text of up to dailyCap pieces, confirm the label, find the writer and match the angle (Groq, off by default; the Leadership page has a button for one run)."
+  },
+  "ocr": {
+    "startDate": "2026-10-20",
+    "windowDays": 7,
+    "saturationCount": 5,
+    "minFit": 0.4,
+    "batchSize": 12,
+    "allowClaude": false,
+    "dailyAt": "11:15",
+    "scheduledDays": 3,
+    "whitespaceMax": 60,
+    "unvalidatedFactor": 0.75,
+    "_note": "Print editions from the OCR e-paper service. Authored (opinion/analysis) articles matched to a suggested angle make the headroom: 100 x (1 - count / saturationCount) over the last windowDays. startDate is where `ocr` begins downloading."
+  },
+  "effort": {
+    "ocrAssemble": "medium",
+    "readHeadlines": "none",
+    "match": "low",
+    "review": "medium",
+    "_note": "How much Groq or OpenAI may reason before answering, per job (default low). Luna read headlines as well with none as with low (the benchmark), so reasoning is switched off there; layout and the review need it. Putting printed columns back together reads junctions between blocks and missed most articles on low; medium found them. high is refused by Groq's request limits."
+  },
+  "routingNoClaude": {
+    "readHeadlines": "openai",
+    "match": "openai",
+    "brief": "openai",
+    "ocrAssemble": "openai",
+    "review": "openai",
+    "_note": "Used while Claude is switched off, which is the default (switch it on in Settings → Integrations). The jobs listed here go to OpenAI (GPT-5.6 Luna); every other job goes to Groq. OpenAI falls back to Groq, never to Claude."
+  },
+  "limits": {
+    "openaiDailyUsd": 3,
+    "_note": "Daily spend cap per paid provider, from the token counts and the prices in pricing. Once reached, that provider's jobs go to Groq until the next day. Remove a line to remove its cap."
+  },
+  "models": {
+    "ocrAssemble": "claude-sonnet-5-5",
+    "_note": "Model used for a job instead of the default (HIVEMIND_MODEL). Putting the columns of a printed article back together needs the stronger model: the default one missed column blocks and sometimes gave them to a neighbouring article. A job routed to groq ignores this."
+  },
   "routing": {
     "readFullText": "groq",
     "sentiment": "groq",
     "readHeadlines": "groq",
     "topicFit": "claude",
+    "ocrClassify": "groq",
+    "ocrMatch": "groq",
+    "ocrAuthor": "groq",
+    "ocrTitle": "groq",
+    "ocrAssemble": "claude",
     "_note": "Which provider does each job first: groq (low cost) or claude. Claude stays the fallback. Measured on real stories: full-article reading and sentiment matched Claude's agreement with earlier readings; topic-fit verdicts agreed only 79%, so they stay on Claude."
   }
 }
