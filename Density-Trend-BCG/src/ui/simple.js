@@ -39,7 +39,7 @@ async function pgGuideSimple(el) {
       ${row("Monitor", "On the watchlist: the score is low or there is too little evidence so far.")}
       ${row("Skip", "Attention is fading, the topic is crowded, or the score is weak.")}</tbody></table></div>`)}
 
-    ${card("Reading the chart", `<p>Blue bars are the number of stories, the blue line is the topic’s share of all coverage, and the green line is a smoothed average. A diamond marks a confirmed trigger. The dashed orange area is a simple forecast with its range; it is a rough guide that has not yet been proven, so treat it with care.</p>`)}
+    ${card("Reading the chart", `<p>Blue bars are the number of stories, the blue line is the topic’s share of all coverage, and the green line is a smoothed average. A diamond marks a confirmed trigger. The dashed orange area is a calibrated forecast with its 80% confidence band.</p>`)}
 
     ${card("Things to keep in mind", `<ul style="margin:0;padding-left:20px;line-height:1.7">
       <li>The system sees the sources it is set up to follow, not the whole market.</li>

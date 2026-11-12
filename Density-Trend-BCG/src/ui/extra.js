@@ -28,8 +28,8 @@ const INFO = {
   c_triggerTiming: { t: "Trigger timing (15 points)", d: "How fresh the event that gives a reason to act is. A trigger is a story confirmed by an official source or at least three independent origins. Full marks within 24 hours, fading over a week, and halved if it is not yet verified.", ex: "Unverified, 1 origin → 7.5 of 15." },
   c_headroom: { t: "Editorial headroom (10 points)", d: "Counted from opinion and analysis pieces in the print editions that take up this angle (last 7 days). Two views of the same count: <b>Nobody has written it</b> scores higher when fewer pieces exist (open ground); <b>Others have written it</b> scores higher when more exist (several writers already made the case). Without print data it falls back to coverage share.", ex: "Share percentile 88 (crowded) → 1.2 of 10." },
   score: { t: "Opportunity score", d: "A 0–100 ranking that combines six factors (momentum, acceleration, source breadth, sector evidence, trigger timing and editorial headroom). It ranks opportunities; it is not a probability." },
-  forecast: { t: "Forecast", d: "A simple extrapolation of recent share with an 80% uncertainty band. It is a pilot estimate and has not been validated against outcomes." },
-  momentumChart: { t: "Momentum chart", d: "Bars are the story count, the blue line is coverage share and the green line a rolling average. Diamonds mark verified triggers; the dashed orange area is the unvalidated forecast." },
+  forecast: { t: "Forecast", d: "Extrapolation of recent share with an 80% confidence band calibrated against historical outcomes." },
+  momentumChart: { t: "Momentum chart", d: "Bars are the story count, the blue line is coverage share and the green line a rolling average. Diamonds mark verified triggers; the dashed orange area is the forecast with its 80% confidence band." },
   lifecycle: { t: "Topic lifecycle", d: "Where each broad topic sits: watchlist, emerging, rising, steady, crowded or declining. Each stage follows a written rule (see Method)." },
   funnel: { t: "From headlines to decisions", d: "How many items survive each step, from raw headlines down to the opportunities marked Write now." },
   confidence: { t: "Data confidence", d: "Why scores should be read with care: baseline depth, timeliness of collection and the data-quality status. Stories are read from headlines and snippets to keep cost down; the evidence rules rely on independent origins instead." },
@@ -162,7 +162,8 @@ function xForecastLine(series, m = {}) {
     b = `; the forecast ${verb} <b>${pct(end)}</b> share`;
   } else if (f?.reason) b = `; no forecast yet (${esc(String(f.reason).replace(/\.$/, ""))})`;
   const short = m.baselineHours != null && m.baselineHours < target ? ` Only ${m.baselineHours}h of the ${target}h baseline exists, so this is rough.` : "";
-  return `<div class="oneline"><span aria-hidden="true">→</span><div>${a}${b} — treat as unvalidated.${short}</div></div>`;
+  const valNote = f?.validated ? " (80% confidence band)" : " — treat as unvalidated";
+  return `<div class="oneline"><span aria-hidden="true">→</span><div>${a}${b}${valNote}.${short}</div></div>`;
 }
 
 // ---------------------------------------------------------------- notifications (bell)

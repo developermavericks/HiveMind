@@ -6,8 +6,9 @@ On top of the pipeline below, the app now tracks which topics are **gaining atte
 | Page | What it answers |
 |---|---|
 | Overview | KPIs, today's priorities, momentum leaders, topic lifecycle, data confidence |
-| Opportunities | Ranked 0–100 opportunity score with six visible components, evidence strength, action (write now / investigate / monitor / skip), window, review condition |
+| Opportunities | Ranked 0–100 opportunity score with six visible components, evidence strength, action (write now / investigate / monitor / skip), window, review condition, and live Twitter / X trending validation chips (`𝕏 #Rank 🇮🇳` / `𝕏 #Rank 🌐`) |
 | Momentum | Per-topic coverage volume (bars), coverage share and rolling average (lines), verified-trigger markers, collection gaps, comparison, dashed unvalidated forecast with band, separate search-interest panel |
+| Trends & Twitter (𝕏) | Macro topic trends, sector exposures, entities, sentiment, and live Top 70 Twitter trends (India & Worldwide) with automated 8-hour polling and editorial opportunity cross-matching (`#/trends/xtrends`) |
 | Company lens | The earlier sector exposure, fronts and geography views |
 | Sources | Approved-source list with why each is trusted, syndication vs independent origins, run history, outages |
 | Authors & briefs | Author profiles, fit ranked separately from momentum, LLM-drafted briefs that an editor approves / rejects |
@@ -36,12 +37,24 @@ Not built / needs data: historical sequences from comparable events, article-per
 | Second opinion | (in server, weekly) | A stronger model (`audit.reviewModel`) re-reads the stories behind the top opportunities and says whether it agrees. |
 | Full-text retry | `fulltext` | Off by default (`fulltext.enabled`); stories are read from the headline and snippet to keep cost down. Set `HIVEMIND_FULLTEXT=1` to fetch article text again. |
 | Hot topics | (in server) | Serper news search and search interest for the few rising topics, within the daily budgets in `config/hivemind.json` (`hot`). |
+| Twitter / X trends | (in server, every 8h) | Public mirror feed poll of Top 70 India and Worldwide trending topics, cross-matching suggested editorial angles. Zero Twitter API fees, zero headless scraping. |
 
 **Reading mode.** `config/hivemind.json → reading.mode` is `headline`: evidence rests on independent origins, history and the second-model check, not on full-text share. "Write now" additionally needs 72 h of history, 4 independent origins and data quality not in the red (Accuracy → Data quality). Hit bars scale with a topic's size (`success.bands`), and forecasts are logged and compared with outcomes (Accuracy → Validation).
 
 **Sign-in.** The dashboard requires an account. The first account created becomes the administrator; later sign-ups wait for approval in Settings → Users. Passwords are hashed with scrypt, sessions are HttpOnly SameSite=Strict cookies (Secure over https, or `HIVEMIND_COOKIE_SECURE=1`), repeated failures lock the email and throttle the IP, and members cannot change keys, run jobs or manage users. Create the administrator account before exposing the server beyond localhost; behind a proxy set `HIVEMIND_TRUST_PROXY=1` and `HIVEMIND_ALLOWED_HOSTS`. `HIVEMIND_AUTH=off` disables it (not for shared machines).
 
 Settings → Logs lists every job (scheduled, automatic or manual) with what it collected and whether it worked; Settings → Usage shows calls, tokens and the credit each provider reports. Recommendations are judged 72 hours after they are made (live hit rate in Accuracy); weight re-tuning is only ever suggested, and applied on confirmation (`data/weights.override.json`). Weekday adjustment switches on after 28 days of history.
+
+## Twitter / X Trending Validation
+
+HiveMind includes automated, cost-free cross-verification of suggested editorial angles against active Twitter (X) trends:
+- **Zero API Cost & Zero Headless Scraping:** Uses public mirror feeds (`https://getdaytrends.com/india/` and `https://getdaytrends.com/`) with fast token and compound phrase matching.
+- **Dual Region Feeds:** Captures Top 70 **India (🇮🇳)** and Top 70 **Worldwide (🌐)** trending topics and hashtags.
+- **Automated 8-Hour Sync:** Background scheduler pulls fresh trends every 8 hours (logged to SQLite `job_log` as `xtrends`). An on-demand refresh is available anytime via the UI or `POST /api/xtrends/refresh`.
+- **Opportunities Integration:** Every suggested editorial angle is cross-matched against trending topics. Trending items display `𝕏 #Rank 🇮🇳` or `𝕏 #Rank 🌐` chips in the Opportunities table, filterable via `[ ] 𝕏 Trending only`.
+- **Drawer Detail Card:** Opening any opportunity displays the real-time **Twitter / X Trending Status** card with rank, hashtag, tweet volume, match reason, and manual refresh button.
+- **Dedicated Trends View:** Navigate to **Trends → 𝕏 Twitter Trends** (`#/trends/xtrends`) to view live streams, filter by region (`All Streams`, `🇮🇳 India`, `🌐 Worldwide`), filter by type (`All`, `Matched`, `Hashtags`, `Keywords`), search keywords, or inspect editorial alignments.
+- **Documentation:** See [docs/TWITTER-TRENDS-VALIDATION.md](file:///e:/Mavericks%20-%20October%20and%20later%20projects%202026/HiveMind/Density-Trend-BCG/docs/TWITTER-TRENDS-VALIDATION.md) for full architecture and test details.
 
 ## Original description
 

@@ -12,6 +12,7 @@ import { buildOpportunities, itemsByLabel, onlineOnAngle } from "./opportunity.m
 import { runBacktest } from "./backtest.mjs";
 import { norm } from "./brackets.mjs";
 import { TopicRegistry } from "./topics.mjs";
+import { getCachedIndiaTrends, matchOpportunityTrend } from "./xtrends.mjs";
 
 const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily chart
 // The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
@@ -149,6 +150,10 @@ export class Analytics {
       }
       items = [...best.values()].map((o) => ({ ...o, moreSectors: o.otherSectors }));
     }
+    const cachedTrends = this.store ? getCachedIndiaTrends(this.store) : [];
+    if (cachedTrends?.length) {
+      for (const o of items) o.xTrending = matchOpportunityTrend(o, cachedTrends);
+    }
     return { ...res, items, asOf: c.asOf, company: { id: company.id, name: company.name, matched: Object.keys(company.matches).length } };
   }
 
@@ -205,7 +210,13 @@ export class Analytics {
   opportunity({ company: companyId = "bcg", key, date = null, mode = null, group = false } = {}) {
     for (const g of [group, !group]) {
       const hit = this.opportunities({ company: companyId, date, limit: 1000, group: g, mode }).items?.find((o) => o.key === key);
-      if (hit) return hit;
+      if (hit) {
+        if (!hit.xTrending) {
+          const cachedTrends = this.store ? getCachedIndiaTrends(this.store) : [];
+          if (cachedTrends?.length) hit.xTrending = matchOpportunityTrend(hit, cachedTrends);
+        }
+        return hit;
+      }
     }
     return { error: "Unknown opportunity" };
   }
@@ -608,7 +619,7 @@ export class Analytics {
     for (const [key, list] of byTopic) {
       const s = seriesFor(c.items, key, "hour", c.ctx, c.asOf);
       for (const f of list) {
-        const i = s.bins.findIndex((b) => b === f.target_at - (f.target_at % HOUR));
+        const i = s.bins.findIndex((b) => Math.abs(b - f.target_at) < 1800000);
         const v = i >= 0 && (s.status[i] === "ok") ? s.avg[i] : null;
         if (v != null) { this.store.putForecastActual(f.id, v); judged++; }
       }

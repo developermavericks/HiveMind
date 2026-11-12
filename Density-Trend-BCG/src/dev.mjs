@@ -11,12 +11,16 @@ import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const args = ["--no-warnings", join("src", "cli.mjs"), "serve", ...process.argv.slice(2)];
+const args = ["--max-old-space-size=4096", "--no-warnings", join("src", "cli.mjs"), "serve", ...process.argv.slice(2)];
 const log = (m) => console.log(`[dev ${new Date().toLocaleTimeString()}] ${m}`);
 let child = null, timer = null, restarting = false;
 
 function start() {
-  child = spawn(process.execPath, args, { cwd: root, stdio: "inherit" });
+  child = spawn(process.execPath, args, {
+    cwd: root,
+    stdio: "inherit",
+    env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --max-old-space-size=4096`.trim() }
+  });
   const me = child;
   me.on("exit", (code) => { if (child === me) { child = null; log(`server exited (${code ?? "signal"}); waiting for a change to start it again`); } });
   log(`server started (pid ${me.pid})`);

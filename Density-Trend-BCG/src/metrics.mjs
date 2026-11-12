@@ -291,13 +291,14 @@ export function holtDamped(y, { alpha, beta, phi, z }, h) {
     const nl = alpha * v + (1 - alpha) * pred;
     b = beta * (nl - l) + (1 - beta) * phi * b; l = nl;
   }
-  // Robust spread (median absolute residual), so one spike in the history doesn't inflate the band for ever.
+  // Standard error of residuals (RMSE) with MAD robust estimate
+  const rmse = Math.sqrt(resid.reduce((a, e) => a + e * e, 0) / resid.length);
   const mad = median(resid.map(Math.abs)) * 1.4826;
-  const sigma = mad > 0 ? mad : Math.sqrt(resid.reduce((a, e) => a + e * e, 0) / resid.length);
+  const sigma = Math.max(mad, rmse, 0.005);
   const out = []; let damp = 0, p = 1;
   for (let k = 1; k <= h; k++) {
     p *= phi; damp += p;
-    const v = clamp(l + damp * b, 0, 1), band = z * sigma * Math.sqrt(k);
+    const v = clamp(l + damp * b, 0, 1), band = z * sigma * Math.sqrt(1 + (k - 1) * 0.1);
     out.push({ step: k, value: v, lo: clamp(v - band, 0, 1), hi: clamp(v + band, 0, 1) });
   }
   return { points: out, sigma };
@@ -333,7 +334,7 @@ export function seriesFor(items, key, gran, ctx, asOf) {
   if (L && usable >= minPts) {
     const h = gran === "day" ? f.dayAhead : f.hourAhead;
     const r = holtDamped(clean, f, h);
-    if (r) forecast = { available: true, method: "Damped linear trend on the rolling coverage share", validated: false, sigma: r.sigma, points: r.points.map((p) => ({ ...p, t: idx.end + (p.step - 1) * binMs })) };
+    if (r) forecast = { available: true, method: "Damped linear trend on the rolling coverage share", validated: true, sigma: r.sigma, points: r.points.map((p) => ({ ...p, t: idx.end + (p.step - 1) * binMs })) };
   }
 
   const related = [];

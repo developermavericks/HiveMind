@@ -241,13 +241,39 @@ async function pgUsers(el) {
   if (d.error) { el.innerHTML = banner("bad", `<b>Could not load users.</b> ${esc(d.error)}`); return; }
   const users = d.users ?? [], pending = users.filter((u) => u.status === "pending"), rest = users.filter((u) => u.status !== "pending");
   const st = (s) => `<span class="pill ${s === "active" ? "p-ok" : s === "pending" ? "p-medium" : "p-muted"}">${esc(s)}</span>`;
-  const row = (u) => `<tr><td class="b">${esc(u.name || "–")}<div class="small mute">${esc(u.email)}</div></td><td>${st(u.status)}</td><td>${esc(u.role)}</td><td class="small">${u.lastLoginAt ? esc(dt(u.lastLoginAt)) : "never"}</td><td class="r" style="white-space:nowrap">
-    ${u.status === "pending" ? `<button class="btn sm" data-a="approve" data-id="${esc(String(u.id))}">Approve</button> ` : ""}
-    ${u.status === "active" ? `<button class="btn ghost sm" data-a="${u.role === "admin" ? "member" : "admin"}" data-id="${esc(String(u.id))}">${u.role === "admin" ? "Make member" : "Make admin"}</button> <button class="btn ghost sm" data-a="reset" data-id="${esc(String(u.id))}">Reset password</button> ` : ""}
-    ${u.status === "disabled" ? `<button class="btn ghost sm" data-a="enable" data-id="${esc(String(u.id))}">Enable</button> ` : u.status !== "pending" ? `<button class="btn ghost sm" data-a="disable" data-id="${esc(String(u.id))}">Disable</button>` : `<button class="btn ghost sm" data-a="disable" data-id="${esc(String(u.id))}">Decline</button>`}</td></tr>`;
-  el.innerHTML = `<div class="sec-h"><div><h2>Users</h2><p>New accounts wait here until an administrator approves them. The first account is the administrator.</p></div></div>
-    ${pending.length ? `<section class="card" style="border-color:var(--warn);margin-bottom:16px"><h3>Waiting for approval (${pending.length})</h3><div class="tw" style="max-height:none"><table class="t"><tbody>${pending.map(row).join("")}</tbody></table></div></section>` : ""}
-    <section class="card"><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Person</th><th>Status</th><th>Role</th><th>Last sign-in</th><th></th></tr></thead><tbody>${rest.map(row).join("") || `<tr><td colspan="5" class="mute">No other users.</td></tr>`}</tbody></table></div></section>`;
+  const companies = S.status?.companies || [{ id: "bcg", name: "BCG" }];
+  const coOpts = (cur) => companies.map(c => `<option value="${esc(c.id)}"${c.id === (cur || "bcg") ? " selected" : ""}>${esc(c.name)}</option>`).join("");
+  const row = (u) => `<tr>
+    <td class="b">${esc(u.name || "–")}<div class="small mute">${esc(u.email)}</div></td>
+    <td>${st(u.status)}</td>
+    <td>${esc(u.role)}</td>
+    <td><select data-user-co="${esc(String(u.id))}" class="sel-co" style="font-size:12px;padding:3px 6px;border-radius:4px;border:1px solid var(--line2);background:var(--surface)">${coOpts(u.company)}</select></td>
+    <td class="small">${u.lastLoginAt ? esc(dt(u.lastLoginAt)) : "never"}</td>
+    <td class="r" style="white-space:nowrap">
+      ${u.status === "pending" ? `<button class="btn sm" data-a="approve" data-id="${esc(String(u.id))}">Approve</button> ` : ""}
+      ${u.status === "active" ? `<button class="btn ghost sm" data-a="${u.role === "admin" ? "member" : "admin"}" data-id="${esc(String(u.id))}">${u.role === "admin" ? "Make member" : "Make admin"}</button> <button class="btn ghost sm" data-a="reset" data-id="${esc(String(u.id))}">Reset password</button> ` : ""}
+      ${u.status === "disabled" ? `<button class="btn ghost sm" data-a="enable" data-id="${esc(String(u.id))}">Enable</button> ` : u.status !== "pending" ? `<button class="btn ghost sm" data-a="disable" data-id="${esc(String(u.id))}">Disable</button>` : `<button class="btn ghost sm" data-a="disable" data-id="${esc(String(u.id))}">Decline</button>`}
+    </td>
+  </tr>`;
+  el.innerHTML = `<div class="sec-h"><div><h2>Users & Client Scoping</h2><p>Control user accounts, permissions, and restrict each member strictly to their assigned client organisation.</p></div></div>
+    ${pending.length ? `<section class="card" style="border-color:var(--warn);margin-bottom:16px"><h3>Waiting for approval (${pending.length})</h3><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Person</th><th>Status</th><th>Role</th><th>Assign Client</th><th>Last sign-in</th><th></th></tr></thead><tbody>${pending.map(row).join("")}</tbody></table></div></section>` : ""}
+    <section class="card"><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Person</th><th>Status</th><th>Role</th><th>Assigned Client</th><th>Last sign-in</th><th>Actions</th></tr></thead><tbody>${rest.map(row).join("") || `<tr><td colspan="6" class="mute">No other users.</td></tr>`}</tbody></table></div></section>`;
+  
+  $$(".sel-co", el).forEach((sel) => {
+    sel.onchange = async () => {
+      const id = sel.dataset.userCo, company = sel.value;
+      sel.disabled = true;
+      try {
+        await post("/api/users/company", { id, company });
+        toast(`Assigned user to client ${company.toUpperCase()}`);
+      } catch (err) {
+        toast(`Error: ${err.message}`, 5000);
+      } finally {
+        sel.disabled = false;
+      }
+    };
+  });
+
   $$("[data-a]", el).forEach((b) => (b.onclick = async () => {
     const a = b.dataset.a, id = b.dataset.id;
     if (a === "disable" && !confirm("Disable this account? They will be signed out and cannot sign in.")) return;
@@ -268,10 +294,314 @@ async function pgUsers(el) {
   }));
 }
 
+// ---------------------------------------------------------------- audit trail & tracking (admins only)
+async function pgAuditLogs(el) {
+  if (!isAdmin()) { el.innerHTML = `<div class="empty"><h3>Only administrators can view audit logs</h3></div>`; return; }
+  const f = S.auditFilter || (S.auditFilter = { q: "", errors: false, offset: 0, limit: 50 });
+  const d = await api(`/api/admin/audit-logs?limit=${f.limit}&offset=${f.offset}&user=${encodeURIComponent(f.q)}&errors=${f.errors ? "1" : "0"}`).catch((e) => ({ error: e.message }));
+  if (d.error) { el.innerHTML = banner("bad", `<b>Could not load audit logs.</b> ${esc(d.error)}`); return; }
+  const logs = d.logs ?? [], total = d.total ?? 0;
+
+  const stBadge = (code, err) => {
+    if (err || code >= 400) return `<span class="pill p-bad" title="${esc(err || `HTTP ${code}`)}">${code} Error</span>`;
+    return `<span class="pill p-ok">OK (${code})</span>`;
+  };
+
+  const gpsBadge = (lat, lon, acc) => (lat != null && lon != null
+    ? `<div style="margin-top:3px"><a href="https://www.google.com/maps?q=${lat},${lon}" target="_blank" rel="noopener" class="pill p-ok" style="font-size:11px;padding:2px 6px;text-decoration:none" title="HTML5 Precise Location (accuracy ±${Math.round(acc || 0)}m)">📍 GPS: ${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}</a></div>`
+    : "");
+
+  const row = (l) => `<tr>
+    <td class="small" style="white-space:nowrap">${esc(dt(l.ts))}<div class="tiny mute">${esc(ago(l.ts))}</div></td>
+    <td><div class="b">${esc(l.name || l.email || "Anonymous")}</div><div class="tiny mute">${esc(l.email || "–")}</div></td>
+    <td><span class="pill p-muted" style="text-transform:uppercase;font-weight:600">${esc(l.company_id || "bcg")}</span></td>
+    <td><div class="b" style="color:var(--text)">${esc(l.action)}</div><div class="tiny code mute">${esc(l.method)} ${esc(l.path)} · ${l.duration_ms}ms</div>${l.error ? `<div class="tiny" style="color:var(--bad)">${esc(l.error)}</div>` : ""}</td>
+    <td>${stBadge(l.status_code, l.error)}</td>
+    <td><div class="small">${esc(l.location || "–")}</div><div class="tiny mute">${esc(l.ip)}</div>${gpsBadge(l.lat, l.lon, l.geo_accuracy)}</td>
+    <td><div class="small">${esc(l.network || "–")}</div><div class="tiny mute" title="${esc(l.ua || "")}">${esc((l.ua || "").slice(0, 30))}…</div></td>
+  </tr>`;
+
+  el.innerHTML = `<div class="sec-h"><div><h2>User Activity & Security Audit Trail</h2><p>Track which user accessed what, when, IP address, Wi-Fi / ISP network, geographic location, and whether errors occurred.</p></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="audit-q" placeholder="Filter by user, email, IP, client…" value="${esc(f.q)}" style="max-width:260px;font-size:13px;padding:6px 10px">
+      <label class="chk" style="font-size:13px"><input type="checkbox" id="audit-err" ${f.errors ? "checked" : ""}> Errors only</label>
+      <button class="btn ghost sm" id="audit-refresh">Refresh</button>
+    </div></div>
+    <section class="card"><div class="tw" style="max-height:none"><table class="t"><thead><tr>
+      <th>Timestamp</th><th>User</th><th>Client Scoping</th><th>Action & Path</th><th>Status</th><th>Location & IP</th><th>Wi-Fi / ISP Network</th>
+    </tr></thead><tbody>${logs.map(row).join("") || `<tr><td colspan="7" class="mute">No activity records found matching filter.</td></tr>`}</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px" class="mute">
+      <span>Showing ${logs.length} of ${total} records</span>
+      <div style="display:flex;gap:6px">
+        ${f.offset > 0 ? `<button class="btn ghost sm" id="audit-prev">← Previous</button>` : ""}
+        ${f.offset + f.limit < total ? `<button class="btn ghost sm" id="audit-next">Next →</button>` : ""}
+      </div>
+    </div></section>`;
+
+  const qIn = el.querySelector("#audit-q");
+  qIn?.addEventListener("keydown", (e) => { if (e.key === "Enter") { f.q = qIn.value.trim(); f.offset = 0; pgAuditLogs(el); } });
+  el.querySelector("#audit-err")?.addEventListener("change", (e) => { f.errors = e.target.checked; f.offset = 0; pgAuditLogs(el); });
+  el.querySelector("#audit-refresh")?.addEventListener("click", () => { f.q = qIn.value.trim(); pgAuditLogs(el); });
+  el.querySelector("#audit-prev")?.addEventListener("click", () => { f.offset = Math.max(0, f.offset - f.limit); pgAuditLogs(el); });
+  el.querySelector("#audit-next")?.addEventListener("click", () => { f.offset += f.limit; pgAuditLogs(el); });
+}
+
 // Small status chip linking to the data-quality tab (used in the Overview's Data confidence panel).
 function qualityChip(q) {
   if (!q || !q.status) return "";
   const cls = { green: "p-ok", amber: "p-medium", red: "p-bad" }[q.status] ?? "p-muted", word = { green: "healthy", amber: "needs attention", red: "below threshold" }[q.status] ?? q.status;
   const flags = (q.flags ?? []).join(" · ");
   return `<a class="pill ${cls} dot" href="#/accuracy/quality" title="${esc(flags || "Open the data-quality checks")}" style="margin-left:6px;font-weight:600;text-decoration:none">Data quality: ${esc(word)}</a>`;
+}
+
+// ---------------------------------------------------------------- Issue Reporting & Support Tickets (For All Users)
+async function pgSupport(el) {
+  el.innerHTML = loading();
+  const d = await api("/api/tickets").catch((e) => ({ error: e.message }));
+  const tickets = d.tickets ?? [];
+
+  const kindBadge = (k) => {
+    const map = { bug: ["p-bad", "Bug Report"], feature: ["p-pos", "Feature Request"], data_issue: ["p-medium", "Data Question"], other: ["p-muted", "Support"] };
+    const [cls, txt] = map[k] || ["p-muted", k];
+    return `<span class="pill ${cls}">${esc(txt)}</span>`;
+  };
+
+  const statusBadge = (s) => {
+    const map = { open: ["p-medium", "Open"], in_progress: ["p-pos", "In Progress"], resolved: ["p-ok", "Resolved"], closed: ["p-muted", "Closed"] };
+    const [cls, txt] = map[s] || ["p-muted", s];
+    return `<span class="pill ${cls} dot">${esc(txt)}</span>`;
+  };
+
+  const ticketRows = tickets.map((t) => `<tr>
+    <td class="small" style="white-space:nowrap">${esc(dt(t.created_at))}<div class="tiny mute">${esc(ago(t.created_at))}</div></td>
+    <td>${kindBadge(t.kind)}</td>
+    <td>
+      <div class="b" style="color:var(--text)">${esc(t.subject)}</div>
+      <div class="small mute" style="margin-top:4px;white-space:pre-wrap">${esc(t.description)}</div>
+      ${t.admin_notes ? `<div style="margin-top:6px;padding:6px 10px;background:var(--ok-bg);border-left:3px solid var(--ok);border-radius:4px" class="tiny"><b>Admin response:</b> ${esc(t.admin_notes)}</div>` : ""}
+    </td>
+    <td>${statusBadge(t.status)}</td>
+  </tr>`).join("");
+
+  el.innerHTML = `
+    <div class="sec-h">
+      <div>
+        <h2>Help, Support & Feedback</h2>
+        <p>Found a problem or need a new capability? Submit a ticket below. The administrator will be notified instantly via email.</p>
+      </div>
+    </div>
+
+    <div class="grid g2" style="gap:20px;margin-bottom:24px">
+      <section class="card" style="padding:22px">
+        <h3 style="margin:0 0 6px">Raise a Ticket / Request</h3>
+        <p class="small mute" style="margin:0 0 16px">Describe the issue or feature request. We track and respond to every ticket.</p>
+
+        <form id="ticket-form" style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label class="small b" style="display:block;margin-bottom:4px">Category</label>
+            <select id="tk-kind" class="f" style="width:100%">
+              <option value="bug">Bug Report (Something is broken or showing an error)</option>
+              <option value="feature">Feature Request (I would like a new tool or capability)</option>
+              <option value="data_issue">Data or Forecast Question (Query regarding accuracy or coverage)</option>
+              <option value="other">General Feedback / Support</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="small b" style="display:block;margin-bottom:4px">Subject</label>
+            <input type="text" id="tk-subject" class="f" placeholder="Brief summary of the issue or feature" maxlength="200" required style="width:100%">
+          </div>
+
+          <div>
+            <label class="small b" style="display:block;margin-bottom:4px">Details</label>
+            <textarea id="tk-desc" class="f" rows="5" placeholder="Explain what happened, steps to reproduce, or details of the feature you need…" maxlength="5000" required style="width:100%;font-family:inherit"></textarea>
+          </div>
+
+          <div style="display:flex;justify-content:flex-end">
+            <button type="submit" class="btn" id="tk-submit" style="min-width:140px">Submit Ticket</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card" style="padding:22px">
+        <h3 style="margin:0 0 6px">Direct Support & Administrator Info</h3>
+        <p class="small mute" style="margin:0 0 16px">Need urgent assistance or have architectural questions?</p>
+        <div style="display:flex;flex-direction:column;gap:12px;font-size:14px">
+          <div style="padding:12px;border:1px solid var(--line);border-radius:8px">
+            <div class="b">Admin Contact</div>
+            <div class="mute small" style="margin-top:2px">developerteam@themavericksindia.com</div>
+          </div>
+          <div style="padding:12px;border:1px solid var(--line);border-radius:8px">
+            <div class="b">Client Scoping Active</div>
+            <div class="mute small" style="margin-top:2px">Your session is isolated to <b>${esc((S.me?.company || "BCG").toUpperCase())}</b> practice areas and data lenses.</div>
+          </div>
+          <div style="padding:12px;border:1px solid var(--line);border-radius:8px">
+            <div class="b">Notification Delivery</div>
+            <div class="mute small" style="margin-top:2px">When you click Submit, an automated email dispatch is routed immediately to the administration team.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="sec-h" style="padding:14px 18px 8px">
+        <h3 style="margin:0">Your Submitted Tickets (${tickets.length})</h3>
+      </div>
+      <div class="tw" style="max-height:none">
+        <table class="t">
+          <thead>
+            <tr><th style="width:130px">Created</th><th style="width:130px">Type</th><th>Subject & Details</th><th style="width:120px">Status</th></tr>
+          </thead>
+          <tbody id="tk-tbody">
+            ${ticketRows || `<tr><td colspan="4" class="mute" style="text-align:center;padding:24px">You haven't submitted any tickets yet.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  const tf = el.querySelector("#ticket-form");
+  tf?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = el.querySelector("#tk-submit");
+    const kind = el.querySelector("#tk-kind").value;
+    const subject = el.querySelector("#tk-subject").value.trim();
+    const description = el.querySelector("#tk-desc").value.trim();
+    if (!subject || !description) return;
+
+    btn.disabled = true;
+    btn.textContent = "Submitting…";
+    try {
+      const res = await post("/api/tickets", {
+        kind,
+        subject,
+        description,
+        pageUrl: window.location.href
+      });
+      if (res.ok) {
+        toast("Ticket submitted successfully! Admin has been notified.");
+        pgSupport(el);
+      } else {
+        toast(res.error || "Could not submit ticket.");
+      }
+    } catch (err) {
+      toast("Error sending ticket: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Submit Ticket";
+    }
+  });
+}
+
+// ---------------------------------------------------------------- Admin Ticket Management
+async function pgAdminTickets(el) {
+  if (!isAdmin()) { el.innerHTML = `<div class="empty"><h3>Only administrators can manage support tickets</h3></div>`; return; }
+  el.innerHTML = loading();
+  const d = await api("/api/tickets").catch((e) => ({ error: e.message }));
+  if (d.error) { el.innerHTML = banner("bad", `<b>Could not load tickets.</b> ${esc(d.error)}`); return; }
+  const tickets = d.tickets ?? [];
+
+  const kindBadge = (k) => {
+    const map = { bug: ["p-bad", "Bug Report"], feature: ["p-pos", "Feature Request"], data_issue: ["p-medium", "Data Question"], other: ["p-muted", "Support"] };
+    const [cls, txt] = map[k] || ["p-muted", k];
+    return `<span class="pill ${cls}">${esc(txt)}</span>`;
+  };
+
+  const statusBadge = (s) => {
+    const map = { open: ["p-medium", "Open"], in_progress: ["p-pos", "In Progress"], resolved: ["p-ok", "Resolved"], closed: ["p-muted", "Closed"] };
+    const [cls, txt] = map[s] || ["p-muted", s];
+    return `<span class="pill ${cls} dot">${esc(txt)}</span>`;
+  };
+
+  const ticketRow = (t) => `
+    <tr data-tid="${esc(t.id)}">
+      <td class="small" style="white-space:nowrap">${esc(dt(t.created_at))}<div class="tiny mute">${esc(ago(t.created_at))}</div></td>
+      <td>
+        <div class="b">${esc(t.name || t.email)}</div>
+        <div class="tiny mute">${esc(t.email)}</div>
+        <div style="margin-top:2px"><span class="pill p-muted" style="text-transform:uppercase;font-size:10px">${esc(t.company_id || "bcg")}</span></div>
+      </td>
+      <td>${kindBadge(t.kind)}</td>
+      <td>
+        <div class="b" style="color:var(--text)">${esc(t.subject)}</div>
+        <div class="small mute" style="margin-top:4px;white-space:pre-wrap">${esc(t.description)}</div>
+        ${t.page_url ? `<div class="tiny" style="margin-top:4px"><a href="${esc(t.page_url)}" class="mute" target="_blank">View reported page</a></div>` : ""}
+      </td>
+      <td>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div>${statusBadge(t.status)}</div>
+          <select class="f sm tk-status-sel" style="font-size:12px;padding:2px 6px">
+            <option value="open"${t.status === "open" ? " selected" : ""}>Open</option>
+            <option value="in_progress"${t.status === "in_progress" ? " selected" : ""}>In Progress</option>
+            <option value="resolved"${t.status === "resolved" ? " selected" : ""}>Resolved</option>
+            <option value="closed"${t.status === "closed" ? " selected" : ""}>Closed</option>
+          </select>
+        </div>
+      </td>
+      <td>
+        <textarea class="f sm tk-notes" rows="2" placeholder="Resolution notes…" style="width:100%;font-size:12px;resize:vertical">${esc(t.admin_notes || "")}</textarea>
+        <button class="btn sm ghost tk-save" style="margin-top:4px;width:100%">Update</button>
+      </td>
+    </tr>
+  `;
+
+  el.innerHTML = `
+    <div class="sec-h">
+      <div>
+        <h2>User Issues & Support Tickets</h2>
+        <p>Review and resolve issue tickets, bug reports, and feature requests submitted by client users.</p>
+      </div>
+      <div>
+        <button class="btn ghost sm" id="tickets-refresh">Refresh</button>
+      </div>
+    </div>
+
+    <section class="card">
+      <div class="sec-h" style="padding:14px 18px 8px">
+        <h3 style="margin:0">All Tickets (${tickets.length})</h3>
+      </div>
+      <div class="tw" style="max-height:none">
+        <table class="t">
+          <thead>
+            <tr><th style="width:120px">Date</th><th style="width:160px">User / Client</th><th style="width:120px">Type</th><th>Subject & Details</th><th style="width:130px">Status</th><th style="width:200px">Admin Response</th></tr>
+          </thead>
+          <tbody>
+            ${tickets.map(ticketRow).join("") || `<tr><td colspan="6" class="mute" style="text-align:center;padding:24px">No support tickets found.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  el.querySelector("#tickets-refresh")?.addEventListener("click", () => pgAdminTickets(el));
+
+  el.querySelectorAll("tr[data-tid]").forEach((row) => {
+    const id = row.dataset.tid;
+    const saveBtn = row.querySelector(".tk-save");
+    const statusSel = row.querySelector(".tk-status-sel");
+    const notesIn = row.querySelector(".tk-notes");
+
+    saveBtn?.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving…";
+      try {
+        const res = await post("/api/tickets/update", {
+          id,
+          status: statusSel.value,
+          notes: notesIn.value.trim()
+        });
+        if (res.ok) {
+          toast("Ticket updated successfully.");
+          pgAdminTickets(el);
+        } else {
+          toast(res.error || "Update failed.");
+        }
+      } catch (err) {
+        toast("Error updating ticket: " + err.message);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Update";
+      }
+    });
+  });
 }

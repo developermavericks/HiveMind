@@ -26,17 +26,26 @@
     <form id="form" novalidate autocomplete="on">
       <label class="field" id="f-name" hidden>
         <span>Full name</span>
-        <input id="name" name="name" type="text" autocomplete="name" maxlength="80" placeholder="Your name">
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="80" placeholder="Your full name">
       </label>
-      <label class="field">
+      <label class="field" id="f-email">
         <span>Email</span>
         <input id="email" name="email" type="email" autocomplete="username" inputmode="email" maxlength="254" placeholder="you@company.com" required>
       </label>
-      <label class="field">
-        <span>Password</span>
+      <div class="field" id="f-password">
+        <div class="field-header">
+          <span>Password</span>
+          <button type="button" class="text-link" id="btn-forgot">Forgot?</button>
+        </div>
         <div class="pw">
           <input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" placeholder="Your password" required>
           <button type="button" class="eye" id="eye" aria-label="Show password" aria-pressed="false">Show</button>
+        </div>
+      </div>
+      <label class="field" id="f-confirm" hidden>
+        <span>Confirm new password</span>
+        <div class="pw">
+          <input id="confirm-password" name="confirm-password" type="password" autocomplete="new-password" maxlength="200" placeholder="Repeat new password">
         </div>
       </label>
       <div class="meter" id="meter" hidden aria-live="polite">
@@ -45,6 +54,9 @@
       </div>
       <p class="msg" id="msg" role="alert" aria-live="assertive" hidden></p>
       <button type="submit" class="primary" id="submit">Sign in</button>
+      <div id="alt-action" style="text-align:center;margin-top:14px" hidden>
+        <button type="button" class="text-link" id="btn-back-signin" style="font-size:14px">← Back to Sign in</button>
+      </div>
     </form>
     <p class="foot" id="foot">Access is by invitation. New accounts are approved by an administrator.</p>
   </section>

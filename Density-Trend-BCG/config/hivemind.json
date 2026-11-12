@@ -23,7 +23,8 @@
     "minTotalPerHour": 5,
     "outageFractionHour": 0.05,
     "outageFractionDay": 0.25,
-    "observedLagHours": 6
+    "observedLagHours": 6,
+    "maxCatchupHours": 48
   },
   "evidence": {
     "minClusters": 3,
@@ -60,10 +61,10 @@
     "dayAhead": 5,
     "minHourPoints": 24,
     "minDayPoints": 5,
-    "alpha": 0.5,
-    "beta": 0.3,
-    "phi": 0.9,
-    "z": 1.28
+    "alpha": 0.35,
+    "beta": 0.08,
+    "phi": 0.75,
+    "z": 1.5
   },
   "success": {
     "shareMultiple": 2,

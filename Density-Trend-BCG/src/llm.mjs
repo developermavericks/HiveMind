@@ -625,11 +625,13 @@ export function extractJson(text) {
 // string), so it is used; if it is not usable JSON, or is for another tool, this returns null and the caller asks again.
 export function salvageToolCall(body, toolName) {
   try {
-    const g = JSON.parse(body)?.error?.failed_generation;
+    const err = JSON.parse(body)?.error;
+    const g = err?.failed_generation ?? err?.message;
     if (typeof g !== "string") return null;
     const call = extractJson(g);
-    if (!call || typeof call !== "object" || (call.name && call.name !== toolName)) return null;
-    const args = call.arguments ?? call.parameters ?? null;
+    if (!call || typeof call !== "object") return null;
+    if (call.name && call.name !== toolName) return null;
+    const args = call.arguments ?? call.parameters ?? (call.name ? null : call);
     const out = typeof args === "string" ? extractJson(args) : args;
     return out && typeof out === "object" && !Array.isArray(out) ? out : null;
   } catch { return null; }
@@ -940,7 +942,7 @@ export class Reader {
         const text = await res.text();
         // "Failed to parse tool call arguments as JSON" (tool_use_failed): use the model's own attempt when it is valid JSON, else ask again (the
         // generation is random, so the next one usually parses). Only then is it an error.
-        if (res.status === 400 && /tool_use_failed/.test(text)) {
+        if (res.status === 400 && (/tool_use_failed/.test(text) || /failed_generation/.test(text) || /Parsing failed/i.test(text))) {
           const salvaged = salvageToolCall(text, tool.name);
           if (salvaged) return salvaged;
           if (toolFails++ < 2) continue;

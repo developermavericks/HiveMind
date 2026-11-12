@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      width: 320px;
+      margin: 0;
+      padding: 16px;
+      background-color: #0f172a;
+      color: #f8fafc;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 10px;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      color: #38bdf8;
+    }
+    .form-group {
+      margin-bottom: 14px;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      margin-bottom: 6px;
+    }
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      background-color: #1e293b;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      border-radius: 6px;
+      outline: none;
+      font-size: 13px;
+    }
+    select:focus {
+      border-color: #38bdf8;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background-color: #0284c7;
+      border: none;
+      color: #ffffff;
+      font-weight: 600;
+      font-size: 13px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #0369a1;
+    }
+    button:disabled {
+      background-color: #334155;
+      color: #94a3b8;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      display: none;
+      line-height: 1.4;
+    }
+    .status.info {
+      display: block;
+      background-color: #1e293b;
+      color: #e2e8f0;
+      border-left: 3px solid #38bdf8;
+    }
+    .status.success {
+      display: block;
+      background-color: #064e3b;
+      color: #a7f3d0;
+      border-left: 3px solid #10b981;
+    }
+    .status.error {
+      display: block;
+      background-color: #7f1d1d;
+      color: #fca5a5;
+      border-left: 3px solid #ef4444;
+    }
+    .loader {
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid #38bdf8;
+      border-radius: 50%;
+      width: 12px;
+      height: 12px;
+      animation: spin 1s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">Anexar Web Clipper</div>
+  </div>
+
+  <div class="form-group">
+    <label for="env">Target Environment</label>
+    <select id="env">
+      <option value="hivemind" selected>HiveMind Ingest (localhost:8788)</option>
+      <option value="local">Local Development (localhost:3100)</option>
+      <option value="prod">Production App (anexar-9820c.web.app)</option>
+    </select>
+  </div>
+
+  <button id="clip-btn">
+    <span>Generate Premium PDF</span>
+  </button>
+
+  <div id="status-box" class="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

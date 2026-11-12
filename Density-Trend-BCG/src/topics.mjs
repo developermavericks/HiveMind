@@ -8,7 +8,7 @@ const STOP = new Set("and the of for in on to with a an or by at from as is are 
 const tokens = (s) => new Set(norm(s).split(" ").filter((w) => w.length > 2 && !STOP.has(w)).map((w) => w.replace(/(ies|s)$/, (m) => (m === "ies" ? "y" : ""))));
 const jaccard = (a, b) => { let i = 0; for (const t of a) if (b.has(t)) i++; return i / (a.size + b.size - i || 1); };
 const slug = (s) => norm(s).replace(/ /g, "-").slice(0, 50) || "topic";
-export const TOPIC_MERGE = 0.6;
+export const TOPIC_MERGE = 0.5;
 // Vague filler labels ("personal stories") name no recurring subject, so they never rank. They stay in the database.
 export const isWeakLabel = (name, cfg) => {
   const n = norm(name ?? "");

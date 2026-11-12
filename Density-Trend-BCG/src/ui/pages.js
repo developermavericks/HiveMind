@@ -38,7 +38,7 @@ async function pgMomentum(el) {
   const main = ser.series[S.sel], cmps = [...S.compare].map((k) => ({ name: ser.series[k]?.name ?? k, s: ser.series[k] })).filter((c) => c.s);
   const draw = () => {
     momentum($("#mchart"), main, { compare: cmps, show: S.show });
-    $("#mleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>coverage volume (stories)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>${main.rollingWindow}${S.gran === "day" ? "-day" : "h"} rolling average</span>${cmps.map((c, i) => `<span><i class="ln" style="background:${HC.PAL[i % 4]}"></i>${esc(c.name)} (share)</span>`).join("")}<span><i class="dash"></i>forecast (unvalidated)</span><span>◆ verified trigger</span>`;
+    $("#mleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>coverage volume (stories)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>${main.rollingWindow}${S.gran === "day" ? "-day" : "h"} rolling average</span>${cmps.map((c, i) => `<span><i class="ln" style="background:${HC.PAL[i % 4]}"></i>${esc(c.name)} (share)</span>`).join("")}<span><i class="dash"></i>forecast ${main.forecast?.validated ? "(validated)" : "(unvalidated)"}</span><span>◆ verified trigger</span>`;
   };
   $("#mtog").innerHTML = [["bars", "Volume bars"], ["share", "Coverage share"], ["avg", "Rolling average"], ["forecast", "Forecast"]].map(([k, l]) => `<label class="chk"><input type="checkbox" data-sh="${k}" ${S.show[k] ? "checked" : ""}> ${l}</label>`).join("") + (main.forecast.available ? "" : `<span class="small mute">Forecast unavailable: ${esc(main.forecast.reason)}</span>`);
   $$("[data-sh]").forEach((c) => (c.onchange = () => { S.show[c.dataset.sh] = c.checked; draw(); }));
@@ -60,29 +60,26 @@ async function pgMomentum(el) {
     const f = $("#sifetch2"); if (f) f.onclick = async () => { f.disabled = true; try { await post("/api/search-interest", { topic: cur.name }); render(); } catch (e) { toast(e.message); f.disabled = false; } };
   }
 
-  // X (Twitter) social pulse
+  // X (Twitter) trending status
   const msoc = $("#msoc");
   if (msoc) {
-    msoc.innerHTML = `<h3>X (Twitter) Social Pulse${info("social")} <span class="pill p-muted">social signal</span></h3><p class="hint">Hourly post volume (official X API v2). Kept separate from news coverage.</p><div id="msocbody"><div class="skel" style="height:100px"></div></div>`;
+    msoc.innerHTML = `<div class="sec-h" style="margin:0 0 8px"><div style="display:flex;align-items:center;gap:8px"><span style="background:#1d9bf0;color:#fff;width:24px;height:24px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px">𝕏</span><h3 style="margin:0">Twitter / X Trending Status</h3></div><div id="msoctoggle"></div></div><div id="msocbody"><div class="skel" style="height:70px"></div></div>`;
     try {
-      const sr = await api(`/api/social?key=${encodeURIComponent(cur.key)}&name=${encodeURIComponent(cur.name)}`);
-      if (sr.available && sr.points?.length) {
-        $("#msocbody").innerHTML = `<div class="chart" id="msocchart"></div><div class="tiny mute" style="margin-top:6px">24h volume: <b>${n0(sr.stats?.recent24h ?? 0)}</b> · momentum: <b>${x2(sr.stats?.ratio)}</b> · peak: <b>${n0(sr.stats?.peakHour ?? 0)}/hr</b></div><button class="btn ghost sm" id="msoctoggle" style="margin-top:8px">↻ Refresh X data</button>`;
-        HC.socialChart($("#msocchart"), sr.points, { baseline: sr.stats?.baselineDaily });
-        $("#msoctoggle").onclick = async () => {
-          $("#msoctoggle").disabled = true;
-          try { await post("/api/social/fetch", { name: cur.name, level: S.level }); toast("Refreshed X data"); render(); } catch (e) { toast(e.message); }
-        };
+      const xt = await api("/api/xtrends").catch(() => null);
+      const trends = xt?.trends || [];
+      const topName = (cur.name || "").toLowerCase();
+      const topClean = topName.replace(/[^a-z0-9]/g, "");
+      const match = trends.find((t) => {
+        const raw = (t.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        return raw && topClean.length >= 4 && (raw.includes(topClean) || topClean.includes(raw));
+      });
+      if (match) {
+        $("#msocbody").innerHTML = `<div style="background:rgba(29,155,240,0.06);border:1px solid rgba(29,155,240,0.3);border-radius:8px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between"><div><span class="pill" style="background:#1d9bf0;color:#fff;font-weight:700">● Trending on 𝕏 (Rank #${match.rank})</span> <span class="tag" style="font-weight:700;margin-left:6px">${esc(match.name)}</span> ${match.count ? `<span class="small mute">(${esc(match.count)} tweets)</span>` : ""}</div><span class="tag">Top 70 Live Mirror</span></div>`;
       } else {
-        $("#msocbody").innerHTML = `<div class="empty" style="padding:14px"><b>${sr.active ? "No social data fetched yet" : "X API inactive"}</b><div class="small mute" style="margin-top:4px">${esc(sr.reason)}</div></div>${sr.active ? `<button class="btn sm" id="msoctoggle" style="margin-top:8px">Fetch X tweet volume</button>` : `<a class="btn ghost sm" href="#/settings" style="margin-top:8px">Configure in Settings →</a>`}`;
-        const f = $("#msoctoggle");
-        if (f) f.onclick = async () => {
-          f.disabled = true; f.textContent = "Fetching…";
-          try { await post("/api/social/fetch", { name: cur.name, level: S.level }); toast("Fetched X data"); render(); } catch (e) { toast(e.message); f.disabled = false; f.textContent = "Fetch X tweet volume"; }
-        };
+        $("#msocbody").innerHTML = `<div style="background:var(--surface2);border:1px dashed var(--line);border-radius:8px;padding:12px 14px"><span class="pill p-muted">○ Not Trending on 𝕏</span> <span class="small mute" style="margin-left:8px">This topic is not currently in India's Top 70 Twitter trends. Driven by news publication coverage.</span></div>`;
       }
-    } catch (e) {
-      $("#msocbody").innerHTML = `<div class="small mute">Could not load social pulse: ${esc(e.message)}</div>`;
+    } catch {
+      $("#msocbody").innerHTML = `<div class="small mute">Could not load Twitter trends.</div>`;
     }
   }
 }
@@ -911,4 +908,180 @@ async function pgSettings(el) {
       }
     };
   });
+}
+
+// ---------------------------------------------------------------- Twitter (X) Trends tab
+async function pgXTrends(el) {
+  el.innerHTML = `<div class="card flush"><div class="skel" style="height:260px;margin:16px"></div></div>`;
+  try {
+    const data = await api(`/api/xtrends?company=${encodeURIComponent(S.company)}&region=all`);
+    const allTrends = data.trends || [];
+    const asOf = data.asOf || Date.now();
+    const indCount = data.counts?.india ?? allTrends.filter((t) => t.region === "india").length;
+    const worldCount = data.counts?.worldwide ?? allTrends.filter((t) => t.region === "worldwide").length;
+    const totalCount = allTrends.length;
+
+    let regionFilter = "all"; // 'all', 'india', 'worldwide'
+    let filterMode = "all"; // 'all', 'matched', 'hashtags', 'keywords'
+    let searchQuery = "";
+
+    const renderView = () => {
+      let filtered = allTrends;
+      if (regionFilter === "india") filtered = filtered.filter((t) => t.region === "india");
+      else if (regionFilter === "worldwide") filtered = filtered.filter((t) => t.region === "worldwide");
+
+      const matchedInRegion = filtered.filter((t) => t.match).length;
+
+      if (filterMode === "matched") filtered = filtered.filter((t) => t.match);
+      else if (filterMode === "hashtags") filtered = filtered.filter((t) => t.name.startsWith("#"));
+      else if (filterMode === "keywords") filtered = filtered.filter((t) => !t.name.startsWith("#"));
+
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        filtered = filtered.filter((t) =>
+          t.name.toLowerCase().includes(q) ||
+          t.clean.toLowerCase().includes(q) ||
+          (t.match && `${t.match.sector} ${t.match.topic} ${t.match.angle}`.toLowerCase().includes(q))
+        );
+      }
+
+      const nextH = Math.max(0.1, (data.nextScheduledIn || 0) / 3600000).toFixed(1);
+
+      el.innerHTML = `
+        <div class="kpis" style="margin-bottom:16px">
+          <div class="kpi"><div class="v num">${indCount}</div><div class="l">🇮🇳 India Stream</div><div class="s">Top national trends</div></div>
+          <div class="kpi"><div class="v num">${worldCount}</div><div class="l">🌐 Worldwide Stream</div><div class="s">Global viral trends</div></div>
+          <div class="kpi ${matchedInRegion ? 'accent' : ''}"><div class="v num">${matchedInRegion}</div><div class="l">Editorial Matches</div><div class="s">Matching ${esc(S.company.toUpperCase())} Opportunities</div></div>
+          <div class="kpi"><div class="v num" style="font-size:16px">Every 8h</div><div class="l">Automated Schedule</div><div class="s">Polled ${ago(asOf)} · Next ~${nextH}h</div></div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px">
+          <div class="ctl" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px">
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="xtq" placeholder="Search trends, hashtags, sectors…" value="${esc(searchQuery)}" style="min-width:240px">
+              <div class="seg" id="xtregion" title="Filter by Geographic Stream">
+                <button data-r="all" class="${regionFilter === 'all' ? 'on' : ''}">All Streams (${totalCount})</button>
+                <button data-r="india" class="${regionFilter === 'india' ? 'on' : ''}">🇮🇳 India (${indCount})</button>
+                <button data-r="worldwide" class="${regionFilter === 'worldwide' ? 'on' : ''}">🌐 Worldwide (${worldCount})</button>
+              </div>
+              <div class="seg" id="xtfilter">
+                <button data-f="all" class="${filterMode === 'all' ? 'on' : ''}">All Types</button>
+                <button data-f="matched" class="${filterMode === 'matched' ? 'on' : ''}">Matched (${matchedInRegion})</button>
+                <button data-f="hashtags" class="${filterMode === 'hashtags' ? 'on' : ''}">Hashtags</button>
+                <button data-f="keywords" class="${filterMode === 'keywords' ? 'on' : ''}">Keywords</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center">
+              <span class="mute small" id="xtcount">${filtered.length} shown</span>
+              <button class="btn sm" id="xtreload">↻ Poll Fresh Trends Now</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card flush">
+          <div class="tw" style="max-height:none">
+            <table class="t" id="xttable">
+              <thead>
+                <tr>
+                  <th style="width:65px">Rank</th>
+                  <th style="width:115px">Region</th>
+                  <th>Trending Topic / Hashtag</th>
+                  <th style="width:130px">Tweet Volume</th>
+                  <th>Editorial Opportunity Alignment</th>
+                  <th style="width:115px;text-align:right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filtered.length ? filtered.map((t) => {
+                  const medal = t.rank === 1 ? '🥇 ' : t.rank === 2 ? '🥈 ' : t.rank === 3 ? '🥉 ' : '';
+                  const rankBadge = t.rank <= 3
+                    ? `<b style="color:var(--brand);font-size:14px">${medal}#${t.rank}</b>`
+                    : `<span class="mute num">#${t.rank}</span>`;
+                  const isWorld = t.region === "worldwide";
+                  const regChip = isWorld
+                    ? `<span class="tag" style="background:rgba(29,155,240,0.12);color:#1d9bf0;font-size:11px;font-weight:700">🌐 World</span>`
+                    : `<span class="tag" style="background:rgba(255,153,0,0.12);color:#e67e22;font-size:11px;font-weight:700">🇮🇳 India</span>`;
+                  return `
+                    <tr>
+                      <td>${rankBadge}</td>
+                      <td>${regChip}</td>
+                      <td>
+                        <div style="display:flex;align-items:center;gap:6px">
+                          <b style="font-size:14px">${esc(t.name)}</b>
+                          ${t.name.startsWith("#") ? `<span class="tag" style="font-size:10px">hashtag</span>` : ""}
+                        </div>
+                      </td>
+                      <td>
+                        <span class="num">${t.count ? esc(t.count) : "–"}</span>
+                      </td>
+                      <td>
+                        ${t.match ? `
+                          <div class="chip go" data-opp="${esc(t.match.oppKey)}" title="Click to view Opportunity in drawer" style="cursor:pointer;background:rgba(29,155,240,0.08);border:1px solid rgba(29,155,240,0.3);color:var(--text);display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px">
+                            <span style="background:#1d9bf0;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700">𝕏 Matched</span>
+                            <b>${esc(t.match.sector)}</b> <span class="mute">×</span> ${esc(t.match.topic)}
+                            <span class="tag" style="background:#1d9bf0;color:#fff;font-size:10px;font-weight:700">Score ${t.match.score}</span>
+                          </div>` : `
+                          <span class="mute small">No direct editorial pairing</span>`}
+                      </td>
+                      <td style="text-align:right">
+                        <a href="https://twitter.com/search?q=${encodeURIComponent(t.name)}" target="_blank" rel="noopener" class="btn ghost sm" style="font-size:11px;padding:3px 8px" title="Open on Twitter/X">View on 𝕏 ↗</a>
+                      </td>
+                    </tr>`;
+                }).join("") : `
+                  <tr><td colspan="6" class="mute" style="text-align:center;padding:28px">No trending topics match this filter.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p class="small mute" style="margin-top:12px">
+          Live stream from India & Worldwide Twitter Trends (hourly public mirror feed). Automated background poll runs <b>every 8 hours</b> during collection. Zero scraping, zero API cost.
+        </p>
+      `;
+
+      const qInput = $("#xtq", el);
+      if (qInput) {
+        qInput.oninput = (e) => {
+          searchQuery = e.target.value;
+          renderView();
+        };
+      }
+
+      $$("#xtregion button", el).forEach((b) => {
+        b.onclick = () => {
+          regionFilter = b.dataset.r;
+          renderView();
+        };
+      });
+
+      $$("#xtfilter button", el).forEach((b) => {
+        b.onclick = () => {
+          filterMode = b.dataset.f;
+          renderView();
+        };
+      });
+
+      const reloadBtn = $("#xtreload", el);
+      if (reloadBtn) {
+        reloadBtn.onclick = async () => {
+          reloadBtn.disabled = true; reloadBtn.textContent = "Polling live trends…";
+          try {
+            await post("/api/xtrends/refresh", {});
+            toast("Polled fresh Twitter trends (India & Worldwide)!");
+            pgXTrends(el);
+          } catch (e) {
+            toast("Refresh failed: " + e.message);
+            reloadBtn.disabled = false; reloadBtn.textContent = "↻ Poll Fresh Trends Now";
+          }
+        };
+      }
+
+      $$("[data-opp]", el).forEach((chip) => {
+        chip.onclick = () => openOpp(chip.dataset.opp);
+      });
+    };
+
+    renderView();
+  } catch (err) {
+    el.innerHTML = `<div class="card"><div class="banner bad">Could not load Twitter trends: ${esc(err.message)}</div><button class="btn sm" onclick="location.reload()" style="margin-top:8px">Retry</button></div>`;
+  }
 }

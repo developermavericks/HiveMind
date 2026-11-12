@@ -41,15 +41,26 @@ export function parseGoogleNews(xml, publication) {
 
 // Google throttles with 429/503 when polled heavily; back off and retry a few times rather than failing the whole run.
 // Requests are direct. With `proxy` set (only ever for an article-text retry, see fetchArticleBody) the same request goes through that proxy.
-async function getText(url, { timeout = 15000, retries = 3, proxy = null, proxyFetch = fetchViaProxy, ...init } = {}) {
+async function getText(url, { timeout = 8000, retries = 1, proxy = null, proxyFetch = fetchViaProxy, ...init } = {}) {
   for (let attempt = 0; ; attempt++) {
     const headers = { "user-agent": UA, "accept-language": "en-IN,en;q=0.9", ...init.headers };
-    const res = proxy
-      ? await proxyFetch(url, { proxyUrl: proxy, method: init.method, body: init.body, headers, timeout })
-      : await fetch(url, { ...init, headers, signal: AbortSignal.timeout(timeout), redirect: "follow" });
-    if (res.ok) return res.text();
-    if ((res.status === 429 || res.status === 503) && attempt < retries) { await new Promise((r) => setTimeout(r, 3000 * 3 ** attempt)); continue; }
-    throw new Error(`HTTP ${res.status}`);
+    try {
+      const res = proxy
+        ? await proxyFetch(url, { proxyUrl: proxy, method: init.method, body: init.body, headers, timeout })
+        : await fetch(url, { ...init, headers, signal: AbortSignal.timeout(timeout), redirect: "follow" });
+      if (res.ok) return await res.text();
+      if ((res.status === 429 || res.status === 503) && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      if (attempt < retries && (e.name === "TimeoutError" || e.name === "AbortError")) {
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      throw e;
+    }
   }
 }
 
@@ -82,16 +93,15 @@ async function fetchDay(pub, date) {
 export async function fetchPublication(pub, { hours = 24, perPub = Infinity, date = null } = {}) {
   if (date) return fetchDay(pub, date);
   const byUrl = new Map();
-  const add = (items) => items.forEach((i) => byUrl.set(i.url, i));
-  const first = await queryRss(pub, `when:${hours}h`);
+  const add = (items) => (items || []).forEach((i) => byUrl.set(i.url, i));
+  const first = await queryRss(pub, `when:${hours}h`).catch(() => []);
   add(first);
-  if (first.length >= RSS_CAP) {
-    const today = new Date().toISOString().slice(0, 10);
-    const windows = [`after:${today}`, ...[12, 6, 3, 1].filter((h) => h < hours).map((h) => `when:${h}h`)];
-    for (const w of windows) {
-      try { add(await queryRss(pub, w)); } catch { /* a failed extra window only loses extra coverage */ }
-      await new Promise((r) => setTimeout(r, 400));
-    }
+  if (first.length >= RSS_CAP && hours > 6) {
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      const extra = await queryRss(pub, `when:6h`).catch(() => []);
+      add(extra);
+    } catch { /* graceful fallback */ }
   }
   const cutoff = Date.now() - hours * 3600e3;
   const all = [...byUrl.values()].filter((i) => i.publishedAt >= cutoff).sort((a, b) => b.publishedAt - a.publishedAt);
@@ -117,15 +127,60 @@ export async function resolveGoogleUrl(link, net = {}) {
   return resp[1];
 }
 
-export function extractArticleText(html, maxChars = 6000) {
-  const clean = html.replace(/<(script|style|noscript|svg|nav|header|footer|aside|form)[\s\S]*?<\/\1>/gi, " ");
-  const paras = [...clean.matchAll(/<p[\s>][\s\S]*?<\/p>/gi)].map((m) => stripTags(m[0])).filter((p) => p.length > 60);
+export function extractArticleText(html, maxChars = 8000) {
+  if (!html || typeof html !== "string") return "";
+
+  // 1. Next.js __NEXT_DATA__ SSR extraction (extracts full content pre-rendered by server before client paywall triggers)
+  try {
+    const nextMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (nextMatch) {
+      const nextJson = JSON.parse(nextMatch[1]);
+      const pProps = nextJson?.props?.pageProps;
+      const bodyCandidate = 
+        pProps?.data?.body || 
+        pProps?.article?.body || 
+        pProps?.story?.body || 
+        pProps?.content?.body ||
+        pProps?.post?.content;
+      if (bodyCandidate && typeof bodyCandidate === "string") {
+        const cleaned = stripTags(bodyCandidate);
+        if (cleaned.length > 250) return cleaned.slice(0, maxChars);
+      }
+    }
+  } catch {}
+
+  // 2. Schema.org JSON-LD extraction (NewsArticle / Report articleBody)
+  try {
+    const ldMatches = html.matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+    for (const m of ldMatches) {
+      try {
+        const ld = JSON.parse(m[1]);
+        const items = Array.isArray(ld) ? ld : (ld["@graph"] || [ld]);
+        for (const item of items) {
+          if (item?.articleBody && typeof item.articleBody === "string" && item.articleBody.length > 250) {
+            return stripTags(item.articleBody).slice(0, maxChars);
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // 3. Structured article body containers
+  const articleMatch = html.match(/<(?:article|div itemprop="articleBody"|div class="[^"]*(?:article-body|story-body|content-body|article__body)[^"]*")[^>]*>([\s\S]*?)<\/(?:article|div)>/i);
+  const sourceHtml = articleMatch ? articleMatch[1] : html;
+
+  // 4. Clean paragraphs extraction
+  const clean = sourceHtml.replace(/<(script|style|noscript|svg|nav|header|footer|aside|form)[\s\S]*?<\/\1>/gi, " ");
+  const paras = [...clean.matchAll(/<p[\s>][\s\S]*?<\/p>/gi)]
+    .map((m) => stripTags(m[0]))
+    .filter((p) => p.length > 50 && !/^(advertisement|read also|also read|subscribe|sign in|follow us|copyright)/i.test(p));
+
   return paras.join("\n").slice(0, maxChars);
 }
 
 async function bodyOnce(article, net) {
-  const real = await resolveGoogleUrl(article.url, net);
-  const text = extractArticleText(await getText(real, { timeout: 20000, ...net }));
+  const real = await resolveGoogleUrl(article.url, { timeout: 6000, ...net });
+  const text = extractArticleText(await getText(real, { timeout: 7000, ...net }));
   if (text.length > 400) return { text, basis: "full-text", resolvedUrl: real, wire: detectWire(text) };
   return { text: "", basis: "headline", resolvedUrl: real, wire: null };
 }

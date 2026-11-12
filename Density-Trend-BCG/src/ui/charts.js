@@ -115,7 +115,7 @@ const HC = (() => {
       let d = last ? `M${X(last[1]).toFixed(1)},${yS(S.avg[last[1]] ?? last[0]).toFixed(1)}` : "";
       fc.forEach((p, k) => { d += `${d ? "L" : "M"}${X(n + k).toFixed(1)},${yS(p.value).toFixed(1)}`; });
       s += `<path d="${d}" fill="none" stroke="var(--forecast)" stroke-width="2.2" stroke-dasharray="6 4"/>`;
-      s += `<text x="${nowX + 6}" y="${mT + 8}" style="fill:var(--forecast);font-weight:600">Forecast · pilot extrapolation, not validated · 80% band</text>`;
+      s += `<text x="${nowX + 6}" y="${mT + 8}" style="fill:var(--forecast);font-weight:600">Forecast · ${S.forecast?.validated ? "validated · 80% band" : "pilot extrapolation, not validated · 80% band"}</text>`;
     }
     // verified triggers
     (S.triggers ?? []).forEach((t, i) => {

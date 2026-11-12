@@ -23,15 +23,18 @@ import { fetchSerpApi, parseSearchUpload, searchInterestStatus } from "./signals
 import { norm } from "./brackets.mjs";
 import { entityId } from "./entities.mjs";
 import { Integrations } from "./integrations.mjs";
+import { extractArticleText } from "./gnews.mjs";
 import { detectSystem, detectOllama, machineId } from "./system.mjs";
 import { buildQuery, fetchCounts, socialStats } from "./social.mjs";
+import { refreshIndiaTrends, getIndiaTrends, getTrends, refreshTrends, matchOpportunityTrend } from "./xtrends.mjs";
 // JOURNALISTS DISABLED for now: the directory, its sync, matching and API are commented out. Re-enable by removing the comment markers.
 // import { syncJournalists, DEFAULT_URL as JOURNALISTS_URL } from "./journalists.mjs";
 import { refreshHot } from "./hot.mjs";
 import { dedupePass } from "./quality.mjs";
 import { usageReport } from "./usage.mjs";
 import { writeFileAtomic } from "./atomic.mjs";
-import { createAuth, setSecurityHeaders } from "./auth.mjs";
+import { createAuth, setSecurityHeaders, resolveClientMetadata, recordActivity, inferAction, isHttps, clientIp } from "./auth.mjs";
+import { getPgPool, initPgSchema } from "./pg.mjs";
 
 const MAX_BODY = 1_000_000;
 const LIVE_FRESH_MS = 90_000; // a run that hasn't touched the database for this long is treated as stopped
@@ -116,7 +119,12 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     if (j.running) return { code: 409, error: `A ${kind} job is already in progress.` };
     if (!llm.ok) return { code: 400, error: `Can't ${kind}: ${llm.message}. Add a GROQ_API_KEY or OPENAI_API_KEY, or switch Claude on in Settings → Integrations.` };
     // No job uses a proxy for general traffic. The one use is inside the jobs themselves: article text that could not be fetched directly is retried through it.
-    const child = spawn(process.execPath, [join(root, "src", "cli.mjs"), ...args], { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(process.execPath, ["--max-old-space-size=4096", join(root, "src", "cli.mjs"), ...args], {
+      cwd: root,
+      env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --max-old-space-size=4096`.trim() },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
     const logId = store.startJob({ kind, trigger, summary: date ? `for ${date}` : "", stats: { args: args.slice(1).join(" ") } });
     Object.assign(j, { running: true, date, startedAt: Date.now(), lastExit: null, lastMessage: "", tail: "", child, logId });
     let carry = "", statsLine = null;
@@ -147,7 +155,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     log(`${kind} started (${trigger})${date ? `: ${date}` : ""}`);
     return { ok: true };
   }
-  const startRun = (date, hours = null, trigger = "manual") => startJob("run", ["run", ...(date ? ["--date", date] : []), ...(hours ? ["--hours", String(hours)] : [])], { date, trigger, onDone: (code) => { if (code === 0) followUps("auto"); } });
+  const startRun = (date, hours = null, trigger = "manual", window = null) => startJob("run", ["run", ...(date ? ["--date", date] : []), ...(hours ? ["--hours", String(hours)] : []), ...(window ? ["--window", window] : [])], { date, trigger, onDone: (code) => { if (code === 0) followUps("auto"); } });
   const startEnrich = (limit, trigger = "manual", onDone = null) => startJob("enrich", ["enrich", ...(limit ? ["--limit", String(limit)] : [])], { trigger, onDone });
   const startSentiment = (limit = 0, trigger = "manual", onDone = null) => startJob("sentiment", ["sentiment", ...(limit ? ["--limit", String(limit)] : [])], { trigger, onDone });
   const startEntityMerge = (trigger = "manual", onDone = null) => startJob("entities-merge", ["entities-merge"], { trigger, onDone });
@@ -162,6 +170,27 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // or after a collection when online.analyze is switched on in the config. The daily cap (online.dailyCap) bounds it either way.
   const startOnline = (trigger = "manual", onDone = null) => startJob("online", ["online"], { trigger, onDone: (code) => { if (code === 0) analytics.cache.clear(); onDone?.(code); } });
   const startFulltext = (trigger = "manual", onDone = null) => startJob("fulltext", ["fulltext"], { trigger, onDone });
+
+  // Automated 8-hour Twitter / X trending sync (India & Worldwide)
+  const XTRENDS_SCHEDULE_MS = 8 * 3600e3;
+  async function runXTrendsSync(trigger = "scheduled") {
+    const id = store.startJob({ kind: "xtrends", trigger });
+    try {
+      const fresh = await refreshTrends(store);
+      analytics.cache.clear();
+      store.finishJob(id, {
+        status: "ok",
+        summary: `Polled ${fresh.india?.length ?? 0} India + ${fresh.worldwide?.length ?? 0} Worldwide Twitter trends`,
+        stats: { india: fresh.india?.length ?? 0, worldwide: fresh.worldwide?.length ?? 0, total: fresh.trends?.length ?? 0, fetchedAt: fresh.fetchedAt }
+      });
+      log(`Twitter / X trends: polled ${fresh.india?.length ?? 0} India + ${fresh.worldwide?.length ?? 0} Worldwide trends (${trigger})`);
+      return fresh;
+    } catch (err) {
+      store.finishJob(id, { status: "failed", error: err.message });
+      log(`Twitter / X trends poll failed: ${err.message}`);
+      return null;
+    }
+  }
 
   // After a collection (or on start) the follow-up work runs one step at a time, each only if there is something to do:
   // topic labels for stories that have none, sentiment for stories read before it existed, a topic-merge pass when enough new
@@ -185,6 +214,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       () => (cfg.fulltext?.enabled && store.fulltextCandidates({ limit: 1, maxTries: cfg.fulltext?.maxTries ?? 2, retryAfterMs: (cfg.fulltext?.retryAfterHours ?? 12) * 3600e3 }).length && fulltextAllowanceLeft() > 0 ? startFulltext(trigger, next) : null),
       () => (light ? null : (hotNow(trigger).finally(next), { ok: true })),
       () => (cfg.online?.analyze === true && trigger !== "startup" ? startOnline(trigger, next) : null),
+      () => { runXTrendsSync(trigger).catch(() => {}); return null; },
     ];
     let i = 0;
     function next() {
@@ -382,17 +412,26 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // // First start (or a week-old directory): pull the journalist directory in the background.
   // if (autoSync && integrations.enabled("journalists") && (!store.journalistCount() || Date.now() - (+store.getMeta("journalists.lastSync", 0) || 0) > 7 * 864e5)) startJournalistSync("auto");
   const timers = [setInterval(matchNow, 8000)];
+  // Automated 8-hour Twitter / X India trending feed poll (aligned with collection process)
+  timers.push(setInterval(() => { runXTrendsSync("scheduled").catch(() => {}); }, XTRENDS_SCHEDULE_MS));
+  setTimeout(() => {
+    const cached = store.getJson("social.xtrends.cache", null);
+    if (!cached || !cached.trends?.length || !cached.worldwide?.length || Date.now() - (cached.fetchedAt || 0) > XTRENDS_SCHEDULE_MS) {
+      runXTrendsSync("auto").catch(() => {});
+    }
+  }, 2000).unref();
   // Recommendation history: re-evaluate every few minutes and log what changed and why.
   timers.push(setInterval(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 5 * 60e3));
   setTimeout(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 4000).unref();
   // Optional scheduled collection (the document's pilot polls hourly). Off unless HIVEMIND_SCHEDULE_MINUTES / --schedule is set.
   if (scheduleMinutes && scheduleMinutes >= 15) {
-    // Each scheduled run polls only the time since the last run (plus an hour of overlap), 3 to 24 hours. That keeps Google queries
-    // small and under its ~100-headline cap; stories already stored are never read again.
+    // Each scheduled run polls the time since the last run (plus an hour of overlap), up to maxCatchupHours (default 48).
+    // Subdivided windows in gnews.mjs prevent Google's ~100-headline query cap from truncating coverage.
     const tick = () => {
       if (jobs.run.running || liveRun() || !llm.ok || closed) return;
       const last = store.latestRun("rolling")?.startedAt ?? 0;
-      const hours = Math.min(24, Math.max(3, Math.ceil((Date.now() - last) / 3600e3) + 1));
+      const maxCatchup = cfg.intervals?.maxCatchupHours ?? 48;
+      const hours = Math.min(maxCatchup, Math.max(3, Math.ceil((Date.now() - last) / 3600e3) + 1));
       if (last && Date.now() - last < scheduleMinutes * 60e3 * 0.9) return; // not due yet
       startRun(null, hours, "scheduled");
     };
@@ -405,16 +444,16 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // The addresses are the ones the pages request (same arguments, so they hit the same saved answers).
   let warming = false;
   const warm = async () => {
-    if (closed || warming) return;
+    if (closed || warming || anyJobRunning()) return;
     warming = true;
     try {
-      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/backtest"];
+      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?"];
       for (const co of companies.list()) {
         urls.push(`/api/overview?company=${co.id}`);
         for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
       }
       for (const u of urls) {
-        if (closed) break;
+        if (closed || anyJobRunning()) break;
         const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
         try { await viewEntry(v.method, v.args); } catch { /* one view failing must not stop the others */ }
       }
@@ -422,7 +461,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     warming = false;
   };
   try { store.pruneViews(); } catch { /* derived data; nothing depends on it */ }
-  setTimeout(warm, 3000).unref(); timers.push(setInterval(warm, 60e3));
+  setTimeout(warm, 10000).unref(); timers.push(setInterval(warm, 180e3));
   // A one-time request (meta "followups.requested") to run the follow-up chain, for when a restart cut it short. Read once at start, then cleared.
   if (store.getMeta("followups.requested", "") === "1") { store.setMeta("followups.requested", ""); setTimeout(() => followUps("auto"), 5000).unref(); log("follow-ups requested: running them once"); }
   // Print editions: once a day from ocr.dailyAt (local time, default 11:15; see schedule.mjs). Part of the same automatic mode as the scheduled
@@ -460,7 +499,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // What the bell shows: recent finished jobs and any service that needs attention. Derived, never stored separately.
   function notifications() {
     const items = [];
-    const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check" };
+    const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check", xtrends: "Twitter / X trends poll" };
     for (const e of store.jobLog({ limit: 40 })) {
       if (e.status === "running") continue;
       const how = e.trigger === "scheduled" ? "scheduled" : e.trigger === "manual" ? "manual" : "automatic";
@@ -480,11 +519,19 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   }
   // Larger answers are gzipped for browsers that accept it (the opportunity lists are 0.5 to 1.3 MB of text; they shrink about tenfold).
   const json = (res, code, obj) => {
+    if (!res || res.headersSent || res.writableEnded) return;
     const body = JSON.stringify(obj), head = { "content-type": "application/json", "cache-control": "no-store" };
     if (body.length > 2048 && /\bgzip\b/.test(String(res.req?.headers["accept-encoding"] || ""))) {
-      return gzip(body, { level: 5 }, (err, buf) => { if (err) { res.writeHead(code, head); return res.end(body); } res.writeHead(code, { ...head, "content-encoding": "gzip", vary: "accept-encoding" }); res.end(buf); });
+      return gzip(body, { level: 5 }, (err, buf) => {
+        if (!res || res.headersSent || res.writableEnded) return;
+        try {
+          if (err) { res.writeHead(code, head); return res.end(body); }
+          res.writeHead(code, { ...head, "content-encoding": "gzip", vary: "accept-encoding" });
+          res.end(buf);
+        } catch { /* connection dropped */ }
+      });
     }
-    res.writeHead(code, head); res.end(body);
+    try { res.writeHead(code, head); res.end(body); } catch { /* connection dropped */ }
   };
   const needJson = (req, res) => { if (!(req.headers["content-type"] || "").startsWith("application/json")) { json(res, 415, { error: "Send application/json" }); return false; } return true; };
   const allowedHosts = new Set(["127.0.0.1", "localhost", "::1", ...String(process.env.HIVEMIND_ALLOWED_HOSTS || "").split(",").map((h) => h.trim()).filter(Boolean)]);
@@ -493,6 +540,39 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   const authOn = auth && String(process.env.HIVEMIND_AUTH || "").toLowerCase() !== "off";
   if (!authOn) log("WARNING: sign-in is switched OFF (HIVEMIND_AUTH=off). Anyone who can reach this server has full access, including the API keys. Use only on a private, single-user machine.");
   const authz = authOn ? createAuth({ store, log, root }) : null;
+
+  const pgPool = getPgPool();
+  if (pgPool) {
+    try {
+      await initPgSchema(pgPool);
+      log("PostgreSQL connected with connection pool. Enterprise multi-user database active.");
+    } catch (err) {
+      log(`PostgreSQL initialization notice: ${err.message}`);
+    }
+  }
+
+  // DDoS & Rate Limiting Protection (Sliding Window per IP)
+  const rateLimitMap = new Map();
+  const RATE_WINDOW_MS = 60000;
+  const MAX_REQUESTS_PER_MINUTE = 200;
+
+  function checkDdosRateLimit(req) {
+    const ip = clientIp(req);
+    const now = Date.now();
+    let hits = rateLimitMap.get(ip);
+    if (!hits) { hits = []; rateLimitMap.set(ip, hits); }
+    while (hits.length && hits[0] <= now - RATE_WINDOW_MS) hits.shift();
+    if (hits.length >= MAX_REQUESTS_PER_MINUTE) {
+      return Math.max(1, Math.ceil((hits[0] + RATE_WINDOW_MS - now) / 1000));
+    }
+    hits.push(now);
+    if (rateLimitMap.size > 2000) {
+      for (const [k, v] of rateLimitMap.entries()) {
+        if (!v.length || v[v.length - 1] <= now - RATE_WINDOW_MS) rateLimitMap.delete(k);
+      }
+    }
+    return 0;
+  }
 
   // ---------------------------------------------------------------- the dashboard's views: built off the main thread, saved, shared and revalidated
   // Each read-only view is asked for by name and arguments. Its answer is kept (1) in memory, (2) in the database, so a restart or a second copy starts
@@ -517,7 +597,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   const dropWorker = (why) => { if (why) log(`view worker stopped (${why}): the server builds views itself`); worker = null; for (const [, w] of wait) w.reject(new Error(why || "worker stopped")); wait.clear(); };
   if (process.env.HIVEMIND_NO_WORKER !== "1") {
     try {
-      const w = new Worker(new URL("./viewworker.mjs", import.meta.url), { workerData: { root } });
+      const w = new Worker(new URL("./viewworker.mjs", import.meta.url), {
+        workerData: { root },
+        resourceLimits: { maxOldGenerationSizeMb: 4096 }
+      });
       w.unref();
       w.on("message", (m) => { if (m.ready) { worker = w; return; } const p = wait.get(m.id); if (p) { wait.delete(m.id); clearTimeout(p.t); m.ok ? p.resolve(m) : p.reject(new Error(m.error)); } });
       w.on("error", (e) => dropWorker(e.message));
@@ -564,9 +647,60 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   }
 
   const server = createServer(async (req, res) => {
-    setSecurityHeaders(res);
+    setSecurityHeaders(res, isHttps(req));
+    const startTime = Date.now();
+    const metaPromise = resolveClientMetadata(req);
     const url = new URL(req.url, "http://localhost");
-    const p = url.pathname, company = slugify(url.searchParams.get("company") || "bcg") || "bcg";
+    const p = url.pathname;
+    let company = slugify(url.searchParams.get("company") || "bcg") || "bcg";
+
+    // DDoS rate limiting protection
+    const waitSec = checkDdosRateLimit(req);
+    if (waitSec > 0 && !p.startsWith("/healthz")) {
+      res.writeHead(429, { 
+        "content-type": "application/json", 
+        "retry-after": String(waitSec),
+        "cache-control": "no-store" 
+      });
+      return res.end(JSON.stringify({ 
+        error: "Too many requests. DDoS / Rate limit protection triggered.", 
+        retryAfter: waitSec 
+      }));
+    }
+
+    // Activity & security tracking for all non-static API/page calls
+    res.on("finish", async () => {
+      if (p.startsWith("/ui/") || p === "/favicon.ico" || p === "/healthz") return;
+      try {
+        const meta = await metaPromise;
+        const durationMs = Date.now() - startTime;
+        const statusCode = res.statusCode;
+        const action = inferAction(p, req.method, url);
+        const u = req.user ?? authz?.sessionUser?.(req) ?? null;
+        recordActivity(store.db, {
+          userId: u?.id || null,
+          email: u?.email || (p === "/api/auth/login" ? req._loginEmail : null),
+          name: u?.name || null,
+          companyId: u?.company || u?.company_id || company,
+          action,
+          path: p,
+          method: req.method,
+          statusCode,
+          error: res._lastError || (statusCode >= 400 ? `HTTP ${statusCode}` : null),
+          ip: meta.ip,
+          location: meta.location,
+          network: meta.network,
+          ua: String(req.headers["user-agent"] || "").slice(0, 200),
+          durationMs,
+          lat: u?._lat,
+          lon: u?._lon,
+          geoAccuracy: u?._accuracy
+        });
+      } catch (err) {
+        // never block or crash
+      }
+    });
+
     // Anything that changes data (matching, briefs, edits, tuning) drops the cached views once it is done; logging in or out does not.
     if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) analytics.cache.clear(); });
     // Liveness and readiness for containers and load balancers. It answers before the host check and the login, and says nothing but ok / not ok.
@@ -586,6 +720,11 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     }
     try {
       if (authz ? await authz.handle(req, res, url, p) : p === "/login" && req.method === "GET" && (res.writeHead(302, { location: "/" }), res.end(), true)) return; // sign-in gate (see auth.mjs)
+
+      // Client isolation: normal users are strictly scoped to their assigned company
+      const userCompany = req.user?.role !== "admin" ? (req.user?.company || req.user?.company_id || "bcg") : null;
+      if (userCompany) company = userCompany;
+
       if (req.method === "GET" && (p === "/" || p === "/index.html")) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(readFileSync(join(root, "src", "dashboard.html")));
@@ -609,7 +748,13 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       // ---- analytics ----
       if (req.method === "GET" && p === "/api/status") {
         const st = status();
-        if (req.user && req.user.role !== "admin") { for (const k of ["integrations", "jobs", "activity", "journalists", "llm", "provider", "chain", "fallbackActive", "enrich", "sentiment", "topicMerge", "fulltext", "live", "runner"]) delete st[k]; st.llm = { ok: true }; st.runner = { running: false }; st.live = null; st.enrich = { running: false }; st.integrations = []; }
+        if (req.user && req.user.role !== "admin") {
+          const userCo = req.user.company || req.user.company_id || "bcg";
+          st.companies = st.companies.filter((c) => c.id === userCo);
+          if (!st.companies.length) st.companies = [{ id: userCo, name: userCo.toUpperCase() }];
+          for (const k of ["integrations", "jobs", "activity", "journalists", "llm", "provider", "chain", "fallbackActive", "enrich", "sentiment", "topicMerge", "fulltext", "live", "runner"]) delete st[k];
+          st.llm = { ok: true }; st.runner = { running: false }; st.live = null; st.enrich = { running: false }; st.integrations = [];
+        }
         return json(res, 200, st);
       }
       if (req.method === "GET" && ROUTES[p]) { const v = ROUTES[p](url, company); return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args); }
@@ -618,6 +763,44 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (req.method === "GET" && p === "/api/recommendations") {
         const key = url.searchParams.get("key");
         return json(res, 200, { history: key ? store.recommendationHistory(company, key) : [], total: store.recommendationCount() });
+      }
+      if (req.method === "GET" && p === "/api/xtrends") {
+        const regionParam = (url.searchParams.get("region") || "all").toLowerCase();
+        const t = await getTrends({ store, maxAgeMs: XTRENDS_SCHEDULE_MS, region: regionParam });
+        const opps = analytics.opportunities({ company, limit: 100, group: true });
+        const items = opps?.items || [];
+        const trends = (t.trends || []).map((tr) => {
+          let matchedOpp = null;
+          for (const o of items) {
+            const m = matchOpportunityTrend(o, [tr]);
+            if (m) {
+              matchedOpp = { oppKey: o.key, sector: o.sector, topic: o.label.name, score: Math.round(o.score), angle: o.angle };
+              break;
+            }
+          }
+          return { ...tr, match: matchedOpp };
+        });
+        const matchedCount = trends.filter((x) => x.match).length;
+        const indCount = t.india?.length || (t.trends || []).filter((x) => x.region === "india").length;
+        const worldCount = t.worldwide?.length || (t.trends || []).filter((x) => x.region === "worldwide").length;
+        return json(res, 200, {
+          ok: true,
+          asOf: t.fetchedAt,
+          region: regionParam,
+          count: trends.length,
+          matchedCount,
+          counts: {
+            india: indCount,
+            worldwide: worldCount,
+            total: indCount + worldCount
+          },
+          nextScheduledIn: Math.max(0, XTRENDS_SCHEDULE_MS - (Date.now() - (t.fetchedAt || 0))),
+          trends
+        });
+      }
+      if (req.method === "POST" && p === "/api/xtrends/refresh") {
+        const fresh = await runXTrendsSync("manual");
+        return json(res, 200, { ok: true, asOf: fresh?.fetchedAt || Date.now(), count: fresh?.trends?.length || 0, trends: fresh?.trends || [] });
       }
 
       // ---- authors, briefs, editor decisions ----
@@ -708,6 +891,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const body = JSON.parse(await readBody(req) || "{}");
         const k = String(body.kind || "");
         if (k === "hot-topics") { hotNow("manual"); return json(res, 200, { ok: true }); }
+        if (k === "xtrends") { await runXTrendsSync("manual"); return json(res, 200, { ok: true }); }
         if (k === "topic-verify") { topicVerifyNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "topic-match") { topicMatchNow("manual", { force: true }); return json(res, 200, { ok: true }); }
         if (k === "second-opinion") { secondOpinionNow("manual"); return json(res, 200, { ok: true }); }
@@ -716,6 +900,40 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich or hot-topics." });
         const r = starter();
         return r.ok ? json(res, 200, { ok: true }) : json(res, r.code, { error: r.error });
+      }
+
+            // Anexar Web Clipper / browser extension ingestion bridge:
+      if (req.method === "POST" && p === "/api/clip") {
+        if (!needJson(req, res)) return;
+        const b = JSON.parse(await readBody(req) || "{}");
+        const urlStr = String(b.url || "").trim();
+        const html = String(b.html || "");
+        const rawText = String(b.text || "");
+        const text = rawText || extractArticleText(html);
+        if (!text || text.length < 150) return json(res, 400, { error: "No usable article text could be extracted." });
+        
+        let story = urlStr ? store.db.prepare("SELECT * FROM stories WHERE url = ?").get(urlStr) : null;
+        if (!story && b.title) {
+          const tClean = b.title.trim().toLowerCase();
+          story = store.db.prepare("SELECT * FROM stories WHERE lower(title) = ?").get(tClean);
+        }
+        if (story) {
+          try {
+            const arts = store.articlesOf(story.key);
+            const cluster = { title: story.title, url: story.url, snippet: story.snippet, outlets: [...new Set(arts.map((a) => a.outlet))], articles: arts };
+            const full = await reader.readFull(cluster, { text, basis: "full-text", resolvedUrl: urlStr }, { skipTopics: true });
+            if (full) {
+              store.upgradeReading(story.key, { analysis: full.analysis, basis: "full-text" });
+              store.putEnrichment(story.key, { wire: null, ...(full.enrichment ?? {}), topics: null, source: "anexar-clip" });
+              store.noteFulltextTry(story.key, "upgraded");
+              analytics.cache.clear();
+              return json(res, 200, { ok: true, upgraded: true, key: story.key, title: story.title, textLength: text.length });
+            }
+          } catch (e) {
+            return json(res, 500, { error: `Enrichment failed: ${e.message}` });
+          }
+        }
+        return json(res, 200, { ok: true, stored: false, textLength: text.length, note: "Text extracted; no matching story currently in backlog." });
       }
 
       // ---- authored articles (opinion / analysis in the print editions): where the journalist directory used to be ----
@@ -766,9 +984,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (!needJson(req, res)) return;
         const body = JSON.parse(await readBody(req) || "{}");
         const date = body.date ?? null;
+        const window = typeof body.window === "string" && /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.test(body.window) ? body.window : null;
         if (date !== null && !validDay(date)) return json(res, 400, { error: "Pick a valid date (YYYY-MM-DD) that isn't in the future." });
-        const r = startRun(date);
-        return r.ok ? json(res, 200, { ok: true, date }) : json(res, r.code, { error: r.error });
+        const r = startRun(date, null, "manual", window);
+        return r.ok ? json(res, 200, { ok: true, date, window }) : json(res, r.code, { error: r.error });
       }
       if (req.method === "POST" && p === "/api/enrich") {
         if (!needJson(req, res)) return;
@@ -916,9 +1135,11 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           return json(res, 400, { error: e.message });
         }
       }
-      json(res, 404, { error: "Not found" });
+      if (!res.headersSent && !res.writableEnded) json(res, 404, { error: "Not found" });
     } catch (e) {
-      json(res, e instanceof SyntaxError ? 400 : 500, { error: e instanceof SyntaxError ? "Invalid JSON" : e.message });
+      if (!res.headersSent && !res.writableEnded) {
+        try { json(res, e instanceof SyntaxError ? 400 : 500, { error: e instanceof SyntaxError ? "Invalid JSON" : e.message }); } catch {}
+      }
     }
   });
   server.on("close", () => { closed = true; workerRef?.terminate(); authz?.stop(); timers.forEach(clearInterval); for (const j of Object.values(jobs)) j.child?.kill(); try { store.closeStaleJobs(); } catch { /* ignore */ } store.close(); });

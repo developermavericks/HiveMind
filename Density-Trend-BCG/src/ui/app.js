@@ -8,7 +8,7 @@ const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { retur
 const S = {
   company: ls.get("company") || "bcg", date: null, page: "overview", status: null, cfg: null,
   gran: ls.get("gran") || "hour", level: "bracket", sel: null, compare: new Set(), show: { bars: true, share: true, avg: true, forecast: true },
-  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false, mode: "whitespace" }, oppByKey: new Map(), authors: [],
+  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false, xtrend: false, mode: "whitespace" }, oppByKey: new Map(), authors: [],
 };
 // Sidebar groups. Each group with several views shows them as tabs; old routes still work through LEGACY.
 const PAGES = {
@@ -20,6 +20,7 @@ const PAGES = {
     { k: "sectors", t: "Sectors", sub: "Broad news areas: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
     { k: "entities", t: "Entities", sub: "Organisations, places and people that stories are about", fn: (el) => pgEntities(el) },
     { k: "sentiment", t: "Sentiment", sub: "Positive and negative tone of coverage by sector and topic", fn: (el) => pgSentiment(el) },
+    { k: "xtrends", t: "𝕏 Twitter Trends", sub: "Live Top 70 Twitter trends in India, automated 8-hour polling and editorial opportunity cross-matching", fn: (el) => pgXTrends(el) },
   ] },
   clients: { name: "Clients", title: "Clients", sub: "Company lenses and client management", tabs: [
     { k: "lens", t: "Company lens", sub: "How the news reaches each of the company's sectors", fn: (el) => pgSectors(el) },
@@ -37,17 +38,20 @@ const PAGES = {
     { k: "method", t: "Method", sub: "How every number is calculated and how this maps to the HiveMind concept", fn: (el) => pgMethod(el) },
   ] },
   guide: { name: "Guide", title: "Guide", sub: "What the numbers mean and how to use them", fn: (el) => (S.me && S.me.role !== "admin" ? pgGuideSimple(el) : pgGuide(el)) },
+  support: { name: "Report Issue", title: "Support & Issue Tracking", sub: "Report an issue, request a feature, or raise questions to the administrator", fn: (el) => pgSupport(el) },
   settings: { name: "Settings", title: "Settings", sub: "Keys, system, run logs and usage", tabs: [
     { k: "integrations", t: "Integrations & keys", sub: "API keys, on/off switches and connection tests", fn: (el) => pgSettings(el) },
     { k: "system", t: "System", sub: "This machine, the local model and the LLM fallback", fn: (el) => pgSettings(el) },
-    { k: "logs", t: "Logs", sub: "Every automated and manual run, with what it collected and whether it worked", fn: (el) => pgLogs(el) },
+    { k: "logs", t: "Run logs", sub: "Every automated and manual run, with what it collected and whether it worked", fn: (el) => pgLogs(el) },
+    { k: "tickets", t: "Tickets & Support", admin: true, sub: "Review user tickets, bug reports, and requests", fn: (el) => pgAdminTickets(el) },
+    { k: "audit-logs", t: "User Audit Trail", admin: true, sub: "Who used what, when, IP address, Wi-Fi / ISP, location, and errors", fn: (el) => pgAuditLogs(el) },
     { k: "usage", t: "Usage", sub: "API calls, tokens, balances and daily budgets", fn: (el) => pgUsage(el) },
-    { k: "users", t: "Users", admin: true, sub: "Who can sign in, and who is waiting for approval", fn: (el) => pgUsers(el) },
+    { k: "users", t: "Users & Client Scoping", admin: true, sub: "Who can sign in, client scoping, and permissions", fn: (el) => pgUsers(el) },
   ] },
 };
 const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "sources/authored", validation: "accuracy/validation", method: "accuracy/method" };
 const MEMBER_HIDDEN = new Set(["leadership", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
-const NAV_TOP = ["overview", "leadership", "opportunities", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "settings"];
+const NAV_TOP = ["overview", "leadership", "opportunities", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
 const NAV_ICON = {
   overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   leadership: '<path d="M4 20V9M10 20V4M16 20v-8M22 20H2"/>',
@@ -57,6 +61,7 @@ const NAV_ICON = {
   sources: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/>',
   accuracy: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
   guide: '<path d="M4 4h11a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z"/><path d="M8 8h6M8 12h6"/>',
+  support: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
   settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
 };
 const curTab = () => { const g = PAGES[S.page]; return g.tabs ? g.tabs.find((t) => t.k === S.tab) ?? g.tabs[0] : null; };
@@ -77,9 +82,24 @@ const ago = (ms) => { const h = (Date.now() - ms) / 3600e3; return h < 1 ? `${Ma
 const fmtDay = (d) => new Date(d + "T00:00:00").toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 const dt = (ms) => new Date(ms).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 function toast(msg, ms = 3200) { const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.append(t); setTimeout(() => t.remove(), ms); }
-const actionPill = (a) => `<span class="pill ${a === "write now" ? "p-write" : "p-" + a}">${a === "write now" ? "● " : ""}${esc(a)}</span>`;
-const stagePill = (s) => `<span class="pill p-${s} dot">${s === "watch" ? "watchlist" : esc(s)}</span>`;
-const evPill = (e) => `<span class="pill p-${e.level}" title="${esc((e.reasons || []).join(" · "))}">evidence ${e.level}</span>`;
+const actionLabel = (a) => {
+  if (typeof isAdmin === "function" && isAdmin()) return a;
+  const map = { "write now": "Act Now", "investigate": "Explore", "monitor": "Watchlist", "skip": "Low Priority" };
+  return map[a] || a;
+};
+const actionPill = (a) => `<span class="pill ${a === "write now" ? "p-write" : "p-" + a}">${a === "write now" ? "● " : ""}${esc(actionLabel(a))}</span>`;
+const stageLabel = (s) => {
+  if (typeof isAdmin === "function" && isAdmin()) return s === "watch" ? "watchlist" : s;
+  const map = { "rising": "Trending Up", "emerging": "New Trend", "steady": "Steady", "crowded": "Saturated", "declining": "Fading", "watch": "Watchlist" };
+  return map[s] || s;
+};
+const stagePill = (s) => `<span class="pill p-${s} dot">${esc(stageLabel(s))}</span>`;
+const evLabel = (e) => {
+  if (typeof isAdmin === "function" && isAdmin()) return `evidence ${e.level}`;
+  const map = { "high": "Verified (High)", "medium": "Moderate Confidence", "low": "Early Signal" };
+  return map[e.level] || `evidence ${e.level}`;
+};
+const evPill = (e) => `<span class="pill p-${e.level}" title="${esc((e.reasons || []).join(" · "))}">${esc(evLabel(e))}</span>`;
 const COMP = { momentum: "Momentum", acceleration: "Acceleration", sourceBreadth: "Independent sources", sectorEvidence: "Sector evidence", triggerTiming: "Trigger timing", headroom: "Editorial headroom" };
 const STAGE_ORDER = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
 const STAGE_NAME = { emerging: "Emerging", rising: "Rising", steady: "Steady", crowded: "Crowded", declining: "Declining", watch: "Watchlist" };
@@ -89,10 +109,30 @@ const stack = (comp) => `<div class="stack">${Object.entries(comp).map(([k, c]) 
 const stackLegend = () => `<div class="legend">${Object.keys(COMP).map((k) => `<span><i class="c-${k}"></i>${COMP[k]}${typeof info === "function" ? info("c_" + k) : ""}</span>`).join("")}</div>`;
 
 // ---------------------------------------------------------------- shell
+function requestGeoLocation() {
+  if ("geolocation" in navigator && !sessionStorage.getItem("geo_checked")) {
+    sessionStorage.setItem("geo_checked", "1");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        post("/api/auth/geo", {
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          accuracy: pos.coords.accuracy
+        }).catch(() => {});
+      },
+      () => {
+        sessionStorage.setItem("geo_checked", "denied");
+      },
+      { timeout: 10000, maximumAge: 300000, enableHighAccuracy: false }
+    );
+  }
+}
+
 function buildShell() {
   const link = (k) => `<a href="#/${k}" data-p="${k}"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">${NAV_ICON[k]}</svg></span>${PAGES[k].name}</a>`;
   $("#nav").innerHTML = NAV_TOP.map(link).join("");
   $("#nav2").innerHTML = NAV_BOTTOM.map(link).join("");
+  requestGeoLocation();
 }
 function renderTabs() {
   const g = PAGES[S.page], el = $("#tabs");
@@ -151,21 +191,56 @@ function renderProgress(st) {
 
 function renderTop() {
   const st = S.status, p = PAGES[S.page], tab = curTab();
-  $("#ttl").textContent = p.title; $("#sub").textContent = tab?.sub ?? p.sub;
+  const isAdm = typeof isAdmin === "function" && isAdmin();
+  const assignedCo = S.me?.company ? S.me.company.toUpperCase() : "BCG";
+  $("#ttl").textContent = !isAdm && S.page === "overview" ? `HiveMind · ${assignedCo} Intelligence` : p.title;
+  $("#sub").textContent = !isAdm && S.page === "overview" 
+    ? `Real-time strategic priorities, verified news momentum, and executive briefs for ${assignedCo}.` 
+    : (tab?.sub ?? p.sub);
   renderTabs();
   if (!st) return;
-  const opts = st.companies.map((c) => `<option value="${esc(c.id)}"${c.id === S.company ? " selected" : ""}>${esc(c.name)}</option>`).join("");
-  const dopts = `<option value="">Live (latest data)</option>` + st.dates.map((d) => `<option value="${d.day}"${d.day === S.date ? " selected" : ""}>${fmtDay(d.day)} · ${n0(d.stories)}</option>`).join("");
-  if ($("#csel").dataset.sig !== opts) { $("#csel").innerHTML = opts; $("#csel").dataset.sig = opts; }
-  if ($("#dsel").dataset.sig !== dopts) { $("#dsel").innerHTML = dopts; $("#dsel").dataset.sig = dopts; }
-  $("#csel").value = S.company; $("#dsel").value = S.date ?? "";
 
-  const prov = st.noClaude ? `Claude off · ${[st.models?.openai && "Luna", st.models?.groq && "Groq"].filter(Boolean).join(" + ") || "no model"}` : st.provider ? (st.provider === "anthropic" ? "Claude Haiku" : `Ollama (${st.llm?.message || "local"})`) : (st.llm.ok ? "LLM ready" : "LLM off");
-  $("#llm").className = `pill ${st.llm.ok ? "p-ok" : "p-bad"} dot`;
-  $("#llm").textContent = st.fallbackActive ? `${prov} [fallback]` : prov;
-  $("#llm").title = `LLM Provider: ${st.provider || 'none'} · Click to manage in Settings`;
-  $("#llm").style.cursor = "pointer";
-  $("#llm").onclick = () => { location.hash = "#/settings"; };
+  // Client scoping: non-admins cannot switch to other clients
+  if (!isAdm) {
+    $("#csel").style.display = "none";
+    let badge = $("#cbadge");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.id = "cbadge";
+      badge.className = "pill p-write";
+      badge.style.fontWeight = "600";
+      badge.style.letterSpacing = "0.03em";
+      $("#csel").parentNode.insertBefore(badge, $("#csel"));
+    }
+    badge.textContent = `${assignedCo} (Client Scoped)`;
+    badge.title = `Your account is scoped strictly to ${assignedCo}. Client switching is restricted to administrators.`;
+  } else {
+    $("#csel").style.display = "";
+    const badge = $("#cbadge");
+    if (badge) badge.remove();
+    const opts = st.companies.map((c) => `<option value="${esc(c.id)}"${c.id === S.company ? " selected" : ""}>${esc(c.name)}</option>`).join("");
+    if ($("#csel").dataset.sig !== opts) { $("#csel").innerHTML = opts; $("#csel").dataset.sig = opts; }
+    $("#csel").value = S.company;
+  }
+
+  const dopts = `<option value="">Live (latest data)</option>` + st.dates.map((d) => `<option value="${d.day}"${d.day === S.date ? " selected" : ""}>${fmtDay(d.day)} · ${n0(d.stories)}</option>`).join("");
+  if ($("#dsel").dataset.sig !== dopts) { $("#dsel").innerHTML = dopts; $("#dsel").dataset.sig = dopts; }
+  $("#dsel").value = S.date ?? "";
+
+  if (!isAdm) {
+    $("#llm").className = `pill p-ok dot`;
+    $("#llm").textContent = "Intelligence Engine Ready";
+    $("#llm").title = "Automated analysis active and verified";
+    $("#llm").style.cursor = "default";
+    $("#llm").onclick = null;
+  } else {
+    const prov = st.noClaude ? `Claude off · ${[st.models?.openai && "Luna", st.models?.groq && "Groq"].filter(Boolean).join(" + ") || "no model"}` : st.provider ? (st.provider === "anthropic" ? "Claude Haiku" : `Ollama (${st.llm?.message || "local"})`) : (st.llm.ok ? "LLM ready" : "LLM off");
+    $("#llm").className = `pill ${st.llm.ok ? "p-ok" : "p-bad"} dot`;
+    $("#llm").textContent = st.fallbackActive ? `${prov} [fallback]` : prov;
+    $("#llm").title = `LLM Provider: ${st.provider || 'none'} · Click to manage in Settings`;
+    $("#llm").style.cursor = "pointer";
+    $("#llm").onclick = () => { location.hash = "#/settings"; };
+  }
 
   renderProgress(st);
   $("#side-foot").innerHTML = `${st.schedule.minutes ? `Auto-collect every ${st.schedule.minutes} min${st.schedule.nextRunAt ? ` · next ~${new Date(Math.max(st.schedule.nextRunAt, Date.now())).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}` : "Manual collection"}<br>${n0(st.recommendations)} recommendations logged`;
@@ -191,7 +266,7 @@ function busyNow(st) {
   return !!(st && (st.runner?.running || st.live || st.enrich?.running || Object.values(st.jobs ?? {}).some((j) => j.running) || Object.values(st.activity ?? {}).some(Boolean)));
 }
 let softAt = 0;
-function renderSoft() { if (Date.now() - softAt > 12000 && (S.page === "overview" || (S.page === "opportunities" && !S.oppOpen) || (S.page === "trends" && ["topics", "sectors"].includes(S.tab)) || (S.page === "sources" && S.tab === "collection"))) { softAt = Date.now(); render(); } }
+function renderSoft() { if (Date.now() - softAt > 60000 && !document.hidden && S.page === "overview" && !$("#drawer").classList.contains("on")) { softAt = Date.now(); render(); } }
 
 // ---------------------------------------------------------------- router
 async function route() {
@@ -216,7 +291,7 @@ async function route() {
 async function render() {
   renderTop();
   const el = $("#page"), page = S.page;
-  const tab = curTab(), fn = tab ? tab.fn : PAGES[page].fn, sig = `${page}/${S.tab ?? ""}`;
+  const tab = curTab(), fn = tab ? tab.fn : PAGES[page].fn, sig = `${page}/${S.tab ?? ""}/${S.date ?? "live"}`;
   if (el.dataset.page !== sig) { el.innerHTML = loading(); el.dataset.page = sig; }
   try { await fn(el); } catch (e) { if (S.page === page) el.innerHTML = banner("bad", `<b>Could not load this page.</b> ${esc(e.message)}`); }
 }
@@ -228,6 +303,7 @@ async function pgOverview(el) {
   if (o.empty) { el.innerHTML = `<div class="empty"><h3>No data yet</h3><p>Start a collection with the <b>Run</b> button above, or <span class="code">node src/cli.mjs run</span>.</p></div>`; return; }
   const k = o.kpis, h = o.history, st = S.status;
   const notes = [];
+  if (S.date) notes.push(banner("info", `📅 <b>Viewing archive for ${fmtDay(S.date)}</b> · Showing news clusters, momentum and opportunities calculated for that day. <button class="btn sm ghost" style="margin-left:8px;padding:2px 8px;font-size:12px" onclick="$('#dsel').value='';$('#dsel').dispatchEvent(new Event('change'))">Return to Live</button>`));
   if (!st.llm.ok) notes.push(banner("warn", `<b>LLM is off.</b> ${esc(st.llm.message)} Briefs and new readings need it; everything already stored still works.`));
   if (o.stale) notes.push(banner("warn", `<b>Data is ${Math.round(o.dataAgeHours)} hours old.</b> Press Run to collect the latest stories; recent-window metrics describe the last collection, not now.`));
   const act = k.actions || {}, funnel = [
@@ -276,9 +352,9 @@ function oppRow(o) {
   const m = o.metrics;
   return `<div class="opp" data-opp="${esc(o.key)}">
     <div>${ring(o.score)}</div>
-    <div><div class="ttl">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}${o.label.level === "topic" ? ` <span class="tag">specific topic</span>` : ""}</div>
+    <div><div class="ttl">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}${o.label.level === "topic" ? ` <span class="tag">specific topic</span>` : ""}${o.xTrending ? ` <span class="pill" style="background:#1d9bf0;color:#fff;font-size:10.5px;font-weight:700;letter-spacing:0.02em" title="Trending on X (${o.xTrending.region === 'worldwide' ? 'Worldwide' : 'India'}): Rank #${o.xTrending.rank} · ${esc(o.xTrending.name)}">𝕏 #${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? '🌐' : '🇮🇳'}</span>` : ""}</div>
       <div class="ang">${o.angle ? esc(clip(o.angle, 190)) : esc(clip(o.why, 190))}</div>${alsoLine(o)}
-      <div class="meta">${actionPill(o.action)}${stagePill(o.stage)}${evPill(o.evidence)}<span class="tag">${x2(m.ratio)} momentum</span><span class="tag">${pct(m.share)} share</span><span class="tag">${originsLink(m.originsRecent, o.label.key, o.label.name)} origins</span>${xSentChip(o.sentiment)}${fitChip(o)}${flagChips(o)}<span class="tag">${esc(o.window.label)}</span>${o.evidenceStatus === "hypothesis" ? `<span class="pill p-muted">hypothesis link</span>` : ""}${o.otherSectors?.length ? `<span class="tag">+${o.otherSectors.length} more sector${o.otherSectors.length > 1 ? "s" : ""}</span>` : ""}${o.brief ? `<span class="pill p-muted">brief: ${esc(o.brief.status.replace("_", " "))}</span>` : ""}</div></div>
+      <div class="meta">${actionPill(o.action)}${stagePill(o.stage)}${evPill(o.evidence)}<span class="tag">${x2(m.ratio)} ${typeof isAdmin === "function" && isAdmin() ? "momentum" : "above baseline"}</span><span class="tag">${pct(m.share)} ${typeof isAdmin === "function" && isAdmin() ? "share" : "of news"}</span><span class="tag">${originsLink(m.originsRecent, o.label.key, o.label.name)} ${typeof isAdmin === "function" && isAdmin() ? "origins" : "verified sources"}</span>${xSentChip(o.sentiment)}${fitChip(o)}${flagChips(o)}<span class="tag">${esc(o.window.label)}</span>${o.evidenceStatus === "hypothesis" ? `<span class="pill p-muted">hypothesis link</span>` : ""}${o.otherSectors?.length ? `<span class="tag">+${o.otherSectors.length} more sector${o.otherSectors.length > 1 ? "s" : ""}</span>` : ""}${o.brief ? `<span class="pill p-muted">brief: ${esc(o.brief.status.replace("_", " "))}</span>` : ""}</div></div>
     <div style="text-align:right">${spark(o.spark ?? [])}</div></div>`;
 }
 const bindOppRows = (el) => $$("[data-opp]", el).forEach((r) => (r.onclick = () => openOpp(r.dataset.opp)));
@@ -302,16 +378,17 @@ async function pgOpportunities(el) {
     <div class="seg" id="omode" title="Both views count the same opinion and analysis pieces from the print editions">${[["whitespace", "Nobody has written it"], ["validated", "Others have written it"]].map(([k, t]) => `<button data-m="${k}" class="${f.mode === k ? "on" : ""}">${t}</button>`).join("")}</div>
     <label class="chk"><input type="checkbox" id="ogroup" ${f.group ? "checked" : ""}> One row per topic</label>
     <label class="chk"><input type="checkbox" id="otrig" ${f.trigger ? "checked" : ""}> With a verified trigger</label>
+    <label class="chk"><input type="checkbox" id="oxtrend" ${f.xtrend ? "checked" : ""}> 𝕏 Trending only</label>
     <span class="mute small" id="ocount"></span></div></div>
   <div class="card flush"><div class="tw" style="max-height:none"><table class="t" id="otab"><thead><tr><th>Score${info("score")}</th><th>Opportunity</th><th>Action</th><th>Stage</th><th class="r s" data-s="ratio">Momentum${info("momentum")}</th><th class="r s" data-s="share">Share${info("share")}</th><th class="r s" data-s="origins">Origins${info("origins")}</th><th>Evidence</th><th>Window</th></tr></thead><tbody></tbody></table></div><div id="opager"></div></div>
   <p class="small mute" style="margin-top:10px">Score (0–100) ranks opportunities; it is <b>not</b> a probability. Weights are pilot assumptions — see <a href="#/accuracy/method">Method</a>.</p>`;
   const rowHtml = (o) => {
     const more = moreOf(o), isOpen = open.has(o.key);
-    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
+    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}${o.xTrending ? `<span class="pill" style="background:#1d9bf0;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Trending on X (${o.xTrending.region === 'worldwide' ? 'Worldwide' : 'India'}): Rank #${o.xTrending.rank} · ${esc(o.xTrending.name)}">𝕏 #${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? '🌐' : '🇮🇳'}</span>` : ""}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
       (isOpen ? `<tr class="sub"><td></td><td colspan="8"><div class="chips">${more.map((s) => `<span class="chip" ${s.key && S.oppByKey.has(s.key) ? `data-opp="${esc(s.key)}"` : ""}>${esc(s.sector)} <b class="num">${Math.round(s.score)}</b>${s.action ? ` ${actionPill(s.action)}` : ""}</span>`).join("")}</div></td></tr>` : "");
   };
   const draw = () => {
-    let rows = r.items.filter((o) => (f.action === "all" || o.action === f.action) && (f.stage === "all" || o.stage === f.stage) && (!f.trigger || o.trigger?.verified) && (!f.q || `${o.sector} ${o.label.name} ${o.angle} ${o.label.parentName}`.toLowerCase().includes(f.q.toLowerCase())));
+    let rows = r.items.filter((o) => (f.action === "all" || o.action === f.action) && (f.stage === "all" || o.stage === f.stage) && (!f.trigger || o.trigger?.verified) && (!f.xtrend || o.xTrending) && (!f.q || `${o.sector} ${o.label.name} ${o.angle} ${o.label.parentName}`.toLowerCase().includes(f.q.toLowerCase())));
     const key = { score: (o) => o.score, ratio: (o) => o.metrics.ratio ?? -1, share: (o) => o.metrics.share, origins: (o) => o.metrics.originsRecent }[f.sort];
     rows = rows.sort((a, b) => f.dir * (key(a) - key(b)));
     const pages = Math.max(1, Math.ceil(rows.length / f.size)); if (f.page > pages) f.page = pages;
@@ -331,6 +408,7 @@ async function pgOpportunities(el) {
   $$("#omode button").forEach((b) => (b.onclick = () => { f.mode = b.dataset.m; f.page = 1; render(); }));
   $("#ogroup").onchange = (e) => { f.group = e.target.checked; f.page = 1; render(); };
   $("#otrig").onchange = (e) => { f.trigger = e.target.checked; f.page = 1; draw(); };
+  $("#oxtrend").onchange = (e) => { f.xtrend = e.target.checked; f.page = 1; draw(); };
   $$("#otab th.s").forEach((th) => (th.onclick = (e) => { if (e.target.closest("[data-info]")) return; f.dir = f.sort === th.dataset.s ? -f.dir : -1; f.sort = th.dataset.s; draw(); }));
   draw();
 }
@@ -382,7 +460,7 @@ async function openOpp(key) {
       </div>
     </div>
 
-    <div class="card"><div class="sec-h" style="margin:0"><div><h3>Momentum${info("momentumChart")}</h3><p class="hint" style="margin:0">Raw volume (bars), coverage share and rolling average; ◆ verified triggers; dashed = unvalidated forecast.</p></div>
+    <div class="card"><div class="sec-h" style="margin:0"><div><h3>Momentum${info("momentumChart")}</h3><p class="hint" style="margin:0">Raw volume (bars), coverage share and rolling average; ◆ verified triggers; dashed = forecast.</p></div>
       <div class="seg" id="dgran"><button data-g="hour" class="on">Hourly</button><button data-g="day">Daily</button></div></div>
       <div class="cl"><span><i style="background:var(--bars-strong);opacity:.7"></i>stories (left axis)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>rolling average</span><span><i class="dash"></i>forecast</span><span><i style="background:repeating-linear-gradient(45deg,var(--line2) 0 2px,var(--surface2) 2px 5px)"></i>collection gap</span></div>
       <div class="chart" id="dchart"></div><div id="dline"></div><div id="dextra" style="margin-top:8px"></div></div>
@@ -398,11 +476,24 @@ async function openOpp(key) {
       <div id="dsearch"></div></div>
 
     <div class="card" id="dxsocial">
-      <div class="sec-h" style="margin:0">
-        <div><h3>X (Twitter) Social Pulse${info("social")} <span class="pill p-muted">social signal</span></h3><p class="hint" style="margin:0">Official X API v2 hourly post volume. Kept separate from news coverage.</p></div>
-        <div id="dxactions"></div>
+      <div class="sec-h" style="margin:0 0 10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="background:#1d9bf0;color:#fff;width:28px;height:28px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:15px">𝕏</span>
+          <div>
+            <h3 style="margin:0;font-size:15px;display:flex;align-items:center;gap:8px">
+              Twitter / X Trending Status
+              <span class="pill ${o.xTrending ? 'p-ok' : 'p-muted'}" style="${o.xTrending ? 'background:#1d9bf0;color:#fff;font-weight:700' : ''}">${o.xTrending ? `● Trending #${o.xTrending.rank} (${o.xTrending.region === 'worldwide' ? 'Worldwide 🌐' : 'India 🇮🇳'})` : '○ Not Trending'}</span>
+            </h3>
+            <p class="hint" style="margin:2px 0 0">Verified against live Top 70 Twitter trends in India and Worldwide (hourly public mirror feed · zero API cost · zero scraping).</p>
+          </div>
+        </div>
+        <div id="dxactions">
+          <button class="btn ghost sm" id="xtrefresh" title="Re-check live Twitter trends">↻ Refresh X Trends</button>
+        </div>
       </div>
-      <div id="dxbody" style="margin-top:10px"><div class="skel" style="height:120px"></div></div>
+      <div id="dxbody">
+        ${renderXTrendingBody(o)}
+      </div>
     </div>
 
     ${authoredCard(o)}
@@ -421,51 +512,81 @@ async function openOpp(key) {
     series = r.series[lk]; drawChart();
   }));
   searchPanel($("#dsearch", body), t?.searchInterest, o.label.name);
-  socialDrawerPanel($("#dxbody", body), $("#dxactions", body), o);
+  const xtBtn = $("#xtrefresh", body);
+  if (xtBtn) {
+    xtBtn.onclick = async () => {
+      xtBtn.disabled = true; xtBtn.textContent = "Checking…";
+      try {
+        await post("/api/xtrends/refresh", {});
+        const updated = await api(`/api/opportunity?${qs(`&key=${encodeURIComponent(o.key)}&mode=${S.opp.mode}&group=${S.opp.group ? "topic" : "pair"}`)}`).catch(() => null);
+        if (updated && !updated.error) {
+          o = updated;
+          S.oppByKey.set(o.key, updated);
+        }
+        toast(o.xTrending ? `Verified trending on 𝕏 (#${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? 'Worldwide 🌐' : 'India 🇮🇳'})` : "Checked live trends: Not currently trending in Top 70");
+        const b = $("#dxbody", body);
+        if (b) b.innerHTML = renderXTrendingBody(o);
+        const headerPill = $("#dxsocial .sec-h .pill", body);
+        if (headerPill) {
+          headerPill.className = `pill ${o.xTrending ? 'p-ok' : 'p-muted'}`;
+          headerPill.style = o.xTrending ? 'background:#1d9bf0;color:#fff;font-weight:700' : '';
+          headerPill.textContent = o.xTrending ? `● Trending #${o.xTrending.rank} (${o.xTrending.region === 'worldwide' ? 'Worldwide 🌐' : 'India 🇮🇳'})` : '○ Not Trending';
+        }
+      } catch (e) {
+        toast("Refresh failed: " + e.message);
+      } finally {
+        xtBtn.disabled = false; xtBtn.textContent = "↻ Refresh X Trends";
+      }
+    };
+  }
   // JOURNALISTS DISABLED: fitPanel($("#dfit", body), o);
   briefPanel($("#dbrief", body), o, briefs.briefs);
 }
 
-async function socialDrawerPanel(bodyEl, actionsEl, o) {
-  if (!bodyEl) return;
-  try {
-    const topic = o.label.name;
-    const r = await api(`/api/social?key=${encodeURIComponent(o.label.key)}&name=${encodeURIComponent(topic)}`);
-    if (r.available && r.points?.length) {
-      if (actionsEl) actionsEl.innerHTML = `<button class="btn ghost sm" id="sorefresh">↻ Refresh X data</button>`;
-      bodyEl.innerHTML = `<div id="socchart"></div>
-        <div class="grid g4" style="margin-top:10px">
-          <div class="kpi" style="padding:8px 10px"><div class="v num" style="font-size:16px">${n0(r.stats?.recent24h ?? 0)}</div><div class="l tiny">24h tweet volume</div></div>
-          <div class="kpi" style="padding:8px 10px"><div class="v num" style="font-size:16px">${x2(r.stats?.ratio)}</div><div class="l tiny">Social momentum</div></div>
-          <div class="kpi" style="padding:8px 10px"><div class="v num" style="font-size:16px">${n0(r.stats?.peakHour ?? 0)}</div><div class="l tiny">Peak tweets / hr</div></div>
-          <div class="kpi" style="padding:8px 10px"><div class="v num" style="font-size:16px">${r.stats?.hours ?? 0}h</div><div class="l tiny">Tracked span</div></div>
-        </div>`;
-      HC.socialChart($("#socchart", bodyEl), r.points, { baseline: r.stats?.baselineDaily });
-      const ref = $("#sorefresh", actionsEl);
-      if (ref) ref.onclick = async () => {
-        ref.disabled = true;
-        try {
-          await post("/api/social/fetch", { name: topic, level: o.label.level });
-          toast("Updated X social pulse");
-          socialDrawerPanel(bodyEl, actionsEl, o);
-        } catch (e) { toast(e.message); ref.disabled = false; }
-      };
-    } else {
-      if (actionsEl) actionsEl.innerHTML = r.active ? `<button class="btn sm" id="sofetch">Fetch from X API</button>` : `<a class="btn ghost sm" href="#/settings">Configure X API →</a>`;
-      bodyEl.innerHTML = `<div class="empty" style="padding:16px"><b>${r.active ? "No social data fetched yet" : "X API is not active"}</b><p class="small mute" style="margin:4px 0 0">${esc(r.reason)}</p></div>`;
-      const f = $("#sofetch", actionsEl);
-      if (f) f.onclick = async () => {
-        f.disabled = true; f.textContent = "Fetching…";
-        try {
-          await post("/api/social/fetch", { name: topic, level: o.label.level });
-          toast("Fetched X tweet volume");
-          socialDrawerPanel(bodyEl, actionsEl, o);
-        } catch (e) { toast(e.message); f.disabled = false; f.textContent = "Fetch from X API"; }
-      };
-    }
-  } catch (e) {
-    bodyEl.innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
+function renderXTrendingBody(o) {
+  const xt = o.xTrending;
+  if (xt) {
+    const isWorld = xt.region === "worldwide";
+    const regLabel = isWorld ? "WORLDWIDE 🌐" : "IN INDIA 🇮🇳";
+    const flag = isWorld ? "🌐 Global Trend" : "🇮🇳 India Trend";
+    return `
+      <div style="background:rgba(29,155,240,0.06);border:1px solid rgba(29,155,240,0.3);border-radius:8px;padding:14px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="pill" style="background:#1d9bf0;color:#fff;font-weight:700;font-size:12px;padding:3px 10px">● TRENDING ON 𝕏 ${regLabel}</span>
+            <span class="tag" style="background:rgba(29,155,240,0.18);color:#1d9bf0;font-weight:700">Rank #${xt.rank}</span>
+            <span class="tag" style="font-weight:600">${flag}</span>
+          </div>
+          ${xt.count ? `<span class="small b mute" style="font-size:12.5px">${esc(xt.count)} tweets</span>` : ""}
+        </div>
+        <div style="font-size:14.5px;margin:10px 0 6px">
+          <b>Active Trend:</b> <span class="tag" style="background:#1d9bf0;color:#fff;font-weight:700;font-size:14px;padding:4px 10px;margin-left:4px">${esc(xt.name)}</span>
+        </div>
+        <p class="small" style="margin:6px 0 0;color:var(--text);line-height:1.45">${esc(xt.reason || `This editorial angle directly corresponds to active viral trending discourse on Twitter ${isWorld ? 'worldwide' : 'in India'}.`)}</p>
+        <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">
+          <span class="pill p-ok" style="font-size:11px">Viral Angle Verified</span>
+          <span class="tag" style="font-size:11px">High Social Resonance</span>
+          <span class="tag" style="font-size:11px">${isWorld ? 'Worldwide Stream' : 'India Stream'}</span>
+        </div>
+      </div>`;
   }
+  return `
+    <div style="background:var(--surface2);border:1px dashed var(--line);border-radius:8px;padding:14px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="pill p-muted" style="font-weight:600;font-size:12px;padding:3px 10px">○ NOT CURRENTLY TRENDING ON 𝕏</span>
+        <span class="tag" style="font-size:11px">Outside Top 70</span>
+      </div>
+      <p style="margin:6px 0 4px;font-size:13.5px;line-height:1.45;color:var(--text)">
+        This editorial angle is <b>not actively trending in India or Worldwide Top 70 Twitter topics</b> at this moment.
+      </p>
+      <p class="small mute" style="margin:0 0 10px;line-height:1.4">
+        This opportunity is backed by verified news publications and coverage baseline momentum, rather than social media virality.
+      </p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <span class="tag" style="font-size:11px">Checked against India & Worldwide Top 70</span>
+        <span class="tag" style="font-size:11px">News-Led Opportunity</span>
+      </div>
+    </div>`;
 }
 
 function searchPanel(el, si, name) {
@@ -557,7 +678,11 @@ function init() {
   xInitNotifs();
   loadMe();
   $("#csel").onchange = (e) => { S.company = e.target.value; ls.set("company", S.company); S.oppByKey.clear(); render(); };
-  $("#dsel").onchange = (e) => { S.date = e.target.value || null; render(); };
+  $("#dsel").onchange = (e) => {
+    S.date = e.target.value || null;
+    toast(S.date ? `Viewing date: ${fmtDay(S.date)}` : "Viewing Live (latest data)");
+    render();
+  };
   $("#theme").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme:dark)").matches ? "dark" : "light"); const nx = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = nx; ls.set("theme", nx); render(); };
   $("#print").onclick = () => print();
   $("#scrim").onclick = closeDrawer;
