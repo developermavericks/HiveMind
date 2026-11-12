@@ -170,7 +170,7 @@ test("auth: cross-site and header-less state changes are refused; every response
     assert.match(r.headers.get("content-security-policy"), /frame-ancestors 'none'/);
     assert.equal(r.headers.get("x-frame-options"), "DENY");
     assert.equal(r.headers.get("x-content-type-options"), "nosniff");
-    assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(r.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
     assert.equal(r.headers.get("cache-control"), "no-store");
     assert.ok((await t.call("GET", "/api/status")).headers.get("content-security-policy")); // on API errors too
     // a non-JSON body is not accepted for an admin write

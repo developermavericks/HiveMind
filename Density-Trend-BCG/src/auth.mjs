@@ -340,11 +340,11 @@ export function createAuth({ store, log = () => {}, root }) {
   };
   const clearFailures = (email, user) => { emailFails.delete(email); if (user) db.prepare("UPDATE users SET failed_count = 0, locked_until = NULL WHERE id = ?").run(user.id); };
 
-  // ---- Single-Session Login Enforcement
+  // ---- Session creation
   const createSession = (req, userId) => {
-    // Invalidate any previous active sessions for this user (Single Session Login)
-    db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
-
+    if (process.env.HIVEMIND_SINGLE_SESSION === "1") {
+      db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    }
     const token = randomBytes(32).toString("base64url"), now = Date.now();
     const ua = String(req.headers["user-agent"] || "").slice(0, 200);
     db.prepare("INSERT INTO sessions (id_hash, user_id, created_at, last_seen, expires_at, ip, ua) VALUES (?, ?, ?, ?, ?, ?, ?)")

@@ -110,7 +110,7 @@ const stackLegend = () => `<div class="legend">${Object.keys(COMP).map((k) => `<
 
 // ---------------------------------------------------------------- shell
 function requestGeoLocation() {
-  if ("geolocation" in navigator && !sessionStorage.getItem("geo_checked")) {
+  if (window.HIVEMIND_ENABLE_GEO && "geolocation" in navigator && !sessionStorage.getItem("geo_checked")) {
     sessionStorage.setItem("geo_checked", "1");
     navigator.geolocation.getCurrentPosition(
       (pos) => {
