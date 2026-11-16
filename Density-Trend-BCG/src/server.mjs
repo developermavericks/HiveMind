@@ -35,6 +35,7 @@ import { usageReport } from "./usage.mjs";
 import { writeFileAtomic } from "./atomic.mjs";
 import { createAuth, setSecurityHeaders, resolveClientMetadata, recordActivity, inferAction, isHttps, clientIp } from "./auth.mjs";
 import { getPgPool, initPgSchema } from "./pg.mjs";
+import { checkExportKey, exportIndex, exportPage } from "./export.mjs";
 
 const MAX_BODY = 1_000_000;
 const LIVE_FRESH_MS = 90_000; // a run that hasn't touched the database for this long is treated as stopped
@@ -719,6 +720,21 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (!allowedHosts.has(oh)) return json(res, 403, { error: "Origin not allowed" });
     }
     try {
+      // Data export for other systems: its own secret key (HIVEMIND_EXPORT_KEY), read-only, answered before the website sign-in (see export.mjs).
+      if (p === "/api/export" || p.startsWith("/api/export/")) {
+        if (req.method !== "GET") return json(res, 405, { error: "Read-only: use GET" });
+        const denied = checkExportKey(req);
+        if (denied) return json(res, denied.code, { error: denied.error });
+        if (p === "/api/export" || p === "/api/export/") return json(res, 200, exportIndex(store.db));
+        if (p.startsWith("/api/export/views/")) {
+          const r = ROUTES["/api/" + p.slice("/api/export/views/".length)];
+          if (!r) return json(res, 404, { error: "Unknown view. GET /api/export lists them." });
+          const v = r(url, company);
+          return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args);
+        }
+        const out = exportPage(store.db, p.slice("/api/export/".length), url.searchParams);
+        return json(res, out.code, out.body);
+      }
       if (authz ? await authz.handle(req, res, url, p) : p === "/login" && req.method === "GET" && (res.writeHead(302, { location: "/" }), res.end(), true)) return; // sign-in gate (see auth.mjs)
 
       // Client isolation: normal users are strictly scoped to their assigned company
