@@ -80,6 +80,11 @@ test("export: index, paging, incremental sync, JSON decoding, private tables abs
     // JSON text comes back as JSON
     const rd = await (await t.get("/api/export/readings")).json();
     assert.deepEqual(rd.rows[0].analysis, { what: "x", impacts: [] });
+    // reference data: brackets, companies (BCG is built in), trends
+    assert.ok((await (await t.get("/api/export/brackets")).json()).brackets.length > 0);
+    assert.ok((await (await t.get("/api/export/companies")).json()).companies.some((c) => c.id === "bcg"));
+    assert.equal((await t.get("/api/export/xtrends")).status, 200);
+    assert.equal((await t.get("/api/export/brackets", null)).status, 401);
     assert.equal((await t.get("/api/export/nope")).status, 404);
     assert.equal((await t.get("/api/export/views/nope")).status, 404);
   } finally { t.close(); }

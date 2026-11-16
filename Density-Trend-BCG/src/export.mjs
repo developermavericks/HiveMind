@@ -23,6 +23,7 @@ export const DATASETS = {
   articles:           { table: "articles",           key: ["url"],                       changed: "COALESCE(first_seen, published_at)",                 about: "Every headline (one per outlet), pointing at its story" },
   readings:           { table: "readings",           key: ["key"],                       changed: "read_at",                                            about: "AI reading of each story: what happened, impacts, keyword brackets" },
   reading_versions:   { table: "reading_versions",   key: ["key", "at"],                 changed: "at",                                                 about: "Earlier versions of readings" },
+  reading_reviews:    { table: "reading_reviews",    key: ["key", "model"],              changed: "at",                                                 about: "Second-opinion reviews of readings by another model" },
   enrichments:        { table: "enrichments",        key: ["key"],                       changed: "MAX(enriched_at, COALESCE(sentiment_at, 0))",        about: "Per story: entities, topics, pathways, sentiment, stance, wire, content type" },
   topics:             { table: "topics",             key: ["id"],                        changed: "MAX(created_at, COALESCE(merged_at, 0))",            about: "Topics, their bracket, aliases and merges" },
   topic_checks:       { table: "topic_checks",       key: ["story_key", "topic_id"],     changed: "at",                                                 about: "Whether a story fits a topic, and why" },
@@ -90,6 +91,11 @@ export function exportIndex(db) {
   return {
     server_time: Date.now(),
     datasets,
+    reference: {
+      "/api/export/brackets": "Keyword brackets (BCG impact categories) with descriptions, keywords and story counts",
+      "/api/export/companies": "Companies and their sectors (BCG practice areas), with topic matches",
+      "/api/export/xtrends": "Latest Twitter/X trends (India and worldwide) as last collected",
+    },
     views: ["overview", "opportunities", "leadership", "labels", "sentiment", "entities", "sources", "origins", "series", "topic", "opportunity", "backtest"].map((v) => `/api/export/views/${v}`),
     usage: {
       auth: "Send the key in the X-API-Key header (or Authorization: Bearer <key>).",

@@ -726,6 +726,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const denied = checkExportKey(req);
         if (denied) return json(res, denied.code, { error: denied.error });
         if (p === "/api/export" || p === "/api/export/") return json(res, 200, exportIndex(store.db));
+        if (p === "/api/export/brackets") return json(res, 200, readJson(join(root, "data", "brackets-v3.json"), { brackets: seed }));
+        if (p === "/api/export/companies") return json(res, 200, { companies: companies.list() });
+        if (p === "/api/export/xtrends") return json(res, 200, store.getJson("social.xtrends.cache", null) ?? { india: [], worldwide: [], fetchedAt: null });
         if (p.startsWith("/api/export/views/")) {
           const r = ROUTES["/api/" + p.slice("/api/export/views/".length)];
           if (!r) return json(res, 404, { error: "Unknown view. GET /api/export lists them." });
