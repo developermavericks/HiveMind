@@ -12,18 +12,105 @@ async function pgMomentum(el) {
   }
   if (!S.sel || !rows.some((r) => r.key === S.sel)) { S.sel = rows[0].key; S.compare.clear(); }
   const cur = rows.find((r) => r.key === S.sel);
+  const chartView = S.chartView || ls.get("chartView") || "momentum";
+  S.chartView = chartView;
+
   el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="ctl">${levelSeg()}
     <div class="seg" id="gseg"><button data-g="hour" class="${S.gran === "hour" ? "on" : ""}">Hourly</button><button data-g="day" class="${S.gran === "day" ? "on" : ""}">Daily</button></div>
     <label>Topic <select id="tsel" style="max-width:340px">${rows.map((r) => `<option value="${esc(r.key)}"${r.key === S.sel ? " selected" : ""}>${esc(r.name)} · ${x2(r.ratio)} · ${r.stage === "watch" ? "watchlist" : r.stage}</option>`).join("")}</select></label>
     <span class="mute small">As of ${dt(L.asOf)} · recent window ${L.params.recentHours}h vs ${L.history.baselineHours}h baseline</span></div></div>
   <div class="grid g-8-4">
-    <div class="card"><div class="sec-h" style="margin:0"><div><h3 id="mname"></h3><p class="hint" style="margin:0">Use hourly for breaking events and daily for longer themes.</p></div><div id="mstage"></div></div>
-      <div class="cl" id="mleg"></div><div class="chart" id="mchart"><div class="skel" style="height:300px"></div></div><div id="mline"></div>
-      <div class="ctl" style="margin-top:8px" id="mtog"></div><div id="mcmp" class="ctl" style="margin-top:6px"></div><p class="small mute" id="mrule" style="margin:8px 0 0"></p></div>
-    <div class="grid" style="align-content:start"><div class="card"><h3>Current metrics</h3><div id="mkpi"></div></div><div class="card" id="msi"></div><div class="card" id="msoc"></div></div>
+    <div class="card">
+      <div class="sec-h" style="margin:0 0 8px">
+        <div><h3 id="mname"></h3><p class="hint" style="margin:0">Use hourly for breaking events and daily for longer themes.</p></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="chart-view-seg" id="cviewseg">
+            <button data-cv="momentum" class="${chartView === "momentum" ? "on" : ""}" title="Volume bars, coverage share line &amp; confidence band forecast">📈 Forecast &amp; Momentum</button>
+            <button data-cv="candlestick" class="${chartView === "candlestick" ? "on" : ""}" title="Candlestick OHLC coverage share surges &amp; volume">🕯️ Candlestick</button>
+            <button data-cv="both" class="${chartView === "both" ? "on" : ""}" title="View both charts stacked">📊 Stacked</button>
+          </div>
+          <div id="mstage"></div>
+        </div>
+      </div>
+      <div class="cl" id="mleg"></div>
+      <div class="chart" id="mchart"><div class="skel" style="height:300px"></div></div>
+      <div id="mline"></div>
+      <div class="ctl" style="margin-top:8px" id="mtog"></div><div id="mcmp" class="ctl" style="margin-top:6px"></div><p class="small mute" id="mrule" style="margin:8px 0 0"></p>
+    </div>
+    <div class="grid" style="align-content:start" id="mrightcol">
+      <!-- Adjacent stories card for candle click (sits adjacent to the chart) -->
+      <div class="card" id="mcandlestories" style="display:none;border:1.5px solid var(--brand);background:var(--surface);padding:16px 18px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <div class="tiny mute b" style="letter-spacing:.05em;text-transform:uppercase">Interval Coverage Stories</div>
+            <h3 id="mcandletitle" style="font-size:15px;margin:2px 0 0;color:var(--ink)">Stories Behind Candle</h3>
+          </div>
+          <button class="btn ghost sm" id="mcandleclose" title="Dismiss adjacent view" style="padding:2px 8px;font-size:12px;cursor:pointer">✕ Close</button>
+        </div>
+        <div id="mcandlesub" class="small" style="margin-bottom:10px"></div>
+        <div id="mcandlelist" style="max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:2px"></div>
+      </div>
+
+      <div class="card" id="mkpicard"><h3>Current metrics</h3><div id="mkpi"></div></div>
+      <div class="card" id="msi"></div>
+      <div class="card" id="msoc"></div>
+    </div>
   </div>
-  <div class="grid g-5-7" style="margin-top:16px"><div class="card"><h3>Recent evidence</h3><div id="mev"><div class="skel"></div></div></div>
-    <div class="card flush" style="position:sticky;top:76px;align-self:start"><div style="padding:16px 16px 0"><h3>Momentum board</h3><p class="hint">Every topic ranked by momentum. Click a row to chart it.</p></div><div class="tw" style="max-height:calc(100vh - 230px)"><table class="t"><thead><tr><th>Topic</th><th>Stage</th><th class="r">Momentum${info("momentum")}</th><th class="r">Accel.${info("accel")}</th><th class="r">Share${info("share")}</th><th>Trend</th><th class="r">Origins${info("origins")}</th><th>Evidence</th></tr></thead><tbody>${rows.map((r) => `<tr class="click${r.key === S.sel ? " sel" : ""}" data-topic="${esc(r.key)}"><td class="b">${esc(r.name)}${r.parentName ? ` <span class="mute tiny">${esc(r.parentName)}</span>` : ""}</td><td>${stagePill(r.stage)}</td><td class="r num b">${x2(r.ratio)}</td><td class="r num">${r.accel == null ? "–" : (r.accel >= 0 ? "+" : "") + r.accel.toFixed(2)}</td><td class="r num">${pct(r.share)}</td><td>${spark(r.spark)}</td><td class="r num">${originsLink(r.originsRecent, r.key, r.name)}</td><td>${evPill(r.evidence)}</td></tr>`).join("")}</tbody></table></div></div></div>`;
+
+  <div class="grid g-5-7" style="margin-top:16px">
+    <div>
+      <!-- Story tracking summary -->
+      <div class="card" style="margin-bottom:14px">
+        <div class="sec-h" style="margin:0 0 6px">
+          <div>
+            <h3 style="margin:0;font-size:15px;display:flex;align-items:center;gap:6px">📊 Story Tracking &amp; Publication Reach</h3>
+            <p class="hint" style="margin:2px 0 0">Tracking coverage density, news velocity and publication reach across India and global media.</p>
+          </div>
+        </div>
+        <div class="story-tracker-bar" id="mtracker"></div>
+        <div id="moutlets" class="small mute"></div>
+      </div>
+
+      <!-- Specific-Based News & Geographical Intelligence -->
+      <div class="card" style="margin-bottom:14px">
+        <div class="sec-h" style="margin:0 0 6px">
+          <div>
+            <h3 style="margin:0;font-size:15px;display:flex;align-items:center;gap:6px">📍 Specific News &amp; Geographical Breakdown</h3>
+            <p class="hint" style="margin:2px 0 0">Filter from broad worldwide trends down to city-specific events (e.g. Mumbai, Delhi) and tailored editorial angles.</p>
+          </div>
+          <span class="small b" id="mactivefilter"></span>
+        </div>
+        <div class="geo-filter-bar" id="mgeobar"></div>
+        <div id="meventclusters"></div>
+      </div>
+
+      <!-- Evidence Stories -->
+      <div class="card">
+        <div class="sec-h" style="margin:0 0 8px">
+          <div>
+            <h3 id="mevtitle">Evidence Stories</h3>
+            <p class="hint" id="mevsubtitle" style="margin:0">Most significant verified stories in the window.</p>
+          </div>
+          <button class="btn ghost sm" id="mclearfilter" style="display:none">Show All Stories</button>
+        </div>
+        <div id="mev"><div class="skel"></div></div>
+      </div>
+    </div>
+
+    <!-- Momentum board -->
+    <div class="card flush" style="position:sticky;top:76px;align-self:start">
+      <div style="padding:16px 16px 0"><h3>Momentum board</h3><p class="hint">Every topic ranked by momentum. Click a row to chart it.</p></div>
+      <div class="tw" style="max-height:calc(100vh - 230px)">
+        <table class="t">
+          <thead><tr><th>Topic</th><th>Stage</th><th class="r">Momentum${info("momentum")}</th><th class="r">Accel.${info("accel")}</th><th class="r">Share${info("share")}</th><th>Trend</th><th class="r">Origins${info("origins")}</th><th>Evidence</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `<tr class="click${r.key === S.sel ? " sel" : ""}" data-topic="${esc(r.key)}"><td class="b">${esc(r.name)}${r.parentName ? ` <span class="mute tiny">${esc(r.parentName)}</span>` : ""}</td><td>${stagePill(r.stage)}</td><td class="r num b">${x2(r.ratio)}</td><td class="r num">${r.accel == null ? "–" : (r.accel >= 0 ? "+" : "") + r.accel.toFixed(2)}</td><td class="r num">${pct(r.share)}</td><td>${spark(r.spark)}</td><td class="r num">${originsLink(r.originsRecent, r.key, r.name)}</td><td>${evPill(r.evidence)}</td></tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+
   bindLevelSeg();
   $$("#gseg button").forEach((b) => (b.onclick = () => { S.gran = b.dataset.g; ls.set("gran", S.gran); render(); }));
   $("#tsel").onchange = (e) => { S.sel = e.target.value; S.compare.clear(); render(); };
@@ -33,13 +120,142 @@ async function pgMomentum(el) {
   $("#mstage").innerHTML = `${stagePill(cur.stage)} ${evPill(cur.evidence)}`;
   $("#mrule").innerHTML = `<b>Stage rule:</b> ${esc(cur.stageRule)}`;
   $("#mkpi").innerHTML = [["Coverage share", pct(cur.share), `baseline ${pct(cur.baseShare)}`], ["Momentum", x2(cur.ratio), `previous step ${x2(cur.ratioPrev)}`], ["Acceleration", cur.accel == null ? "–" : (cur.accel >= 0 ? "+" : "") + cur.accel.toFixed(2), "Δ log₂ momentum"], ["Coverage volume", cur.count, `of ${n0(cur.total)} stories in ${cur.windowHours}h`], ["Independent origins", cur.originsRecent, `${cur.originsTotal} over the whole window`], ["Impact breadth", cur.areaCount, (cur.areas || []).slice(0, 3).join(", ") || "impact areas"]].map(([l, v, s]) => `<div class="compo" style="grid-template-columns:150px 1fr"><span>${lbl(l, { ...DRAWER_TIP, "Coverage volume": "stories" }[l])}</span><span><b class="num">${l === "Independent origins" ? originsLink(v, cur.key, cur.name) : v}</b> <span class="mute tiny">${esc(s)}</span></span></div>`).join("");
+
   const sels = [S.sel, ...S.compare];
-  const [ser, top] = await Promise.all([api(`/api/series?keys=${sels.map(encodeURIComponent).join(",")}&gran=${S.gran}${S.date ? `&date=${S.date}` : ""}`), api(`/api/topic?${qs(`&key=${encodeURIComponent(S.sel)}`)}`)]);
+  const [ser, top] = await Promise.all([
+    api(`/api/series?keys=${sels.map(encodeURIComponent).join(",")}&gran=${S.gran}${S.date ? `&date=${S.date}` : ""}`),
+    api(`/api/topic?${qs(`&key=${encodeURIComponent(S.sel)}`)}`),
+  ]);
   const main = ser.series[S.sel], cmps = [...S.compare].map((k) => ({ name: ser.series[k]?.name ?? k, s: ser.series[k] })).filter((c) => c.s);
-  const draw = () => {
-    momentum($("#mchart"), main, { compare: cmps, show: S.show });
-    $("#mleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>coverage volume (stories)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>${main.rollingWindow}${S.gran === "day" ? "-day" : "h"} rolling average</span>${cmps.map((c, i) => `<span><i class="ln" style="background:${HC.PAL[i % 4]}"></i>${esc(c.name)} (share)</span>`).join("")}<span><i class="dash"></i>forecast ${main.forecast?.validated ? "(validated)" : "(unvalidated)"}</span><span>◆ verified trigger</span>`;
+
+  // ---- Specific News & Geographical Breakdown ----
+  let allStories = top.allStories || top.stories || [];
+  let curGeo = "all";
+  let curEventId = null;
+
+  const renderStories = (list, subtitle = "Most significant verified stories in the window.") => {
+    $("#mevsubtitle").textContent = subtitle;
+    $("#mev").innerHTML = list.map((s) => `
+      <div class="story">
+        <a class="h" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>
+        <div style="margin:3px 0">
+          ${s.verified ? `<span class="pill p-ok">verified</span> ` : ""}
+          ${s.primary ? `<span class="pill p-high">primary source</span> ` : ""}
+          ${s.sentiment ? `<span class="tag" style="background:${s.sentiment === "negative" ? "rgba(242,54,69,0.12);color:#f23645" : "rgba(8,153,129,0.12);color:#089981"};font-weight:600">${esc(s.sentiment)}</span> ` : ""}
+          ${s.geography?.length ? `<span class="tag" style="background:var(--brand-soft);color:var(--brand);font-weight:600">📍 ${s.geography.map(esc).join(", ")}</span>` : ""}
+          <span class="tag">${s.outlets} outlet${s.outlets > 1 ? "s" : ""} → ${s.origins} origin${s.origins > 1 ? "s" : ""}</span>
+          <span class="tag">${s.fullText ? "full text" : "headline only"}</span>
+          ${s.contentType ? `<span class="tag">${esc(s.contentType)}</span>` : ""}
+          <span class="tag">${dt(s.publishedAt)}</span>
+        </div>
+        ${s.summary ? `<div class="small mute">${esc(s.summary)}</div>` : ""}
+      </div>
+    `).join("") || `<span class="mute">No stories found for this specific filter.</span>`;
   };
+
+  const handleCandleStoryFilter = (candle, idx, ser) => {
+    if (!candle) return;
+    const binMs = main.binMs || (S.gran === "day" ? 86400e3 : 3600e3);
+    const tFrom = candle.t, tTo = candle.t + binMs;
+    let candleStories = candle.stories || [];
+    if (!candleStories.length) {
+      candleStories = allStories.filter((s) => s.publishedAt >= tFrom && s.publishedAt < tTo);
+    }
+
+    const timeLabel = fmtT(candle.t, S.gran);
+    const isNeg = candle.sentiment === "negative" || (candle.sentimentNet != null && candle.sentimentNet < 0);
+    const sentText = candle.sentiment || (isNeg ? "negative" : "positive / neutral");
+
+    // 1. Populate and show ADJACENT stories panel right next to the chart
+    const adjCard = $("#mcandlestories");
+    const adjTitle = $("#mcandletitle");
+    const adjSub = $("#mcandlesub");
+    const adjList = $("#mcandlelist");
+    const adjClose = $("#mcandleclose");
+    const filterIndicator = $("#mactivefilter");
+    const clearBtn = $("#mclearfilter");
+
+    if (adjCard && adjTitle && adjList) {
+      adjTitle.innerHTML = `Stories on ${esc(timeLabel)} <span class="badge" style="background:var(--brand);color:#fff;margin-left:4px;font-size:11px">${candleStories.length}</span>`;
+      adjSub.innerHTML = `
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+          <span class="tag b">📊 Share: ${pct(candle.close)}</span>
+          <span class="tag">📦 Vol: ${candle.volume || candleStories.length} stor${(candle.volume || candleStories.length) === 1 ? "y" : "ies"}</span>
+          <span class="tag" style="background:${isNeg ? 'rgba(242,54,69,0.12);color:#f23645' : 'rgba(8,153,129,0.12);color:#089981'};font-weight:700">${esc(sentText)}</span>
+          ${candle.isHammer ? '<span class="tag">🔨 Hammer</span>' : ''}
+        </div>
+      `;
+
+      adjList.innerHTML = candleStories.map((s) => `
+        <div class="story-item" style="padding:10px 12px;background:var(--surface2);border:1px solid var(--line);border-radius:8px">
+          <a class="h" href="${esc(s.url)}" target="_blank" rel="noopener" style="font-weight:600;font-size:13px;line-height:1.35;color:var(--brand);display:block">${esc(s.title)}</a>
+          <div style="margin:4px 0 2px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+            ${s.sentiment ? `<span class="tag" style="background:${s.sentiment === "negative" ? "rgba(242,54,69,0.12);color:#f23645" : "rgba(8,153,129,0.12);color:#089981"};font-weight:700;font-size:10px">${esc(s.sentiment)}</span>` : ""}
+            ${s.verified ? `<span class="pill p-ok" style="font-size:10px;padding:1px 6px">verified</span>` : ""}
+            ${s.primary ? `<span class="pill p-high" style="font-size:10px;padding:1px 6px">primary</span>` : ""}
+            ${s.geography?.length ? `<span class="tag" style="background:var(--brand-soft);color:var(--brand);font-weight:600;font-size:10px">📍 ${s.geography.map(esc).join(", ")}</span>` : ""}
+            <span class="tag" style="font-size:10px">${s.outlets || 1} outlet${(s.outlets || 1) > 1 ? "s" : ""}</span>
+            <span class="tag mute" style="font-size:10px">${dt(s.publishedAt)}</span>
+          </div>
+          ${s.summary ? `<div class="small mute" style="margin-top:4px;line-height:1.35">${esc(clip(s.summary, 130))}</div>` : ""}
+        </div>
+      `).join("") || `<div class="empty" style="padding:16px">No explicit stories recorded for this interval (baseline extrapolation).</div>`;
+
+      adjCard.style.display = "";
+
+      if (adjClose) {
+        adjClose.onclick = () => {
+          adjCard.style.display = "none";
+          document.querySelectorAll(".candle-selection-highlight").forEach((el) => el.remove());
+          if (clearBtn) clearBtn.style.display = "none";
+          if (filterIndicator) filterIndicator.innerHTML = "";
+          renderStories(allStories, "Most significant verified stories across all locations.");
+          const mevTitle = $("#mevtitle");
+          if (mevTitle) mevTitle.textContent = "Evidence Stories";
+        };
+      }
+    }
+
+    // 2. Also keep the lower Evidence Stories in sync (WITHOUT scrolling down)
+    if (filterIndicator) {
+      filterIndicator.innerHTML = `<span class="pill p-ok" style="background:var(--brand);color:#fff">🕯️ Candle: ${esc(timeLabel)} (${candleStories.length} stories)</span>`;
+    }
+    if (clearBtn) clearBtn.style.display = "";
+
+    const mevTitle = $("#mevtitle");
+    if (mevTitle) mevTitle.textContent = `Stories Behind Selected Candle · ${esc(timeLabel)}`;
+    renderStories(
+      candleStories,
+      `Showing ${candleStories.length} stories recorded for ${timeLabel} (Coverage Share: ${pct(candle.close)}, Volume: ${candle.volume || candleStories.length} stories).`
+    );
+
+    // Adjacent display visible right next to chart - no scrolling down needed!
+    toast(`Viewing ${candleStories.length} stories adjacent to chart for ${timeLabel}`);
+  };
+
+  const draw = () => {
+    const cv = S.chartView || "momentum";
+    if (cv === "candlestick") {
+      HC.candlestick($("#mchart"), main, { show: S.show, onCandleClick: handleCandleStoryFilter });
+      $("#mleg").innerHTML = `<span><i style="background:#089981;border-radius:2px"></i>Positive &amp; Neutral (Green)</span><span><i style="background:#f23645;border-radius:2px"></i>Negative (Red)</span><span><i style="background:#f23645;border-radius:2px"></i>🔨 Hammer (Volume decline)</span><span><i class="ln" style="background:#2962ff"></i>MA(7) Trend</span><span><i class="dash"></i>Forecast 72h</span><span>◆ Verified Trigger</span>`;
+    } else if (cv === "both") {
+      $("#mchart").innerHTML = `<div id="mch-mom" style="margin-bottom:16px"></div><div class="sec-h" style="margin:14px 0 6px"><h4 style="margin:0;font-size:13px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em">Candlestick Coverage Momentum (OHLC)</h4></div><div id="mch-cand"></div>`;
+      HC.momentum($("#mch-mom"), main, { compare: cmps, show: S.show, onCandleClick: handleCandleStoryFilter });
+      HC.candlestick($("#mch-cand"), main, { show: S.show, onCandleClick: handleCandleStoryFilter });
+      $("#mleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>stories volume</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i style="background:#089981"></i>positive</span><span><i style="background:#f23645"></i>negative</span><span><i style="background:#f23645"></i>🔨 hammer</span><span><i class="dash"></i>forecast</span>`;
+    } else {
+      HC.momentum($("#mchart"), main, { compare: cmps, show: S.show, onCandleClick: handleCandleStoryFilter });
+      $("#mleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>coverage volume (stories)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>${main.rollingWindow}${S.gran === "day" ? "-day" : "h"} rolling average</span>${cmps.map((c, i) => `<span><i class="ln" style="background:${HC.PAL[i % 4]}"></i>${esc(c.name)} (share)</span>`).join("")}<span><i class="dash"></i>forecast ${main.forecast?.validated ? "(validated)" : "(unvalidated)"}</span><span>◆ verified trigger</span>`;
+    }
+  };
+
+  $$("#cviewseg button").forEach((b) => (b.onclick = () => {
+    S.chartView = b.dataset.cv;
+    ls.set("chartView", S.chartView);
+    $$("#cviewseg button").forEach((x) => x.classList.toggle("on", x === b));
+    draw();
+  }));
+
   $("#mtog").innerHTML = [["bars", "Volume bars"], ["share", "Coverage share"], ["avg", "Rolling average"], ["forecast", "Forecast"]].map(([k, l]) => `<label class="chk"><input type="checkbox" data-sh="${k}" ${S.show[k] ? "checked" : ""}> ${l}</label>`).join("") + (main.forecast.available ? "" : `<span class="small mute">Forecast unavailable: ${esc(main.forecast.reason)}</span>`);
   $$("[data-sh]").forEach((c) => (c.onchange = () => { S.show[c.dataset.sh] = c.checked; draw(); }));
   $("#mcmp").innerHTML = `<span class="small mute">Compare with:</span>${(top.related ?? []).slice(0, 6).map((r) => `<label class="chk"><input type="checkbox" data-cmp="${esc(r.key)}" ${S.compare.has(r.key) ? "checked" : ""}> ${esc(r.name)}</label>`).join("") || `<span class="small mute">no overlapping topics</span>`}`;
@@ -48,7 +264,266 @@ async function pgMomentum(el) {
   $("#mline").innerHTML = xForecastLine(main, { ...cur, baselineHours: L.history?.baselineHours });
   $("#mrule").innerHTML += ` ${xSeasonChip(top.seasonality)}`;
   if (top.sentiment) $("#mkpi").insertAdjacentHTML("beforeend", `<div style="margin-top:10px"><span class="tiny mute b">SENTIMENT${info("sentimentNet")}</span>${xSentStrip(top.sentiment)}</div>`);
-  $("#mev").innerHTML = top.stories.map((s) => `<div class="story"><a class="h" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a><div style="margin:3px 0">${s.verified ? `<span class="pill p-ok">verified</span> ` : ""}${s.primary ? `<span class="pill p-high">primary source</span> ` : ""}<span class="tag">${s.outlets} outlets → ${s.origins} origin${s.origins > 1 ? "s" : ""}</span><span class="tag">${s.fullText ? "full text" : "headline only"}</span>${s.contentType ? `<span class="tag">${esc(s.contentType)}</span>` : ""}<span class="tag">${dt(s.publishedAt)}</span></div>${s.summary ? `<div class="small mute">${esc(s.summary)}</div>` : ""}</div>`).join("") || `<span class="mute">No stories in the last 72h.</span>`;
+
+  // ---- Story Tracking & Velocity ----
+  const trk = top.storyTracking || {};
+  $("#mtracker").innerHTML = `
+    <div class="story-tracker-pill"><span class="num">${n0(trk.totalCount ?? cur.count)}</span> <span>Total Stories Tracked</span></div>
+    <div class="story-tracker-pill"><span class="num">${n0(trk.recent72hCount ?? cur.count)}</span> <span>Last 72 Hours</span></div>
+    <div class="story-tracker-pill ${trk.growth24h != null && trk.growth24h > 0 ? "growth" : ""}"><span class="num">${n0(trk.recent24hCount ?? 0)}</span> <span>Last 24h ${trk.growth24h != null ? `(${trk.growth24h >= 0 ? "+" : ""}${trk.growth24h}% surge)` : ""}</span></div>
+    <div class="story-tracker-pill"><span class="num">${trk.outletsCount ?? 0}</span> <span>News Publications</span></div>
+    <div class="story-tracker-pill"><span class="num">${cur.originsRecent ?? 0}</span> <span>Independent Origins</span></div>
+  `;
+  if (trk.topOutlets?.length) {
+    $("#moutlets").innerHTML = `<b>Top reporting outlets:</b> ${trk.topOutlets.map((o) => `${esc(o.name)} <span class="mute">(${o.count})</span>`).join(" · ")}`;
+  }
+
+  renderStories(allStories);
+
+  // Render Geo Pills
+  const geos = top.geoBreakdown || [];
+  const geoBar = $("#mgeobar");
+  geoBar.innerHTML = `
+    <button class="geo-pill active" data-geo="all">🌐 All Coverage <span class="badge">${trk.recent72hCount ?? allStories.length}</span></button>
+    ${geos.map((g) => `<button class="geo-pill" data-geo="${esc(g.name)}">📍 ${esc(g.name)} <span class="badge">${g.recentCount || g.count}</span></button>`).join("")}
+  `;
+
+  // Render Event Clusters & Tailored BCG MDP Angles grouped by geographical area
+  const clusters = top.eventClusters || [];
+  const clBox = $("#meventclusters");
+  if (clusters.length) {
+    // Group event clusters and their MDP angles by geographical area
+    const geoGroupMap = new Map();
+    for (const cl of clusters) {
+      const loc = cl.location || "National / Regional";
+      if (!geoGroupMap.has(loc)) {
+        geoGroupMap.set(loc, {
+          location: loc,
+          clusters: [],
+          mdpAngles: [],
+          totalStories: 0
+        });
+      }
+      const group = geoGroupMap.get(loc);
+      group.clusters.push(cl);
+      group.totalStories += cl.storyCount || 0;
+      for (const ang of (cl.mdpAngles || [])) {
+        group.mdpAngles.push({ ...ang, cluster: cl });
+      }
+    }
+    const geoGroups = Array.from(geoGroupMap.values()).sort((a, b) => b.totalStories - a.totalStories);
+    const allMdpAngles = geoGroups.flatMap((g) => g.mdpAngles);
+
+    clBox.innerHTML = `
+      <div class="mdp-showcase-container">
+        <div class="mdp-showcase-header">
+          <div>
+            <h3>🏛️ BCG MDP THOUGHT LEADERSHIP &amp; STRATEGIC ADVISORY BOARD (${allMdpAngles.length})</h3>
+            <div class="mdp-showcase-sub">Executive POV and boardroom advisory briefs grouped by geographical region with localized incident intelligence.</div>
+          </div>
+        </div>
+
+        <div class="mdp-geo-groups-list">
+          ${geoGroups.map((g) => `
+            <div class="mdp-geo-group" data-geogroup="${esc(g.location)}">
+              <div class="mdp-geo-header">
+                <div class="mdp-geo-title">
+                  <span class="mdp-geo-name">📍 ${esc(g.location)}</span>
+                  <span class="badge b">📊 ${g.totalStories} stories tracked</span>
+                  <span class="badge">${g.clusters.length} event incident${g.clusters.length > 1 ? "s" : ""}</span>
+                </div>
+                <button class="btn sm ghost" data-filtgeo="${esc(g.location)}">Filter ${esc(g.location)} stories →</button>
+              </div>
+
+              <div class="mdp-advisory-grid">
+                ${g.mdpAngles.map((ang) => {
+                  const cl = ang.cluster;
+                  return `
+                    <div class="mdp-advisory-card" data-evid="${esc(cl.id)}" data-angid="${esc(ang.id)}" data-cardgeo="${esc(g.location)}">
+                      <div class="mdp-card-topbar">
+                        <div class="mdp-card-badges">
+                          <span class="mdp-practice-tag">🏢 ${esc(ang.practice || "BCG Practice Area")}</span>
+                          <span class="mdp-role-pill">👤 ${esc(ang.role)}</span>
+                          <span class="mdp-format-pill">${esc(ang.editorialFormat || "Op-Ed / Executive Leadership Column")}</span>
+                        </div>
+                        <div class="mdp-card-meta">
+                          <span class="tag">📍 ${esc(cl.location)}</span>
+                          <span class="tag b">📊 ${cl.storyCount} stories tracked</span>
+                        </div>
+                      </div>
+
+                      <h3 class="mdp-card-headline">${esc(ang.title)}</h3>
+
+                      <div class="mdp-thesis-box">
+                        <div class="mdp-box-lbl">EXECUTIVE POINT OF VIEW (POV)</div>
+                        <div class="mdp-thesis-text">${esc(ang.thesis || ang.angle)}</div>
+                      </div>
+
+                      ${ang.boardroomQuestions?.length ? `
+                        <div class="mdp-questions-section">
+                          <div class="mdp-box-lbl">KEY C-SUITE / BOARD QUESTIONS &amp; STRATEGIC ANGLES</div>
+                          <ul class="mdp-questions-list">
+                            ${ang.boardroomQuestions.map((q) => {
+                              const colonIdx = q.indexOf(":");
+                              if (colonIdx > 0 && colonIdx < 35) {
+                                const prefix = q.slice(0, colonIdx);
+                                const rest = q.slice(colonIdx + 1);
+                                return `<li><b>${esc(prefix)}:</b>${esc(rest)}</li>`;
+                              }
+                              return `<li>${esc(q)}</li>`;
+                            }).join("")}
+                          </ul>
+                        </div>
+                      ` : ""}
+
+                      <div class="mdp-card-footer">
+                        <div class="mdp-outlet-hint">
+                          <b>Target Outlets:</b> ${esc(ang.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute")}
+                        </div>
+                        <div class="mdp-actions">
+                          <button class="btn sm ghost" data-copybrief="${esc(ang.id)}">📋 Copy Advisory Brief</button>
+                          <button class="btn sm" data-filtevid="${esc(cl.id)}">Filter ${cl.storyCount} Stories →</button>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+
+              <div class="mdp-geo-incidents">
+                <div class="mdp-incidents-subhead">
+                  <span class="tiny mute b" style="letter-spacing:.05em">📍 DETECTED EVENT INCIDENTS IN ${esc(g.location.toUpperCase())} (${g.clusters.length})</span>
+                  <span class="tiny mute">Click an incident to filter</span>
+                </div>
+                <div class="incident-strip-grid">
+                  ${g.clusters.map((cl) => `
+                    <div class="incident-card" data-evid="${esc(cl.id)}">
+                      <div class="incident-card-loc">📍 ${esc(cl.location)} · <span style="font-weight:normal">${esc(cl.eventType)}</span></div>
+                      <div class="incident-card-title">${esc(clip(cl.title, 68))}</div>
+                      <div class="incident-card-meta">
+                        <span><b>${cl.storyCount}</b> stories</span>
+                        <span><b>${cl.outletsCount}</b> outlets</span>
+                        ${cl.entities?.length ? `<span class="mute">${esc(cl.entities.slice(0, 2).join(", "))}</span>` : ""}
+                      </div>
+                    </div>
+                  `).join("")}
+                </div>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+
+    // Bind Copy Advisory Brief buttons
+    $$("[data-copybrief]", clBox).forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const angId = btn.dataset.copybrief;
+        const targetAng = allMdpAngles.find((a) => a.id === angId);
+        if (!targetAng) return;
+        const cl = targetAng.cluster;
+        const text = [
+          `BCG MDP STRATEGIC ADVISORY & THOUGHT LEADERSHIP BRIEF`,
+          `=====================================================`,
+          `PRACTICE AREA: ${targetAng.practice || "BCG Advisory"}`,
+          `TARGET MDP:    ${targetAng.role}`,
+          `FORMAT:        ${targetAng.editorialFormat || "Op-Ed / Executive Leadership Column"}`,
+          `GEOGRAPHY:     ${cl.location} (${cl.storyCount} stories tracked across ${cl.outletsCount} outlets)`,
+          ``,
+          `HEADLINE:`,
+          targetAng.title,
+          ``,
+          `EXECUTIVE POINT OF VIEW (POV):`,
+          targetAng.thesis || targetAng.angle,
+          ``,
+          `KEY C-SUITE / BOARD QUESTIONS & STRATEGIC ANGLES:`,
+          ...(targetAng.boardroomQuestions || []).map((q, i) => `${i + 1}. ${q}`),
+          ``,
+          `TARGET AUDIENCE:`,
+          targetAng.targetAudience || "CEOs, Board Risk Committees, Regulators, and Infrastructure Investors",
+          ``,
+          `RECOMMENDED MEDIA PLACEMENT:`,
+          targetAng.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+          ``,
+          `PITCH SUMMARY:`,
+          targetAng.pitch || targetAng.thesis
+        ].join("\n");
+
+        navigator.clipboard?.writeText(text);
+        toast("📋 Advisory brief copied to clipboard!");
+      };
+    });
+  } else {
+    clBox.innerHTML = `<div class="small mute" style="margin:8px 0">No distinct sub-event incidents clustered yet.</div>`;
+  }
+
+  // Handle Geo filter clicks
+  const clearBtn = $("#mclearfilter");
+  const filterIndicator = $("#mactivefilter");
+
+  const applyGeoFilter = (target) => {
+    curGeo = target;
+    curEventId = null;
+    $$(".geo-pill", geoBar).forEach((b) => b.classList.toggle("active", b.dataset.geo === target));
+    $$(".incident-card", clBox).forEach((c) => c.classList.remove("active"));
+    $$(".mdp-advisory-card", clBox).forEach((c) => { c.classList.remove("active"); c.style.display = ""; });
+    $$(".mdp-geo-group", clBox).forEach((grp) => {
+      if (target === "all") {
+        grp.style.display = "";
+      } else {
+        const grpLoc = grp.dataset.geogroup?.toLowerCase() || "";
+        const match = grpLoc === target.toLowerCase() || grpLoc.includes(target.toLowerCase()) || target.toLowerCase().includes(grpLoc);
+        grp.style.display = match ? "" : "none";
+      }
+    });
+    if (target === "all") {
+      filterIndicator.textContent = "";
+      clearBtn.style.display = "none";
+      renderStories(allStories, "Most significant verified stories across all locations.");
+    } else {
+      filterIndicator.innerHTML = `<span class="pill p-ok">Filtered by: 📍 ${esc(target)}</span>`;
+      clearBtn.style.display = "";
+      const filtered = allStories.filter((s) => (s.geography || []).some((g) => g.toLowerCase().includes(target.toLowerCase()) || target.toLowerCase().includes(g.toLowerCase())));
+      renderStories(filtered, `Showing ${filtered.length} stories specifically in and around ${target}.`);
+    }
+  };
+
+  const applyEventFilter = (evId) => {
+    curEventId = evId;
+    const targetCluster = clusters.find((c) => c.id === evId);
+    if (!targetCluster) return;
+    $$(".geo-pill", geoBar).forEach((b) => b.classList.remove("active"));
+    $$(".incident-card", clBox).forEach((c) => c.classList.toggle("active", c.dataset.evid === evId));
+    $$(".mdp-geo-group", clBox).forEach((grp) => {
+      const hasCluster = grp.querySelector(`[data-evid="${evId}"]`);
+      grp.style.display = hasCluster ? "" : "none";
+    });
+    $$(".mdp-advisory-card", clBox).forEach((c) => {
+      const match = c.dataset.evid === evId;
+      c.style.display = (evId && !match) ? "none" : "";
+      c.classList.toggle("active", match);
+    });
+    filterIndicator.innerHTML = `<span class="pill p-ok">Event Incident: 📍 ${esc(targetCluster.location)}</span>`;
+    clearBtn.style.display = "";
+    renderStories(targetCluster.stories, `Showing ${targetCluster.stories.length} stories for specific event: ${targetCluster.title}`);
+    window.scrollTo({ top: $("#mevtitle").offsetTop - 80, behavior: "smooth" });
+  };
+
+  $$("[data-geo]", geoBar).forEach((b) => (b.onclick = () => applyGeoFilter(b.dataset.geo)));
+  $$("[data-filtgeo]", clBox).forEach((b) => (b.onclick = () => applyGeoFilter(b.dataset.filtgeo)));
+  $$("[data-filtevid]", clBox).forEach((b) => (b.onclick = () => applyEventFilter(b.dataset.filtevid)));
+  $$(".incident-card", clBox).forEach((c) => (c.onclick = () => applyEventFilter(c.dataset.evid)));
+
+  clearBtn.onclick = () => {
+    const mevTitle = $("#mevtitle");
+    if (mevTitle) mevTitle.textContent = "Evidence Stories";
+    const adjCard = $("#mcandlestories");
+    if (adjCard) adjCard.style.display = "none";
+    document.querySelectorAll(".candle-selection-highlight").forEach((el) => el.remove());
+    applyGeoFilter("all");
+  };
+
   // search interest: a separate panel in its own units
   const si = top.searchInterest;
   $("#msi").innerHTML = `<h3>Search interest${info("searchInterest")} <span class="pill p-muted">separate signal</span></h3><p class="hint">Google Trends-style values are relative (0–100), not search counts, and have their own baseline.</p><div id="sibody"></div>`;
@@ -98,19 +573,22 @@ async function pgSectors(el) {
   const mx = Math.max(...c.sectorsView.map((s) => s.total), 1e-9);
   const every = Math.ceil(d.bins.length / 8), colL = d.bins.map((t, i) => (i % every ? "" : new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "numeric" })));
   el.innerHTML = `${!d.llm.ok ? banner("warn", `Matching is off: ${esc(d.llm.message)}`) : ""}
-  <div class="card"><div class="sec-h" style="margin:0"><div><h3>${esc(c.name)} <span class="mute" style="font-weight:400">· ${c.sectors.length} sectors</span></h3><p class="hint" style="margin:0">${c.sectors.map((s) => esc(s.name)).join(" · ")}</p></div>${c.builtin ? "" : `<button class="btn bad sm" id="cdel">Remove company</button>`}</div>
+  <div class="card"><div class="sec-h" style="margin:0"><div><h3>${esc(c.name)} <span class="mute" style="font-weight:400">· ${c.sectors.length} sectors</span></h3><p class="hint" style="margin:0">${c.sectors.map((s) => `${esc(s.name)}${s.description ? ` (${esc(clip(s.description, 35))})` : ""}`).join(" · ")}</p></div><div style="display:flex;gap:6px;align-items:center"><button class="btn sm" id="seditsec">✏️ Edit Sectors &amp; Scope</button>${c.builtin ? "" : `<button class="btn bad sm" id="cdel">Remove</button>`}</div></div>
     ${done < total && d.llm.ok ? `<p class="small mute" style="margin:10px 0 4px">Matching news areas to ${esc(c.name)}’s sectors: ${done}/${total} judged</p><div class="bar"><i style="width:${(100 * done) / Math.max(1, total)}%"></i></div>` : ""}
     <details style="margin-top:12px"><summary>Upload or paste another company’s sectors</summary><div class="grid g2" style="margin-top:10px"><div><p class="small mute">Accepted: <b>.csv</b> (a <span class="code">sector</span> column, optional <span class="code">description</span>), <b>.txt</b> (one sector per line; first line may be <span class="code">Company: Name</span>) or <b>.json</b>. Uploading the same name again replaces its sectors.</p><label class="f">Company name</label><input type="text" id="uname"><label class="f">File</label><input type="file" id="ufile" accept=".csv,.txt,.json"></div><div><label class="f">…or paste sectors, one per line</label><textarea id="utext" placeholder="Retail banking&#10;General insurance&#10;Consumer lending"></textarea><p style="margin:8px 0 0"><button class="btn" id="usend">Analyse company</button> <span class="small mute" id="ustatus"></span></p></div></div></details></div>
   <section class="grid g-7-5" style="margin-top:16px">
     <div class="card"><h3>Exposure by sector</h3><p class="hint">Σ news-area density × relevance. <span class="cl" style="display:inline-flex;margin:0 0 0 8px"><span><i style="background:var(--bars-strong)"></i>direct</span><span><i style="background:var(--forecast)"></i>indirect (second-order)</span></span></p>
       ${c.sectorsView.map((s) => `<div class="hb click${s.name === S.selSector ? " sel" : ""}" data-sector="${esc(s.name)}" style="${s.name === S.selSector ? "background:var(--brand-soft)" : ""}"><span title="${esc(s.name)}">${esc(clip(s.name, 28))}</span><div class="bar" style="display:flex;background:var(--line)"><i style="width:${(100 * s.direct) / mx}%;background:var(--bars-strong);border-radius:3px 0 0 3px"></i><i style="width:${(100 * s.indirect) / mx}%;background:var(--forecast);border-radius:0 3px 3px 0"></i></div><span class="num small" style="text-align:right">${fmt1(s.total)}</span></div>`).join("")}</div>
-    <div class="card"><h3>${esc(sel?.name ?? "Sector")} — drivers</h3>${sel?.description ? `<p class="small mute">${esc(sel.description)}</p>` : ""}${sel?.drivers.length ? sel.drivers.map((x) => `<div class="story"><b>${esc(x.name)}</b><div style="margin:3px 0"><span class="tag">${esc(x.channel)}</span><span class="tag">${esc(x.front.replace("_", " "))}</span><span class="tag">relevance ${x.relevance.toFixed(1)}</span></div><div class="small mute">${esc(x.why)}</div>${x.writeAbout ? `<div class="small" style="margin-top:3px">${esc(x.writeAbout)}</div>` : ""}</div>`).join("") : `<span class="mute">No news areas matched this sector yet.</span>`}</div>
+    <div class="card"><h3>${esc(sel?.name ?? "Sector")} — drivers</h3>${sel?.description ? `<p class="small mute"><b>Sector Scope:</b> ${esc(sel.description)}</p>` : ""}${sel?.drivers.length ? sel.drivers.map((x) => `<div class="story"><b>${esc(x.name)}</b><div style="margin:3px 0"><span class="tag">${esc(x.channel)}</span><span class="tag">${esc(x.front.replace("_", " "))}</span><span class="tag">relevance ${x.relevance.toFixed(1)}</span></div><div class="small mute">${esc(x.why)}</div>${x.writeAbout ? `<div class="small" style="margin-top:3px">${esc(x.writeAbout)}</div>` : ""}</div>`).join("") : `<span class="mute">No news areas matched this sector yet.</span>`}</div>
   </section>
   <section class="grid g2" style="margin-top:16px"><div class="card"><h3>Sector density over time</h3><p class="hint">Darker = more weighted news pressure in that window.</p><div id="stime"></div></div><div class="card"><h3>At what front?</h3><p class="hint">Sector × the channel through which the impact reaches it.</p><div id="sfronts"></div></div></section>
   <section class="grid g3" style="margin-top:16px"><div class="card"><h3>Who and what is impacted</h3>${hbars(d.impactAreas.slice(0, 12), { label: (a) => a[0], value: (a) => a[1] })}</div><div class="card"><h3>Most-affected groups</h3><table class="t"><tbody>${d.groups.slice(0, 10).map((g) => `<tr><td>${esc(clip(g.group, 40))}</td><td class="mute small">${esc(g.area)}</td><td class="r num">${fmt1(g.weight)}</td></tr>`).join("")}</tbody></table></div><div class="card"><h3>Geography</h3>${hbars(d.geography.slice(0, 12), { label: (a) => a[0], value: (a) => a[1], color: () => "var(--forecast)" })}</div></section>
   <section class="card" style="margin-top:16px"><h3>Broad-area density over time</h3><p class="hint">Top 20 impact brackets × time.</p><div id="btime"></div></section>`;
   $$("[data-sector]", el).forEach((r) => (r.onclick = () => { S.selSector = r.dataset.sector; render(); }));
   heat($("#stime"), c.sectorsView.map((s) => ({ label: s.name, values: s.series })), colL, (k) => new Date(d.bins[k]).toLocaleString(), { W: 640, L: 170 });
+  heat($("#sfronts"), c.sectorsView.map((s) => ({ label: s.name, values: c.fronts.map((f) => s.fronts[f] || 0) })), c.fronts.map((f) => f.replace("_", " ").slice(0, 8)), (k) => c.fronts[k], { W: 640, L: 170 });
+  heat($("#btime"), d.brackets.slice(0, 20).map((b) => ({ label: b.name, values: b.series })), colL, (k) => new Date(d.bins[k]).toLocaleString());
+  if ($("#seditsec")) $("#seditsec").onclick = () => showSectorEditor(c, async () => { await loadStatusOnce(); render(); });
   heat($("#sfronts"), c.sectorsView.map((s) => ({ label: s.name, values: c.fronts.map((f) => s.fronts[f] || 0) })), c.fronts.map((f) => f.replace("_", " ").slice(0, 8)), (k) => c.fronts[k], { W: 640, L: 170 });
   heat($("#btime"), d.brackets.slice(0, 20).map((b) => ({ label: b.name, values: b.series })), colL, (k) => new Date(d.bins[k]).toLocaleString());
   if ($("#cdel")) $("#cdel").onclick = async () => { if (!confirm("Remove this company and its matches?")) return; await fetch("/api/company?id=" + encodeURIComponent(S.company), { method: "DELETE" }); S.company = "bcg"; ls.set("company", "bcg"); await loadStatusOnce(); render(); };
@@ -411,6 +889,124 @@ const CLIENT_PRESETS = [
   }
 ];
 
+function showSectorEditor(co, onDone) {
+  let sectors = JSON.parse(JSON.stringify(co.sectors || []));
+  const modal = document.createElement("div");
+  modal.className = "modal-scrim";
+
+  const renderRows = () => {
+    if (!sectors.length) return `<div class="empty" style="padding:16px">No sectors configured yet. Click "+ Add Sector" below.</div>`;
+    return sectors.map((s, idx) => `
+      <div class="sector-row" data-sidx="${idx}">
+        <div>
+          <label class="small b mute" style="display:block;margin-bottom:4px">SECTOR NAME</label>
+          <input type="text" class="s-name" value="${esc(s.name)}" placeholder="e.g. Healthcare">
+        </div>
+        <div>
+          <label class="small b mute" style="display:block;margin-bottom:4px">SCOPE &amp; DESCRIPTION (Focus Areas, Subsectors, Exclusions)</label>
+          <textarea class="s-desc" rows="2" placeholder="e.g. Hospital equipment, medical devices, diagnostics. Exclude generic disease outbreaks.">${esc(s.description || "")}</textarea>
+        </div>
+        <div style="padding-top:20px;text-align:center">
+          <button class="sector-del-btn" data-dels="${idx}" title="Remove sector">✕</button>
+        </div>
+      </div>
+    `).join("");
+  };
+
+  modal.innerHTML = `
+    <div class="sector-modal">
+      <div class="sector-modal-header">
+        <div>
+          <h3 style="display:flex;align-items:center;gap:8px">✏️ Edit Sectors &amp; Taxonomy Scope: ${esc(co.name)}</h3>
+          <p class="hint" style="margin:2px 0 0">Provide clear descriptions of sector focus areas (e.g. scoping Healthcare to hospital equipment and medtech so it does not pull generic broad news).</p>
+        </div>
+        <button class="btn ghost sm" id="sclose">✕ Close</button>
+      </div>
+      <div class="sector-modal-body">
+        <div style="display:flex;gap:12px;align-items:center;background:var(--brand-soft);border:1px solid color-mix(in srgb,var(--brand) 25%,var(--line));border-radius:10px;padding:10px 14px">
+          <span style="font-size:20px">💡</span>
+          <div class="small" style="color:var(--ink2);line-height:1.4">
+            <b>Targeted Relevance:</b> The LLM evaluates every news area strictly against your sector descriptions. Providing scope prevents broad categories (like Healthcare, Energy, or Tech) from pulling up irrelevant stories!
+          </div>
+        </div>
+        <div>
+          <label class="f">Client Company Name</label>
+          <input type="text" id="sedit-name" value="${esc(co.name)}" ${co.builtin ? "readonly" : ""}>
+        </div>
+        <div class="sec-h" style="margin:6px 0 2px">
+          <h4 style="margin:0;font-size:14px">Sectors Taxonomy &amp; Detailed Descriptions (<span id="ssec-cnt">${sectors.length}</span>)</h4>
+          <button class="btn sm" id="sadd-btn">+ Add Sector</button>
+        </div>
+        <div id="srows" style="display:grid;gap:10px">
+          ${renderRows()}
+        </div>
+      </div>
+      <div class="sector-modal-footer">
+        <button class="btn ghost" id="scancel">Cancel</button>
+        <div style="display:flex;gap:10px;align-items:center">
+          <span class="small mute" id="ssavestatus"></span>
+          <button class="btn" id="ssave-btn">💾 Save Sectors &amp; Re-Match</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const syncFromDom = () => {
+    $$(".sector-row", modal).forEach((row, i) => {
+      const name = $(".s-name", row)?.value.trim() || "";
+      const description = $(".s-desc", row)?.value.trim() || "";
+      sectors[i] = { name, description };
+    });
+  };
+
+  const bindEvents = () => {
+    $("#ssec-cnt", modal).textContent = sectors.length;
+    $$("[data-dels]", modal).forEach((b) => (b.onclick = () => {
+      syncFromDom();
+      sectors.splice(+b.dataset.dels, 1);
+      $("#srows", modal).innerHTML = renderRows();
+      bindEvents();
+    }));
+  };
+  bindEvents();
+
+  $("#sadd-btn", modal).onclick = () => {
+    syncFromDom();
+    sectors.push({ name: "", description: "" });
+    $("#srows", modal).innerHTML = renderRows();
+    bindEvents();
+    const rows = $$(".sector-row", modal);
+    const last = rows[rows.length - 1];
+    if (last) $(".s-name", last)?.focus();
+  };
+
+  const close = () => modal.remove();
+  $("#sclose", modal).onclick = close;
+  $("#scancel", modal).onclick = close;
+
+  $("#ssave-btn", modal).onclick = async () => {
+    syncFromDom();
+    const cleanSectors = sectors.filter((s) => s.name);
+    if (!cleanSectors.length) return toast("Enter at least one sector with a name");
+    const name = $("#sedit-name", modal).value.trim() || co.name;
+    const btn = $("#ssave-btn", modal);
+    const st = $("#ssavestatus", modal);
+    btn.disabled = true;
+    st.textContent = "Saving & rematching…";
+    try {
+      await post("/api/company/update", { id: co.id, name, sectors: cleanSectors });
+      toast(`Updated ${cleanSectors.length} sectors for ${name}! Re-matching started.`);
+      close();
+      if (onDone) onDone();
+    } catch (e) {
+      st.textContent = e.message;
+      btn.disabled = false;
+    }
+  };
+}
+
 async function pgClients(el) {
   const [data, st] = await Promise.all([api("/api/companies"), api("/api/status")]);
   const list = data.companies || [];
@@ -432,6 +1028,7 @@ async function pgClients(el) {
         <div class="v">${esc(cur?.name ?? "None")}</div>
         <div class="l">Active Client Lens</div>
         <div class="s">${cur?.sectors?.length ?? 0} practice areas / sectors</div>
+        <div style="margin-top:10px"><button class="btn sm" id="macteditsec">✏️ Update Sectors &amp; Descriptions</button></div>
       </div>
       <div class="kpi">
         <div class="v num">${list.length}</div>
@@ -456,7 +1053,7 @@ async function pgClients(el) {
             <thead>
               <tr>
                 <th>Company</th>
-                <th>Sectors</th>
+                <th>Sectors &amp; Descriptions</th>
                 <th>Matching Status</th>
                 <th class="r">Action</th>
               </tr>
@@ -468,7 +1065,7 @@ async function pgClients(el) {
                 return `<tr>
                   <td>
                     <div class="b">${esc(c.name)} ${c.builtin ? `<span class="pill p-muted">default</span>` : ""} ${isAct ? `<span class="pill p-ok">active</span>` : ""}</div>
-                    <div class="tiny mute">${c.sectors.slice(0, 3).map((s) => esc(s.name)).join(" · ")}${c.sectors.length > 3 ? "..." : ""}</div>
+                    <div class="tiny mute">${c.sectors.slice(0, 3).map((s) => `${esc(s.name)}${s.description ? ` (${esc(clip(s.description, 28))})` : ""}`).join(" · ")}${c.sectors.length > 3 ? "..." : ""}</div>
                   </td>
                   <td class="num">${c.sectors.length} sectors</td>
                   <td>
@@ -477,8 +1074,9 @@ async function pgClients(el) {
                       <div class="bar" style="height:6px"><i style="width:${Math.min(100, matchCount * 4)}%"></i></div>
                     </div>
                   </td>
-                  <td class="r">
-                    ${isAct ? `<span class="small b mute">Active</span>` : `<button class="btn sm" data-switch="${esc(c.id)}">Switch</button>`}
+                  <td class="r" style="white-space:nowrap">
+                    <button class="btn sm ghost" data-editsec="${esc(c.id)}" title="Update sector taxonomy &amp; descriptions">✏️ Edit</button>
+                    ${isAct ? `<span class="small b mute" style="margin:0 4px">Active</span>` : `<button class="btn sm" data-switch="${esc(c.id)}">Switch</button>`}
                     ${c.builtin ? "" : `<button class="btn bad sm" data-delco="${esc(c.id)}" style="margin-left:4px">Delete</button>`}
                   </td>
                 </tr>`;
@@ -499,8 +1097,8 @@ async function pgClients(el) {
         </div>
         <label class="f">Client / Company Name</label>
         <input type="text" id="nconame" placeholder="e.g. Google, Tata Sons, Reliance Industries">
-        <label class="f">Sector &amp; Practice Area Taxonomy (One per line)</label>
-        <textarea id="ncotext" rows="8" placeholder="Cloud &amp; Enterprise Platforms&#10;Autonomous Mobility &amp; EV&#10;Semiconductor Manufacturing&#10;Digital Ads &amp; Commerce"></textarea>
+        <label class="f">Sector &amp; Practice Area Taxonomy (One per line, optional 'Sector: Description')</label>
+        <textarea id="ncotext" rows="8" placeholder="Healthcare: Hospital equipment, medical devices, diagnostics&#10;Cloud &amp; Enterprise Platforms: Hyperscaler infra &amp; security&#10;Autonomous Mobility &amp; EV&#10;Semiconductor Manufacturing"></textarea>
         <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
           <button class="btn" id="ncosave">Create Client &amp; Match</button>
           <span class="small mute" id="ncostatus"></span>
@@ -508,6 +1106,17 @@ async function pgClients(el) {
       </div>
     </div>
   `;
+
+  if ($("#macteditsec")) {
+    $("#macteditsec").onclick = () => {
+      if (cur) showSectorEditor(cur, async () => { await loadStatusOnce(); render(); });
+    };
+  }
+
+  $$("[data-editsec]", el).forEach((b) => (b.onclick = () => {
+    const co = list.find((c) => c.id === b.dataset.editsec);
+    if (co) showSectorEditor(co, async () => { await loadStatusOnce(); render(); });
+  }));
 
   $$("[data-switch]", el).forEach((b) => (b.onclick = async () => {
     S.company = b.dataset.switch;

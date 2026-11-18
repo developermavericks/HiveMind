@@ -506,6 +506,35 @@ async function entitiesMerge() {
 }
 const pool_ = pool;
 
+// Poll data from the HiveMind export API (read-only datasets + reference data)
+async function syncExport(opts) {
+  const { ExportSyncer } = await import("./sync_export.mjs");
+  const store = openStore();
+  const syncer = new ExportSyncer({
+    baseUrl: opts.url || process.env.HIVEMIND_EXPORT_BASE_URL,
+    apiKey: opts.key || process.env.HIVEMIND_EXPORT_KEY,
+    store,
+    rootDir: root,
+    log: console.log
+  });
+  const limit = Math.min(2000, Math.max(1, +opts.limit || 2000));
+  const full = Boolean(opts.full);
+  const datasets = opts.dataset ? opts.dataset.split(",").map((s) => s.trim()) : null;
+  const company = opts.company || null;
+  const since = opts.since ? (+opts.since || opts.since) : null;
+
+  if (datasets) {
+    for (const d of datasets) {
+      await syncer.syncDataset(d, { full, limit, company, since });
+    }
+  } else {
+    const res = await syncer.syncAll({ full, limit, company, since });
+    stats({ synced: res.totalRecords, datasets: res.summary.length, duration: res.totalTimeSeconds });
+  }
+  store.setMeta("export.lastSyncAt", String(Date.now()));
+  store.close();
+}
+
 const [cmd = "run", ...rest] = process.argv.slice(2);
 const opts = parseArgs(rest);
 try {
@@ -523,6 +552,7 @@ try {
     console.log(`LLM: ${await reader.detect()}   (${registry.size} brackets)`);
     await consolidate(reader, registry);
   }
+  else if (cmd === "sync") await syncExport(opts);
   else if (cmd === "serve") {
     const { serve } = await import("./server.mjs");
     // --no-auto: serve the dashboard only. No scheduled collection and no start-up follow-ups (labelling, topic checks, matching), so nothing
@@ -533,5 +563,5 @@ try {
     // A container is stopped with SIGTERM: stop taking requests, stop the background jobs and close the database cleanly, then exit.
     for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => { console.log(`${sig}: shutting down`); server.close(() => process.exit(0)); server.closeAllConnections?.(); setTimeout(() => process.exit(0), 8000).unref(); });
   }
-  else { console.error("usage: run | enrich | ocr | online | sentiment | topics-merge | fulltext | consolidate | backup | serve"); process.exit(2); }
+  else { console.error("usage: run | enrich | ocr | online | sentiment | topics-merge | fulltext | consolidate | backup | sync | serve"); process.exit(2); }
 } catch (e) { console.error(`Error: ${e.message}`); process.exit(1); }
