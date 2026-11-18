@@ -31,6 +31,124 @@ const tallySentiment = (list) => {
 };
 const STAGES = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
 
+function detectPracticeArea(labelName, text) {
+  const t = `${labelName || ""} ${text || ""}`.toLowerCase();
+  if (/aviation|flight|plane|crash|airport|runway|airline|rail|train|metro|highway|port|shipping|transport/.test(t)) return "Travel, Cities and Infrastructure";
+  if (/health|hospital|pharma|drug|medicine|vaccine|doctor|clinical|disease/.test(t)) return "Healthcare";
+  if (/auto|car|motor|steel|mining|metal|chemical|factory|industrial|manufacturing/.test(t)) return "Industrial Goods";
+  if (/bank|lending|credit|nbfc|payment|fintech|rbi|fund|capital|valuation|m&a|pe\/vc/.test(t)) return "Financial Institutions";
+  if (/energy|oil|petrol|diesel|gas|power|grid|solar|renewable|fuel/.test(t)) return "Energy";
+  if (/cyber|cloud|software|telecom|media|semiconductor|chip|ai|data/.test(t)) return "Technology, Media & BCG X";
+  if (/climate|carbon|emission|flood|cyclone|weather|pollution|esg/.test(t)) return "Climate & Sustainability";
+  if (/policy|ministry|court|regulat|governance|defence|election|panchayat/.test(t)) return "Public Sector";
+  return "Corporate Strategy & Leadership";
+}
+
+function buildTopicEventClusters(items, labelName) {
+  const clusters = [];
+  for (const item of items) {
+    const loc = (item.geography && item.geography.length) ? item.geography[0] : null;
+    const titleLower = (item.title || "").toLowerCase();
+    const itemEntities = new Set((item.entities || []).map((e) => String(e).toLowerCase()));
+    const words = new Set(titleLower.replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length >= 4));
+
+    let matched = null;
+    for (const cl of clusters) {
+      if (Math.abs(item.at - cl.anchorTime) > 72 * HOUR) continue;
+      const sameLoc = loc && cl.location && (loc.toLowerCase() === cl.location.toLowerCase() || loc.toLowerCase().includes(cl.location.toLowerCase()) || cl.location.toLowerCase().includes(loc.toLowerCase()));
+      const sharedEntity = (cl.entities || []).some((e) => itemEntities.has(String(e).toLowerCase()));
+      let overlap = 0;
+      for (const w of words) if (cl.wordSet.has(w)) overlap++;
+      if ((sameLoc && (sharedEntity || overlap >= 1)) || (sharedEntity && overlap >= 2) || overlap >= 3) {
+        matched = cl;
+        break;
+      }
+    }
+
+    if (matched) {
+      matched.stories.push(item);
+      matched.storyCount++;
+      matched.lastSeen = Math.max(matched.lastSeen, item.at);
+      matched.firstSeen = Math.min(matched.firstSeen, item.at);
+      for (const o of (item.outlets || [])) matched.outlets.add(o);
+      for (const e of (item.entities || [])) if (matched.entities.length < 6 && !matched.entities.includes(e)) matched.entities.push(e);
+      for (const w of words) matched.wordSet.add(w);
+      if (!matched.location && loc) matched.location = loc;
+    } else {
+      clusters.push({
+        id: "ev-" + (clusters.length + 1) + "-" + (loc ? loc.toLowerCase().replace(/\W+/g, "-").slice(0, 20) : "incident"),
+        title: item.title,
+        summary: item.summary || item.title,
+        location: loc || (item.geography && item.geography[0]) || "National / Regional",
+        eventType: item.eventType || "Operational Incident",
+        anchorTime: item.at,
+        firstSeen: item.at,
+        lastSeen: item.at,
+        storyCount: 1,
+        outlets: new Set(item.outlets || []),
+        entities: [...(item.entities || []).slice(0, 4)],
+        wordSet: words,
+        stories: [item],
+      });
+    }
+  }
+
+  clusters.sort((a, b) => b.storyCount - a.storyCount);
+
+  return clusters.slice(0, 10).map((cl) => {
+    const locStr = cl.location || "Regional";
+    const entityStr = cl.entities.length ? cl.entities.join(", ") : "Industry operators";
+    const practice = detectPracticeArea(labelName, `${cl.title} ${cl.summary}`);
+
+    const mdpAngles = [
+      {
+        id: `${cl.id}-mdp-1`,
+        role: "BCG Managing Director & Senior Partner (MDP)",
+        practice,
+        editorialFormat: "Op-Ed / Executive Leadership Column",
+        title: `${cl.title.replace(/\s*[-|–].*$/, "")}: From Tactical Crisis Management to Structural Redundancy`,
+        thesis: `The unfolding ${cl.title.slice(0, 60)} in ${locStr} reveals critical vulnerabilities across ${entityStr}. C-suites must pivot from public relations damage control to institutional stress-testing of operations and supplier dependency.`,
+        boardroomQuestions: [
+          `Operational Resilience: Are our operational control towers, vendor SLAs, and fallback systems insulated against single-point failure modes observed in ${locStr}?`,
+          `Regulatory & Statutory Exposure: What is our quantified corporate exposure to imminent ministry directives, tightened statutory mandates, and compliance penalties across ${locStr} corridors?`,
+          `Capex & Capital Allocation: What balance between capex redundancy buffers, automated telemetry, and quarterly margin targets provides durable enterprise resilience?`,
+          `Brand & Market Positioning: Can we leverage proactive safety transparency and institutional reliability as a premium differentiator while disrupted competitors struggle with public fallout?`,
+          `Board Audit & Oversight Integrity: How swiftly can board audit and risk committees verify asset maintenance records, critical supplier certifications, and emergency SOP failovers before regulatory scrutiny intensifies?`
+        ],
+        targetAudience: "CEOs, Board Risk Committees, Ministry Regulators, and Infrastructure Investors",
+        targetOutlets: "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+        pitch: `An executive op-ed arguing why the ${locStr} event represents an industry inflection point requiring a modern resilience architecture, moving beyond reactive compensation toward proactive capacity assurance.`
+      }
+    ];
+
+    return {
+      id: cl.id,
+      title: cl.title,
+      summary: cl.summary,
+      location: cl.location,
+      eventType: cl.eventType,
+      storyCount: cl.storyCount,
+      outletsCount: cl.outlets.size,
+      outlets: Array.from(cl.outlets).slice(0, 8),
+      entities: cl.entities,
+      firstSeen: cl.firstSeen,
+      lastSeen: cl.lastSeen,
+      mdpAngles,
+      stories: cl.stories.map((s) => ({
+        id: s.id,
+        title: s.title,
+        url: s.url,
+        summary: s.summary,
+        outlets: s.outletCount,
+        origins: s.originCount,
+        publishedAt: s.at,
+        geography: s.geography,
+        verified: s.verified
+      }))
+    };
+  });
+}
+
 export class Analytics {
   constructor({ store, registry, sources, cfg, companies, reader, pubs = [] }) {
     Object.assign(this, { store, registry, sources, cfg, companies, reader, pubs });
@@ -270,24 +388,76 @@ export class Analytics {
     const out = {};
     for (const key of keys.slice(0, 6)) {
       const m = c.analysis.labels.get(key);
-      out[key] = { name: this.labelName(c, key), metrics: m ? this.labelRow(c, m) : null, ...seriesFor(c.items, key, gran, c.ctx, c.asOf) };
+      out[key] = { name: this.labelName(c, key), metrics: m ? this.labelRow(c, m) : null, sentiment: this.labelSentiment(c, key), ...seriesFor(c.items, key, gran, c.ctx, c.asOf) };
     }
     return { asOf: c.asOf, granularity: gran, series: out };
   }
 
-  topic({ key, company: companyId = "bcg", date = null }) {
+  topic({ key, company: companyId = "bcg", date = null, geo = null, eventId = null }) {
     const c = this.context(date);
     const m = c?.analysis.labels.get(key);
     if (!m) return { error: "Unknown topic" };
-    const list = (c.byLabel.get(key) ?? []).filter((i) => c.asOf - i.at <= 72 * HOUR).sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount);
+    const allList = (c.byLabel.get(key) ?? []);
+    const recentList = allList.filter((i) => c.asOf - i.at <= 72 * HOUR).sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount);
+    const last24hList = allList.filter((i) => c.asOf - i.at <= 24 * HOUR);
     const name = this.labelName(c, key);
+
+    // 1. Story tracking metrics
+    const storyTracking = {
+      totalCount: allList.length,
+      recent72hCount: recentList.length,
+      recent24hCount: last24hList.length,
+      growth24h: recentList.length - last24hList.length > 0 ? +(((last24hList.length / Math.max(1, recentList.length - last24hList.length)) - 1) * 100).toFixed(1) : null,
+      outletsCount: new Set(allList.flatMap((i) => i.outlets || [])).size,
+      topOutlets: Array.from(allList.reduce((acc, i) => {
+        for (const o of (i.outlets || [])) acc.set(o, (acc.get(o) || 0) + 1);
+        return acc;
+      }, new Map()).entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([oName, count]) => ({ name: oName, count })),
+    };
+
+    // 2. Geographic breakdown across all stories and recent stories
+    const geoMap = new Map();
+    for (const i of allList) {
+      const geos = (i.geography && i.geography.length) ? i.geography : ["National / Global"];
+      for (const g of geos) {
+        const trimmed = String(g).trim();
+        if (!trimmed) continue;
+        if (!geoMap.has(trimmed)) geoMap.set(trimmed, { name: trimmed, count: 0, recentCount: 0 });
+        const entry = geoMap.get(trimmed);
+        entry.count++;
+        if (c.asOf - i.at <= 72 * HOUR) entry.recentCount++;
+      }
+    }
+    const geoBreakdown = Array.from(geoMap.values()).sort((a, b) => b.count - a.count).slice(0, 16);
+
+    // 3. Event-specific clusters with tailored BCG MDP editorial angles
+    const eventClusters = buildTopicEventClusters(recentList.length ? recentList : allList.slice(0, 50), name);
+
+    // 4. Specific-based news filtering (by location or specific event cluster)
+    let displayList = recentList.length ? recentList : allList;
+    if (eventId) {
+      const targetCluster = eventClusters.find((cl) => cl.id === eventId);
+      if (targetCluster) {
+        const clusterStoryIds = new Set(targetCluster.stories.map((s) => s.id));
+        displayList = displayList.filter((s) => clusterStoryIds.has(s.id));
+      }
+    } else if (geo && geo !== "all") {
+      const targetGeo = geo.toLowerCase();
+      displayList = displayList.filter((s) => (s.geography || []).some((g) => g.toLowerCase() === targetGeo || g.toLowerCase().includes(targetGeo) || targetGeo.includes(g.toLowerCase())));
+    }
+
     const pathways = [];
-    for (const i of list.slice(0, 12)) for (const p of i.pathways) pathways.push({ ...p, story: i.title, url: i.url });
+    for (const i of displayList.slice(0, 12)) for (const p of i.pathways) pathways.push({ ...p, story: i.title, url: i.url });
     const related = seriesFor(c.items, key, "hour", c.ctx, c.asOf).related.map((r) => ({ ...r, name: this.labelName(c, r.key), stage: c.analysis.labels.get(r.key)?.stage ?? null }));
     const si = this.store.getSignal(norm(name));
     return {
       row: this.labelRow(c, m), asOf: c.asOf,
-      stories: list.slice(0, 12).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: i.geography.slice(0, 3), reconstructed: i.reconstructed })),
+      stories: displayList.slice(0, 100).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      allStories: allList.slice(0, 250).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      storyTracking,
+      geoBreakdown,
+      eventClusters,
+      filter: { geo: geo || null, eventId: eventId || null, count: displayList.length },
       pathways: pathways.slice(0, 8), related, seasonality: c.analysis.seasonality, sentiment: this.labelSentiment(c, key),
       webCheck: this.store.lastWebCheck(norm(name), "serper:news"),
       searchInterest: si.length ? { available: true, source: si[0].source, points: si.map(({ t, value }) => ({ t, value })), note: "Relative index 0–100, not search volume." } : { available: false, reason: process.env.SERPAPI_KEY ? "Not fetched yet for this topic." : "No search-interest source is connected. Missing data is shown as unavailable, never as zero." },

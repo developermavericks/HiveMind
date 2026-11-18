@@ -348,9 +348,111 @@ export function seriesFor(items, key, gran, ctx, asOf) {
     }
     related.sort((a, b) => b.overlap - a.overlap);
   }
+
+  // OHLC Candlestick data for financial-grade coverage momentum analysis
+  const ohlc = [];
+  let prevClose = null;
+  for (let i = 0; i < nBins; i++) {
+    const t = idx.start + i * binMs;
+    const c = count[i];
+    const s = share[i];
+    const st = idx.status[i];
+    if (st === "nodata" || s == null) {
+      ohlc.push({ t, open: null, high: null, low: null, close: null, volume: 0, status: st });
+      continue;
+    }
+    const binItems = (L?.items ?? []).filter((x) => x.bin === i);
+    let open = prevClose != null ? prevClose : s;
+    let close = s;
+    let high = Math.max(open, close);
+    let low = Math.min(open, close);
+    if (binItems.length > 1) {
+      const subCounts = [0, 0, 0, 0];
+      for (const item of binItems) {
+        const sub = Math.min(3, Math.max(0, Math.floor(((item.it.at - t) / binMs) * 4)));
+        subCounts[sub]++;
+      }
+      const subScale = (tot[i] / 4) || 1;
+      high = Math.max(high, Math.max(...subCounts) / subScale);
+      low = Math.min(low, Math.max(0, Math.min(...subCounts) / subScale));
+    } else if (c > 0) {
+      const bump = Math.min(0.25, 0.08 * Math.sqrt(c));
+      high = high * (1 + bump);
+      low = Math.max(0, low * (1 - bump));
+    }
+    if (high <= low) {
+      high = close * 1.05 + 0.001;
+      low = Math.max(0, close * 0.95 - 0.0005);
+    }
+    prevClose = close;
+
+    // Bin-level sentiment and volume drop / hammer pattern indicators
+    let posCount = 0, negCount = 0, neuCount = 0, mixedCount = 0;
+    for (const x of binItems) {
+      const sent = x.it?.sentiment;
+      if (sent === "positive") posCount++;
+      else if (sent === "negative") negCount++;
+      else if (sent === "neutral") neuCount++;
+      else if (sent === "mixed") mixedCount++;
+    }
+    const sentTotal = posCount + negCount + neuCount + mixedCount;
+    const candleSentiment = posCount > negCount ? "positive" : (negCount > posCount ? "negative" : (sentTotal > 0 ? "neutral" : null));
+    const sentimentNet = sentTotal > 0 ? +((posCount - negCount) / sentTotal).toFixed(2) : null;
+    const prevVol = i > 0 ? (count[i - 1] || 0) : c;
+    const isVolDecline = c < prevVol;
+    const isPriceDecline = close < open;
+    const isHammer = isPriceDecline || (isVolDecline && close <= open * 1.01);
+
+    ohlc.push({
+      t,
+      open: +open.toFixed(5),
+      high: +high.toFixed(5),
+      low: +low.toFixed(5),
+      close: +close.toFixed(5),
+      volume: c,
+      origins: origins[i],
+      status: st,
+      sentiment: candleSentiment,
+      sentimentNet,
+      sentimentBreakdown: { pos: posCount, neg: negCount, neu: neuCount, mixed: mixedCount },
+      isHammer,
+      isVolDecline,
+      stories: binItems.map((x) => ({
+        id: x.it.id,
+        title: x.it.title,
+        url: x.it.url,
+        summary: x.it.summary,
+        outlets: x.it.outletCount,
+        origins: x.it.originCount,
+        primary: x.it.primary,
+        wire: x.it.wire,
+        verified: x.it.verified,
+        fullText: x.it.fullText,
+        publishedAt: x.it.at,
+        contentType: x.it.contentType,
+        geography: (x.it.geography || []).slice(0, 3),
+        sentiment: x.it.sentiment,
+      })),
+    });
+  }
+  const forecastOhlc = (forecast?.points ?? []).map((p, idxPt) => {
+    const prevPt = idxPt > 0 ? forecast.points[idxPt - 1] : ohlc.filter((o) => o.close != null).at(-1);
+    const op = prevPt ? (prevPt.value ?? prevPt.close) : p.value;
+    return {
+      t: p.t,
+      open: +(op ?? p.value).toFixed(5),
+      high: +(p.hi).toFixed(5),
+      low: +(p.lo).toFixed(5),
+      close: +(p.value).toFixed(5),
+      volume: 0,
+      isForecast: true,
+    };
+  });
+
   return {
     granularity: gran, binMs, start: idx.start, end: idx.end, nowMs: asOf, bins: idx.total.map((_, i) => idx.start + i * binMs),
     total: tot, count, share, avg, origins, weight: w, status: idx.status, triggers, forecast,
+    ohlc, forecastOhlc,
     related: related.slice(0, 8), rollingWindow: k,
     partialLast: idx.status[nBins - 1] === "open",
   };

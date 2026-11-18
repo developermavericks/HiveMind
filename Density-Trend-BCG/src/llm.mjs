@@ -522,6 +522,7 @@ For each news area, decide which of the company's sectors it is relevant to. Use
 - front: how it reaches the sector, one of:
 ${fronts}
 - why: one sentence on the link, grounded in the stories shown and the sector's name/description. Do not invent facts about the company.
+CRITICAL SCOPE ENFORCEMENT: When a sector specifies a description or 'covers: ...', you MUST strictly evaluate against that scope. Do NOT match broad generic news to a sector if it falls outside the specified scope/description (for example, if Healthcare specifies 'covers: hospital equipment, medtech and supply chain', do NOT match broad public health statistics or generic disease reports unless it directly impacts that described focus).
 - write_about: ONE concrete article angle for THIS sector that builds on what the stories show — a question, framework, comparison or executive decision, not a restatement of the news and specific enough to commission today.
 
 Return every news area in the batch exactly once (with an empty sectors list if nothing is relevant). Call the record_matches tool exactly once.`;

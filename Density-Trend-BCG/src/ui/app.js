@@ -437,9 +437,31 @@ async function openOpp(key) {
   const body = $(".drawer-b", d);
   body.innerHTML = `
     <div class="card"><h3>Suggested angle</h3>
-      <p style="margin:6px 0;font-size:15px">${o.angle ? esc(o.angle) : "<span class='mute'>No angle written for this pairing yet.</span>"}</p>
-      <p class="small mute" style="margin:4px 0">${esc(o.why)}</p>
-      <div style="margin-top:8px"><span class="tag">relevance ${o.relevance.toFixed(2)}</span><span class="tag">${esc(o.channel)}</span><span class="tag">front: ${esc(o.front.replace("_", " "))}</span><span class="pill ${o.evidenceStatus === "supported" ? "p-ok" : "p-muted"}">${o.evidenceStatus === "supported" ? "sector link supported by evidence" : "sector link is a hypothesis"}</span> ${fitChip(o)}${flagChips(o)} <span class="tag">${esc(o.window.label)}</span></div>
+      <div class="mdp-advisory-card" style="margin:10px 0;padding:16px 18px;border-top:3px solid var(--brand);background:var(--surface2)">
+        <div class="mdp-card-topbar">
+          <div class="mdp-card-badges">
+            <span class="mdp-practice-tag">🏢 ${esc(o.sector)} Practice</span>
+            <span class="mdp-role-pill">👤 BCG Managing Director &amp; Senior Partner (MDP)</span>
+            <span class="mdp-format-pill">Strategic Advisory Brief</span>
+          </div>
+          <div class="tag b">📊 ${o.storyCount ?? o.metrics?.count ?? 0} stories tracked</div>
+        </div>
+
+        ${o.sectorDescription ? `<div style="margin:8px 0 4px;padding:6px 10px;background:var(--surface);border:1px solid var(--line);border-radius:6px;font-size:11.5px;color:var(--ink2)"><b>Sector Scope:</b> ${esc(o.sectorDescription)}</div>` : ""}
+
+        <h4 style="margin:6px 0 4px;font-size:15px;line-height:1.4;color:var(--ink)">${o.angle ? esc(o.angle) : "<span class='mute'>No angle written for this pairing yet.</span>"}</h4>
+
+        <div class="mdp-thesis-box" style="margin:8px 0">
+          <div class="mdp-box-lbl">STRATEGIC RATIONALE &amp; SECTOR TRANSMISSION</div>
+          <div class="mdp-thesis-text">${esc(o.why)}</div>
+        </div>
+
+        <div class="mdp-card-footer" style="padding-top:8px;margin-top:4px">
+          <div class="small mute"><b>Channel:</b> ${esc(o.channel)} · <b>Front:</b> ${esc(o.front.replace("_", " "))} · <b>Relevance:</b> ${o.relevance.toFixed(2)}</div>
+          <button class="btn sm ghost" id="dcopybrief">📋 Copy Advisory Angle</button>
+        </div>
+      </div>
+      <div style="margin-top:8px"><span class="tag">relevance ${o.relevance.toFixed(2)}</span><span class="tag">${esc(o.channel)}</span><span class="tag">front: ${esc(o.front.replace("_", " "))}</span><span class="tag">📊 ${o.storyCount ?? o.metrics?.count ?? 0} stories tracked</span><span class="pill ${o.evidenceStatus === "supported" ? "p-ok" : "p-muted"}">${o.evidenceStatus === "supported" ? "sector link supported by evidence" : "sector link is a hypothesis"}</span> ${fitChip(o)}${flagChips(o)} <span class="tag">${esc(o.window.label)}</span></div>
       ${o.label.level === "topic" ? `<p class="small mute">Specific topic within <b>${esc(o.label.parentName ?? "")}</b>.</p>` : ""}
       ${o.otherSectors?.length ? `<p class="small mute" style="margin:8px 0 0">Also relevant to: ${o.otherSectors.map((s) => `<a href="#" data-opp="${esc(s.key)}">${esc(s.sector)}</a> (${Math.round(s.score)})`).join(", ")}</p>` : ""}</div>
 
@@ -460,15 +482,42 @@ async function openOpp(key) {
       </div>
     </div>
 
-    <div class="card"><div class="sec-h" style="margin:0"><div><h3>Momentum${info("momentumChart")}</h3><p class="hint" style="margin:0">Raw volume (bars), coverage share and rolling average; ◆ verified triggers; dashed = forecast.</p></div>
-      <div class="seg" id="dgran"><button data-g="hour" class="on">Hourly</button><button data-g="day">Daily</button></div></div>
-      <div class="cl"><span><i style="background:var(--bars-strong);opacity:.7"></i>stories (left axis)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>rolling average</span><span><i class="dash"></i>forecast</span><span><i style="background:repeating-linear-gradient(45deg,var(--line2) 0 2px,var(--surface2) 2px 5px)"></i>collection gap</span></div>
+    <div class="card"><div class="sec-h" style="margin:0"><div><h3>Coverage Momentum &amp; Candlestick${info("momentumChart")}</h3><p class="hint" style="margin:0">Raw volume (bars), coverage share &amp; rolling average, or Candlestick OHLC.</p></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="chart-view-seg" id="dcviewseg"><button data-cv="momentum" class="on">📈 Momentum</button><button data-cv="candlestick">🕯️ Candlestick</button></div>
+        <div class="seg" id="dgran"><button data-g="hour" class="on">Hourly</button><button data-g="day">Daily</button></div>
+      </div></div>
+      <div class="cl" id="dcleg"><span><i style="background:var(--bars-strong);opacity:.7"></i>stories (left axis)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>rolling average</span><span><i class="dash"></i>forecast</span><span><i style="background:repeating-linear-gradient(45deg,var(--line2) 0 2px,var(--surface2) 2px 5px)"></i>collection gap</span></div>
       <div class="chart" id="dchart"></div><div id="dline"></div><div id="dextra" style="margin-top:8px"></div></div>
 
     <div class="grid g4">${[["Coverage share", pct(m.share), `baseline ${pct(m.baseShare)}`], ["Momentum", x2(m.ratio), `previous step ${x2(m.ratioPrev)}`], ["Acceleration", m.accel == null ? "–" : (m.accel >= 0 ? "+" : "") + m.accel.toFixed(2), "Δ log₂ momentum"], ["Independent origins", m.originsRecent, `${m.count} stories, last ${m.windowHours}h`], ["Impact breadth", m.areaCount, (m.areas || []).slice(0, 3).join(", ") || "areas"], ["Article text read", `${m.fullTextCount}/${m.count}`, "stories also read beyond the headline"], ["Verified stories", m.verifiedCount, `≥ ${S.cfg?.evidence.verifiedTriggerOrigins ?? 3} origins or primary`], ["Baseline", `${m.baselineHours}h`, `of ${S.cfg?.intervals.baselineHours ?? 168}h target`]].map(([l, v, s]) => `<div class="kpi" style="padding:10px 12px"><div class="v num" style="font-size:19px">${l === "Independent origins" ? originsLink(v, lk, o.label.name) : v}</div><div class="l">${lbl(l, DRAWER_TIP[l])}</div><div class="s">${esc(s)}</div></div>`).join("")}</div>
 
-    <div class="card"><h3>Evidence</h3><p class="hint">Stories behind this topic in the last 72h (most significant first). Facts in any brief must come from these.</p>
-      ${(t?.stories ?? o.stories).map((s) => `<div class="story"><a class="h" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a><div style="margin:3px 0">${s.verified ? `<span class="pill p-ok">verified</span> ` : ""}${s.primary ? `<span class="pill p-high">primary source</span> ` : ""}<span class="tag">${s.outlets} outlet${s.outlets > 1 ? "s" : ""} → ${s.origins} origin${s.origins > 1 ? "s" : ""}</span><span class="tag">${s.fullText ? "full text" : "headline only"}</span>${s.contentType ? `<span class="tag">${esc(s.contentType)}</span>` : ""}${s.wire ? `<span class="tag">wire: ${esc(s.wire)}</span>` : ""}</div>${s.summary ? `<div class="small mute">${esc(s.summary)}</div>` : ""}</div>`).join("") || `<span class="mute">None in the last 72h.</span>`}</div>
+    ${o.geoBreakdown?.length ? `
+      <div class="card" id="dgeocard">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <h3>Geographical Focus &amp; Locations</h3>
+            <p class="hint" style="margin:2px 0 0">Click a location to filter the evidence stories below.</p>
+          </div>
+          <button class="btn sm ghost" id="dgeoclear" style="display:none">Clear filter</button>
+        </div>
+        <div class="geo-filter-bar" id="dgeobar" style="margin-top:10px">
+          <button class="geo-pill active" data-dgeo="all">🌐 All Locations <span class="badge">${(t?.stories ?? o.stories).length}</span></button>
+          ${o.geoBreakdown.map((g) => `<button class="geo-pill" data-dgeo="${esc(g.name)}">📍 ${esc(g.name)} <span class="badge">${g.count}</span></button>`).join("")}
+        </div>
+      </div>
+    ` : ""}
+
+    <div class="card" id="devidencecard">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <h3>Evidence</h3>
+          <p class="hint" style="margin:2px 0 0" id="devhint">Stories behind this topic in the last 72h (most significant first). Facts in any brief must come from these.</p>
+        </div>
+        <div id="devfiltertag" style="display:none"></div>
+      </div>
+      <div id="devlist" style="margin-top:10px"></div>
+    </div>
 
     ${t?.pathways?.length ? `<div class="card"><h3>Event → disruption → sector → question</h3><p class="hint">Causal pathways suggested by the model. “Observed” means the story itself reports the disruption; everything else is a hypothesis.</p>${t.pathways.map((p) => `<div class="story"><div><span class="pill ${p.status === "observed" ? "p-ok" : "p-muted"}">${p.status}</span> <b>${esc(p.disruption)}</b> → ${esc(p.sector)}</div><div class="small">Question: ${esc(p.question)}</div><div class="tiny mute">${esc(clip(p.story, 100))}</div></div>`).join("")}</div>` : ""}
 
@@ -500,18 +549,159 @@ async function openOpp(key) {
     <div class="card"><h3>Brief</h3><div id="dbrief"></div></div>
     <div class="card"><h3>Recommendation history</h3><p class="hint">Every logged change, with why it changed. Evidence is stored with each entry.</p>${hist.history.length ? `<div class="timeline">${hist.history.map((h) => `<div class="ev"><div class="small b">${dt(h.ts)} · ${actionPill(h.action)} ${stagePill(h.stage)} score ${h.score.toFixed(0)}</div><div class="small">${esc(h.reason)}</div></div>`).join("")}</div>` : `<p class="mute small">Not logged yet. History is recorded every few minutes while the server runs.</p>`}</div>`;
 
+  // Filter evidence stories by geographical location in Opportunity drawer
+  const allEvidence = (t?.stories ?? o.stories) || [];
+  let curDGeo = "all";
+
+  const renderEvidenceList = (items, filterLabel = null) => {
+    const listEl = $("#devlist", body);
+    if (!listEl) return;
+    const hintEl = $("#devhint", body);
+    const tagEl = $("#devfiltertag", body);
+    const clearBtn = $("#dgeoclear", body);
+
+    if (filterLabel) {
+      if (hintEl) hintEl.textContent = `Showing ${items.length} of ${allEvidence.length} stories for "${filterLabel}".`;
+      if (tagEl) {
+        tagEl.style.display = "";
+        tagEl.innerHTML = `<span class="pill p-ok">Filtered: 📍 ${esc(filterLabel)}</span>`;
+      }
+      if (clearBtn) clearBtn.style.display = "";
+    } else {
+      if (hintEl) hintEl.textContent = `Stories behind this topic in the last 72h (most significant first). Facts in any brief must come from these.`;
+      if (tagEl) tagEl.style.display = "none";
+      if (clearBtn) clearBtn.style.display = "none";
+    }
+
+    if (!items.length) {
+      listEl.innerHTML = `<div class="empty" style="padding:16px 0;color:var(--mute)">No evidence stories found matching "${esc(filterLabel || "")}". <a href="#" id="dgeoresetlink" style="color:var(--brand);margin-left:6px;cursor:pointer">Show all stories</a></div>`;
+      const resetLink = $("#dgeoresetlink", listEl);
+      if (resetLink) resetLink.onclick = (e) => { e.preventDefault(); filterByGeo("all"); };
+      return;
+    }
+
+    listEl.innerHTML = items.map((s) => `
+      <div class="story">
+        <a class="h" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>
+        <div style="margin:3px 0">
+          ${s.verified ? `<span class="pill p-ok">verified</span> ` : ""}
+          ${s.primary ? `<span class="pill p-high">primary source</span> ` : ""}
+          ${(s.geography && s.geography.length) ? s.geography.map((g) => `<button class="tag clickable-geo" data-dgeo="${esc(g)}" style="background:var(--brand-soft);color:var(--brand);font-weight:600;cursor:pointer;border:none;padding:2px 8px;border-radius:4px" title="Filter by ${esc(g)}">📍 ${esc(g)}</button>`).join(" ") : ""}
+          <span class="tag">${s.outlets ?? 1} outlet${(s.outlets ?? 1) > 1 ? "s" : ""} → ${s.origins ?? 1} origin${(s.origins ?? 1) > 1 ? "s" : ""}</span>
+          <span class="tag">${s.fullText ? "full text" : "headline only"}</span>
+          ${s.contentType ? `<span class="tag">${esc(s.contentType)}</span>` : ""}
+          ${s.wire ? `<span class="tag">wire: ${esc(s.wire)}</span>` : ""}
+        </div>
+        ${s.summary ? `<div class="small mute">${esc(s.summary)}</div>` : ""}
+      </div>
+    `).join("");
+
+    $$(".clickable-geo", listEl).forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        filterByGeo(btn.dataset.dgeo);
+      };
+    });
+  };
+
+  const filterByGeo = (target) => {
+    if (curDGeo === target && target !== "all") {
+      target = "all";
+    }
+    curDGeo = target;
+    $$("#dgeobar .geo-pill", body).forEach((b) => b.classList.toggle("active", b.dataset.dgeo === target));
+
+    if (target === "all") {
+      renderEvidenceList(allEvidence, null);
+    } else {
+      const tg = target.toLowerCase();
+      const filtered = allEvidence.filter((s) => {
+        const geos = (s.geography && s.geography.length) ? s.geography : [];
+        const inGeo = geos.some((g) => {
+          const gl = String(g).toLowerCase();
+          return gl === tg || gl.includes(tg) || tg.includes(gl);
+        });
+        if (inGeo) return true;
+        const text = `${s.title || ""} ${s.summary || ""}`.toLowerCase();
+        return text.includes(tg);
+      });
+      renderEvidenceList(filtered, target);
+    }
+  };
+
+  // Render initial evidence list
+  renderEvidenceList(allEvidence, null);
+
+  // Bind clicks on geo pills
+  $$("#dgeobar .geo-pill", body).forEach((b) => {
+    b.onclick = () => filterByGeo(b.dataset.dgeo);
+  });
+  const dGeoClearBtn = $("#dgeoclear", body);
+  if (dGeoClearBtn) {
+    dGeoClearBtn.onclick = () => filterByGeo("all");
+  }
+
   $$("[data-opp]", body).forEach((a) => (a.onclick = (e) => { e.preventDefault(); if (S.oppByKey.has(a.dataset.opp)) openOpp(a.dataset.opp); else toast("Switch off “one row per topic” to open that pairing."); }));
   // momentum chart (hourly/daily)
   let series = ser?.series?.[lk];
-  const drawChart = () => { if (series) { momentum($("#dchart"), series); $("#dline").innerHTML = xForecastLine(series, m); } else $("#dchart").innerHTML = `<div class="empty">No series available.</div>`; };
+  let dChartMode = "momentum";
+  const drawChart = () => {
+    if (series) {
+      if (dChartMode === "candlestick") {
+        HC.candlestick($("#dchart"), series, {
+          onCandleClick: (candle) => {
+            const timeLabel = fmtT(candle.t, "hour");
+            toast(`Selected ${timeLabel}: ${candle.volume || 0} stories tracked (${(candle.close * 100).toFixed(2)}% share)`);
+          }
+        });
+        $("#dcleg").innerHTML = `<span><i style="background:#089981;border-radius:2px"></i>Positive &amp; Neutral (Green)</span><span><i style="background:#f23645;border-radius:2px"></i>Negative (Red)</span><span><i style="background:#f23645;border-radius:2px"></i>🔨 Hammer Decline</span><span><i class="ln" style="background:#2962ff"></i>MA(7) Trend</span><span><i class="dash"></i>Forecast 72h</span>`;
+      } else {
+        HC.momentum($("#dchart"), series);
+        $("#dline").innerHTML = xForecastLine(series, m);
+        $("#dcleg").innerHTML = `<span><i style="background:var(--bars-strong);opacity:.7"></i>stories (left axis)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>rolling average</span><span><i class="dash"></i>forecast</span>`;
+      }
+    } else {
+      $("#dchart").innerHTML = `<div class="empty">No series available.</div>`;
+    }
+  };
   $("#dextra", body).innerHTML = `${xSeasonChip(t?.seasonality)}${t?.sentiment ? `<div style="margin-top:8px"><span class="tiny mute b">SENTIMENT${info("sentimentNet")}</span>${xSentStrip(t.sentiment)}</div>` : ""}`;
   drawChart();
+
+  $$("#dcviewseg button", body).forEach((b) => (b.onclick = () => {
+    dChartMode = b.dataset.cv;
+    $$("#dcviewseg button", body).forEach((x) => x.classList.toggle("on", x === b));
+    drawChart();
+  }));
+
   $$("#dgran button", body).forEach((b) => (b.onclick = async () => {
     $$("#dgran button", body).forEach((x) => x.classList.toggle("on", x === b));
     const r = await api(`/api/series?keys=${encodeURIComponent(lk)}&gran=${b.dataset.g}${S.date ? `&date=${S.date}` : ""}`);
     series = r.series[lk]; drawChart();
   }));
   searchPanel($("#dsearch", body), t?.searchInterest, o.label.name);
+  const dCopyBtn = $("#dcopybrief", body);
+  if (dCopyBtn) {
+    dCopyBtn.onclick = () => {
+      const text = [
+        `BCG MDP STRATEGIC ADVISORY ANGLE`,
+        `================================`,
+        `SECTOR:    ${o.sector}`,
+        `TOPIC:     ${o.label.name}`,
+        `ROLE:      BCG Managing Director & Senior Partner (MDP)`,
+        `SCOPE:     ${o.sectorDescription || "General practice"}`,
+        ``,
+        `EDITORIAL ANGLE / WRITE-ABOUT:`,
+        o.angle || "N/A",
+        ``,
+        `STRATEGIC RATIONALE:`,
+        o.why || "N/A",
+        ``,
+        `METRICS:   Relevance ${o.relevance.toFixed(2)} · ${o.channel} channel · ${o.front} front · ${o.storyCount ?? 0} stories tracked`
+      ].join("\n");
+      navigator.clipboard?.writeText(text);
+      toast("📋 Advisory angle copied to clipboard!");
+    };
+  }
   const xtBtn = $("#xtrefresh", body);
   if (xtBtn) {
     xtBtn.onclick = async () => {
@@ -668,6 +858,21 @@ function bindRunPanel() {
     const st = S.status, todo = Math.max(0, st.enrich.readings - st.enrich.labelled);
     if (!confirm(`Label topics for ${n0(todo)} stories?\n\nThis makes one small LLM call per story (about ${n0(todo)} calls with the configured model). It only adds topic labels, content type, entities and causal pathways. No story is re-read and no existing data is changed. It can be stopped and resumed; labelled stories are skipped.`)) return;
     try { await post("/api/enrich", {}); panel.style.display = "none"; toast("Labelling started"); await loadStatusOnce(); } catch (e) { toast(e.message, 5000); }
+  };
+  const triggerSync = async (full = false) => {
+    panel.style.display = "none";
+    toast(full ? "Starting full export sync..." : "Polling fresh data from export API...");
+    try {
+      await post("/api/sync/export", { full });
+      toast("Sync job started in background");
+      await loadStatusOnce();
+    } catch (e) {
+      toast("Sync failed: " + e.message, 5000);
+    }
+  };
+  if ($("#rsync")) $("#rsync").onclick = () => triggerSync(false);
+  if ($("#rsyncfull")) $("#rsyncfull").onclick = () => {
+    if (confirm("Re-sync all datasets from export API? This may take 1-2 minutes to re-verify all tables.")) triggerSync(true);
   };
 }
 async function loadStatusOnce() { S.status = await api("/api/status"); renderTop(); }

@@ -110,6 +110,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     fulltext: { cmd: "fulltext", summary: /^Upgraded |^\d+ stories were read/ },
     ocr: { cmd: "ocr", summary: /^Database: .*print articles/ },
     online: { cmd: "online", summary: /^Online pieces:|^Database: .*online pieces|^Daily cap/ },
+    sync: { cmd: "sync", summary: /^\[sync\] Finished/ },
   };
   const jobs = Object.fromEntries(Object.keys(KINDS).map((k) => [k, { running: false, date: null, startedAt: 0, lastExit: null, lastMessage: "", tail: "", child: null, logId: null }]));
   const anyJobRunning = () => Object.values(jobs).some((j) => j.running);
@@ -117,7 +118,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   function startJob(kind, args, { date = null, after = null, trigger = "manual", onDone = null } = {}) {
     const j = jobs[kind], spec = KINDS[kind];
     if (j.running) return { code: 409, error: `A ${kind} job is already in progress.` };
-    if (!llm.ok) return { code: 400, error: `Can't ${kind}: ${llm.message}. Add a GROQ_API_KEY or OPENAI_API_KEY, or switch Claude on in Settings → Integrations.` };
+    if (kind !== "sync" && !llm.ok) return { code: 400, error: `Can't ${kind}: ${llm.message}. Add a GROQ_API_KEY or OPENAI_API_KEY, or switch Claude on in Settings → Integrations.` };
     // No job uses a proxy for general traffic. The one use is inside the jobs themselves: article text that could not be fetched directly is retried through it.
     const child = spawn(process.execPath, ["--max-old-space-size=4096", join(root, "src", "cli.mjs"), ...args], {
       cwd: root,
@@ -170,6 +171,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // or after a collection when online.analyze is switched on in the config. The daily cap (online.dailyCap) bounds it either way.
   const startOnline = (trigger = "manual", onDone = null) => startJob("online", ["online"], { trigger, onDone: (code) => { if (code === 0) analytics.cache.clear(); onDone?.(code); } });
   const startFulltext = (trigger = "manual", onDone = null) => startJob("fulltext", ["fulltext"], { trigger, onDone });
+  const startSync = (full = false, trigger = "manual", onDone = null) => startJob("sync", ["sync", ...(full ? ["--full"] : [])], { trigger, onDone: (code) => { if (code === 0) { analytics.cache.clear(); matchNow(); } onDone?.(code); } });
 
   // Automated 8-hour Twitter / X trending sync (India & Worldwide)
   const XTRENDS_SCHEDULE_MS = 8 * 3600e3;
@@ -414,6 +416,15 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   const timers = [setInterval(matchNow, 8000)];
   // Automated 8-hour Twitter / X India trending feed poll (aligned with collection process)
   timers.push(setInterval(() => { runXTrendsSync("scheduled").catch(() => {}); }, XTRENDS_SCHEDULE_MS));
+  // HiveMind live export data polling (every 8 hours when API key is present)
+  const EXPORT_SYNC_MS = 8 * 3600e3;
+  if (process.env.HIVEMIND_EXPORT_KEY) {
+    timers.push(setInterval(() => {
+      if (!jobs.sync?.running && !anyJobRunning()) {
+        startSync(false, "scheduled");
+      }
+    }, EXPORT_SYNC_MS));
+  }
   setTimeout(() => {
     const cached = store.getJson("social.xtrends.cache", null);
     if (!cached || !cached.trends?.length || !cached.worldwide?.length || Date.now() - (cached.fetchedAt || 0) > XTRENDS_SCHEDULE_MS) {
@@ -585,7 +596,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     "/api/opportunity": (u, c) => { const key = (u.searchParams.get("key") || "").slice(0, 200); return key ? { method: "opportunity", args: { company: c, key, date: dayParam(u), mode: u.searchParams.get("mode"), group: u.searchParams.get("group") === "topic" } } : { error: "Pass key=<opportunity key>" }; },
     "/api/labels": (u) => ({ method: "labels", args: { date: dayParam(u), level: u.searchParams.get("level") === "topic" ? "topic" : "bracket", limit: Math.min(300, +u.searchParams.get("limit") || 80) } }),
     "/api/series": (u) => { const keys = (u.searchParams.get("keys") || "").split(",").map(labelKey).filter(Boolean); return keys.length ? { method: "series", args: { keys, gran: u.searchParams.get("gran") === "day" ? "day" : "hour", date: dayParam(u) } } : { error: "Pass keys=b:economy,t:port-disruption" }; },
-    "/api/topic": (u, c) => { const key = labelKey(u.searchParams.get("key")); return key ? { method: "topic", args: { key, company: c, date: dayParam(u) } } : { error: "Bad topic key" }; },
+    "/api/topic": (u, c) => { const key = labelKey(u.searchParams.get("key")); return key ? { method: "topic", args: { key, company: c, date: dayParam(u), geo: u.searchParams.get("geo") || null, eventId: u.searchParams.get("event") || null } } : { error: "Bad topic key" }; },
     "/api/origins": (u) => { const raw = u.searchParams.get("key"), key = !raw || raw === "all" ? "all" : labelKey(raw); return key ? { method: "origins", args: { key, date: dayParam(u) } } : { error: "Pass key=t:port-disruption, b:economy or all" }; },
     "/api/sources": (u) => ({ method: "sourcesView", args: { date: dayParam(u) } }),
     "/api/backtest": () => ({ method: "backtest", args: {} }),
@@ -896,8 +907,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (k === "topic-match") { topicMatchNow("manual", { force: true }); return json(res, 200, { ok: true }); }
         if (k === "second-opinion") { secondOpinionNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "dedupe") return json(res, 200, { ok: true, ...dedupeNow("manual") });
-        const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), ocr: () => startOcr("manual"), online: () => startOnline("manual"), enrich: () => startEnrich(+body.limit || 0, "manual") }[k];
-        if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich or hot-topics." });
+        const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), ocr: () => startOcr("manual"), online: () => startOnline("manual"), enrich: () => startEnrich(+body.limit || 0, "manual"), sync: () => startSync(Boolean(body.full), "manual", () => matchNow()) }[k];
+        if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich, sync or hot-topics." });
         const r = starter();
         return r.ok ? json(res, 200, { ok: true }) : json(res, r.code, { error: r.error });
       }
@@ -995,6 +1006,22 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const r = startEnrich(Math.max(0, Math.min(50000, +body.limit || 0)));
         return r.ok ? json(res, 200, { ok: true }) : json(res, r.code, { error: r.error });
       }
+      if (req.method === "POST" && p === "/api/sync/export") {
+        if (!needJson(req, res)) return;
+        const body = JSON.parse(await readBody(req) || "{}");
+        const r = startSync(Boolean(body.full), "manual", () => matchNow());
+        return r.ok ? json(res, 200, { ok: true, status: "started" }) : json(res, r.code, { error: r.error });
+      }
+      if (req.method === "GET" && p === "/api/sync/status") {
+        const meta = {
+          stories: store.getMeta("export.since.stories"),
+          articles: store.getMeta("export.since.articles"),
+          readings: store.getMeta("export.since.readings"),
+          topics: store.getMeta("export.since.topics"),
+          lastSync: store.getMeta("export.lastSyncAt")
+        };
+        return json(res, 200, { job: jobs.sync, meta });
+      }
       if (req.method === "GET" && p === "/api/dates") return json(res, 200, store.days());
 
       // ---- first dashboard's state payload (kept for compatibility) ----
@@ -1026,6 +1053,24 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const c = companies.put({ name, sectors: parsed.sectors });
         matchNow();
         return json(res, 200, { id: c.id, name: c.name, sectors: c.sectors });
+      }
+      if (req.method === "POST" && p === "/api/company/update") {
+        if (!needJson(req, res)) return;
+        const body = JSON.parse(await readBody(req) || "{}");
+        const id = slugify(body.id || "");
+        if (!id) return json(res, 400, { error: "Client company id is required." });
+        let sectors = Array.isArray(body.sectors) ? body.sectors : [];
+        if (!sectors.length && body.text) {
+          sectors = parseSectors(body.text, body.name || "").sectors;
+        }
+        if (!sectors.length) return json(res, 400, { error: "At least one sector with a name is required." });
+        try {
+          const updated = companies.update(id, { name: body.name, sectors });
+          matchNow();
+          return json(res, 200, { ok: true, company: updated });
+        } catch (e) {
+          return json(res, 400, { error: e.message });
+        }
       }
       if (req.method === "DELETE" && p === "/api/company") {
         const id = slugify(url.searchParams.get("id") || "");

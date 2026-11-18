@@ -159,10 +159,20 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
       if (evidenceStatus === "hypothesis") missing.push(inherited ? "Sector link inherited from the parent bracket: a hypothesis" : judged ? `Sector link judged for this topic but only moderately relevant (${h.relevance.toFixed(2)}): a hypothesis` : "Sector link not yet backed by enough stories: a hypothesis");
       if (!trigger?.verified) missing.push("No verified trigger (needs a primary source or ≥3 independent origins)");
       const top = [...list].sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount).slice(0, 5)
-        .map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType }));
+        .map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3) }));
       const bracketName = bracketId ? registry.get(bracketId)?.name : null;
+      const secDesc = company.sectors?.find((s) => s.name === h.sector)?.description || "";
+      const geoCounts = new Map();
+      for (const it of list) {
+        for (const g of (it.geography || [])) {
+          const trimmed = String(g).trim();
+          if (trimmed) geoCounts.set(trimmed, (geoCounts.get(trimmed) || 0) + 1);
+        }
+      }
+      const oppGeo = Array.from(geoCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([gName, cnt]) => ({ name: gName, count: cnt }));
+
       out.push({
-        key: oppKey, company: company.id, sector: h.sector,
+        key: oppKey, company: company.id, sector: h.sector, sectorDescription: secDesc,
         label: { key: m.key, name: labelName(m.key), level: m.level, parent: bracketId ?? null, parentName: bracketName },
         angle: h.write_about, why: h.why, relevance: h.relevance, channel: h.channel, front: h.front, evidenceStatus,
         score, components: comp, stage: m.stage, stageRule: m.stageRule, evidence: m.evidence, spark: m.spark,
@@ -174,6 +184,8 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
         metrics: { count: m.count, countPrev: m.countPrev, total: m.total, share: m.share, baseShare: m.baseShare, ratio: m.ratio, ratioPrev: m.ratioPrev, accel: m.accel,
           originsRecent: m.originsRecent, areaCount: m.areaCount, areas: m.areas, baselineHours: m.baselineHours, fullTextCount: m.fullTextCount, verifiedCount: m.verifiedCount, windowHours: m.windowHours, storiesAll: m.storiesAll },
         missing, stories: top,
+        storyCount: list.length,
+        geoBreakdown: oppGeo,
         review: trigger
           ? `Revise or withdraw if "${trigger.title.slice(0, 90)}" is corrected, reversed or superseded, or if ${labelName(m.key)} momentum falls below ×1.0 for two consecutive ${cfg.intervals.stepHours}h steps.`
           : `Revise or withdraw if ${labelName(m.key)} momentum falls below ×1.0 for two consecutive ${cfg.intervals.stepHours}h steps, or if no verified trigger appears.`,

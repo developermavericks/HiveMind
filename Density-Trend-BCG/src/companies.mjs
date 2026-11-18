@@ -119,6 +119,27 @@ export class CompanyStore {
     writeFileAtomic(this.#file(company.id), JSON.stringify(company));
   }
 
+  update(id, { name, sectors }) {
+    const prev = this.get(id);
+    if (!prev) throw new Error("Client company not found: " + id);
+    const cleanName = (name || prev.name).trim().slice(0, 80);
+    const cleanSectors = dedupe(sectors || []);
+    if (!cleanSectors.length) throw new Error("At least one sector with a name is required");
+    const hash = sectorsHash(cleanSectors);
+    const company = {
+      ...prev,
+      name: cleanName,
+      sectors: cleanSectors,
+      sectorsHash: hash,
+      // If sectors or their descriptions changed, clear previous matches so new tailored angles are judged!
+      matches: prev.sectorsHash === hash ? prev.matches : {},
+      matchVersion: MATCH_VERSION,
+      updatedAt: Date.now(),
+    };
+    this.save(company);
+    return company;
+  }
+
   remove(id) { const f = this.#file(id); if (existsSync(f)) unlinkSync(f); }
 }
 

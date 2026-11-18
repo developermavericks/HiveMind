@@ -150,6 +150,14 @@ const HC = (() => {
       }
     };
     ov.onmouseleave = () => { cross.style.display = "none"; tip.hide(); };
+    ov.onclick = (e) => {
+      const i = at(e);
+      if (i < 0 || i >= n) return;
+      const targetOhlc = S.ohlc?.[i] || { t: S.bins[i], volume: S.count[i], stories: [] };
+      if (typeof opts.onCandleClick === "function") {
+        opts.onCandleClick(targetOhlc, i, S);
+      }
+    };
     svg.querySelectorAll(".trg").forEach((g) => {
       const t = S.triggers[+g.dataset.i];
       g.onmousemove = (e) => tip.show(`<b>Verified trigger ${+g.dataset.i + 1}</b>${esc(clip(t.title, 120))}<div style="opacity:.75;margin-top:3px">${esc(t.reason)} · ${esc(fmtT(t.t, "hour"))}</div><div style="opacity:.6">click to open</div>`, e);
@@ -217,6 +225,399 @@ const HC = (() => {
     });
   }
 
+  // ---- financial-grade candlestick chart for news coverage momentum ----
+  // Renders stock-market-grade OHLC candlestick chart with ticker header, price ladder, volume sub-pane, and crosshairs.
+  function candlestick(el, S, opts = {}) {
+    if (!S || (!S.ohlc?.length && !S.bins?.length)) {
+      el.innerHTML = `<div class="empty">No candlestick data available for this topic.</div>`;
+      return;
+    }
+    const show = { volume: true, avg: true, forecast: true, ...opts.show };
+    const rawOhlc = S.ohlc || [];
+    const fcOhlc = show.forecast && S.forecastOhlc?.length ? S.forecastOhlc : [];
+    const allOhlc = [...rawOhlc, ...fcOhlc];
+    if (!allOhlc.length) {
+      el.innerHTML = `<div class="empty">No OHLC series.</div>`;
+      return;
+    }
+
+    const W = 1000, H = 370, mL = 16, mR = 66, mT = 22, mB = 30;
+    const topH = 240; // main candle area height
+    const volH = 50;  // volume sub-panel height
+    const volGap = 16;
+    const topBase = mT + topH;
+    const volTop = topBase + volGap;
+    const volBase = volTop + volH;
+
+    const n = rawOhlc.length;
+    const slots = allOhlc.length;
+    const bw = (W - mL - mR) / Math.max(1, slots);
+    const cw = Math.min(18, Math.max(3.5, bw * 0.72));
+    const X = (i) => mL + (i + 0.5) * bw;
+
+    // Calculate axis maximums
+    const validHighs = allOhlc.map((d) => d.high).filter((v) => v != null);
+    const validLows = allOhlc.map((d) => d.low).filter((v) => v != null);
+    const maxShare = Math.max(...validHighs, 0.01) * 1.12;
+    const volumes = rawOhlc.map((d) => d.volume || 0);
+    const maxVol = Math.max(...volumes, 1) * 1.15;
+
+    const yS = (v) => Math.max(mT, Math.min(topBase, mT + topH * (1 - v / maxShare)));
+    const yV = (v) => Math.max(volTop, Math.min(volBase, volBase - volH * (v / maxVol)));
+
+    // Identify latest valid candle for default ticker and active price line
+    const lastValidIdx = rawOhlc.findLastIndex((d) => d.close != null && d.open != null);
+    const latestCandle = lastValidIdx >= 0 ? rawOhlc[lastValidIdx] : (allOhlc[0] || null);
+
+    // 1. Interactive stock market ticker bar HTML
+    let outHtml = `
+      <div class="candle-ticker-strip">
+        <div class="candle-ticker-left">
+          <span class="candle-ticker-badge">📈 COVERAGE MOMENTUM</span>
+          <span class="candle-ticker-pill">${S.granularity === "day" ? "1D" : "1H"}</span>
+          <span class="candle-ticker-metric">O <b class="ct-o">--</b></span>
+          <span class="candle-ticker-metric">H <b class="ct-h">--</b></span>
+          <span class="candle-ticker-metric">L <b class="ct-l">--</b></span>
+          <span class="candle-ticker-metric">C <b class="ct-c">--</b></span>
+          <span class="candle-ticker-chg ct-chg">--</span>
+          <span class="candle-ticker-metric">Vol <b class="ct-v">--</b></span>
+          <span class="candle-ticker-metric ma">MA(7) <b class="ct-ma">--</b></span>
+        </div>
+        <div class="candle-ticker-right">
+          <span class="candle-ticker-time ct-t">--</span>
+        </div>
+      </div>
+    `;
+
+    // 2. SVG Financial Chart
+    let s = `<svg viewBox="0 0 ${W} ${H}" class="candlestick-svg" role="img" aria-label="Stock market analysis candlestick chart">`;
+
+    // Background horizontal grid lines & share ladder (right axis)
+    for (let k = 0; k <= 5; k++) {
+      const val = maxShare * (1 - k / 5);
+      const y = mT + (topH * k) / 5;
+      s += `<line class="grid" x1="${mL}" x2="${W - mR}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-dasharray="2 3" opacity=".6"/>`;
+      s += `<text x="${W - mR + 7}" y="${y + 4}" style="font-size:10.5px;font-family:var(--mono,monospace);fill:var(--ink2)">${(val * 100).toFixed(maxShare < 0.05 ? 2 : 1)}%</text>`;
+    }
+
+    // Right-hand axis vertical separator rule
+    s += `<line x1="${W - mR}" x2="${W - mR}" y1="${mT}" y2="${volBase}" stroke="var(--line2)" stroke-width="1"/>`;
+    s += `<text x="${W - mR + 7}" y="${mT - 6}" style="font-weight:700;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;fill:var(--ink2)">SHARE</text>`;
+
+    // Volume sub-panel separator line & labels
+    s += `<line class="grid" x1="${mL}" x2="${W - mR}" y1="${volTop}" y2="${volTop}" stroke="var(--line)" stroke-dasharray="2 3" opacity=".6"/>`;
+    s += `<line x1="${mL}" x2="${W - mR}" y1="${volBase}" y2="${volBase}" stroke="var(--line)"/>`;
+    s += `<text x="${W - mR + 7}" y="${volTop + 10}" style="font-size:9.5px;font-family:var(--mono,monospace);fill:var(--mute)">${Math.round(maxVol)}</text>`;
+    s += `<text x="${W - mR + 7}" y="${volBase}" style="font-size:9.5px;font-family:var(--mono,monospace);fill:var(--mute)">0</text>`;
+    s += `<text x="${mL + 2}" y="${volTop - 4}" style="font-weight:700;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;fill:var(--mute)">VOL (STORIES)</text>`;
+
+    // Forecast projection boundary & shading
+    if (fcOhlc.length) {
+      const fcX = mL + n * bw;
+      s += `<rect x="${fcX}" y="${mT}" width="${fcOhlc.length * bw}" height="${volBase - mT}" fill="var(--forecast)" opacity=".04"/>`;
+      s += `<line x1="${fcX}" x2="${fcX}" y1="${mT}" y2="${volBase}" stroke="var(--forecast)" stroke-width="1.2" stroke-dasharray="3 3"/>`;
+      s += `<rect x="${fcX - 44}" y="${mT - 2}" width="40" height="15" rx="3" fill="var(--surface2)" stroke="var(--line)"/>`;
+      s += `<text x="${fcX - 24}" y="${mT + 9}" text-anchor="middle" style="font-size:9px;font-weight:800;fill:var(--ink)">LIVE</text>`;
+      s += `<rect x="${fcX + 4}" y="${mT - 2}" width="92" height="15" rx="3" fill="var(--forecast)" opacity=".18"/>`;
+      s += `<text x="${fcX + 50}" y="${mT + 9}" text-anchor="middle" style="font-size:9px;font-weight:800;fill:var(--forecast)">FORECAST 72H</text>`;
+    }
+
+    // Sentiment & Color helpers: Positive & Neutral Green (#089981), Negative Red (#f23645)
+    const POSITIVE_GREEN = "#089981";
+    const NEGATIVE_RED = "#f23645";
+
+    const getSentiment = (d) => {
+      if (d?.sentiment) return d.sentiment;
+      if (d?.sentimentNet != null) return d.sentimentNet > 0 ? "positive" : (d.sentimentNet < 0 ? "negative" : "neutral");
+      const topicNet = S.sentiment?.net ?? (typeof opts.sentimentNet === "number" ? opts.sentimentNet : null);
+      if (topicNet != null) return topicNet > 0 ? "positive" : (topicNet < 0 ? "negative" : "neutral");
+      return "neutral";
+    };
+
+    const getCandleColor = (sent) => {
+      return sent === "negative" ? NEGATIVE_RED : POSITIVE_GREEN;
+    };
+
+    // Latest price active horizontal line & axis tag
+    if (latestCandle && latestCandle.close != null) {
+      const sent = getSentiment(latestCandle);
+      const isNeg = sent === "negative";
+      const col = isNeg ? NEGATIVE_RED : POSITIVE_GREEN;
+      const yClose = yS(latestCandle.close);
+      s += `<line x1="${mL}" x2="${W - mR}" y1="${yClose}" y2="${yClose}" stroke="${col}" stroke-width="1.2" stroke-dasharray="3 3" opacity=".8"/>`;
+      s += `<g class="latest-price-badge"><rect x="${W - mR}" y="${yClose - 8}" width="${mR - 4}" height="16" rx="3" fill="${col}"/><text x="${W - mR + (mR - 4)/2}" y="${yClose + 3.5}" text-anchor="middle" style="font-size:9.5px;font-weight:700;font-family:var(--mono,monospace);fill:#fff">${(latestCandle.close * 100).toFixed(2)}%</text></g>`;
+    }
+
+    // Draw candles & volume bars
+    allOhlc.forEach((d, i) => {
+      if (d.open == null || d.close == null) return;
+      const x = X(i);
+      const isUp = d.close >= d.open;
+      const prevVol = i > 0 ? (allOhlc[i - 1]?.volume || 0) : d.volume;
+      const isVolDecline = d.volume < prevVol;
+      const isHammer = d.isHammer ?? (!isUp || (isVolDecline && d.close <= d.open * 1.01));
+
+      const sent = getSentiment(d);
+      const isNeg = sent === "negative";
+      const sentCol = isNeg ? NEGATIVE_RED : POSITIVE_GREEN;
+      const col = d.isForecast ? "var(--forecast)" : sentCol;
+      const fillCol = d.isForecast ? "rgba(245,158,11,0.22)" : (isNeg ? NEGATIVE_RED : POSITIVE_GREEN);
+
+      const yH = yS(d.high), yL = yS(d.low);
+      const yO = yS(d.open), yC = yS(d.close);
+
+      if (isHammer && !d.isForecast) {
+        // Hammer Candlestick Formation:
+        // When declining as per volume or share, render as a hammer
+        // (compact body at upper end, long lower wick representing volume absorption)
+        // Colored by sentiment: Negative Red (#f23645), or Positive/Neutral Green (#089981)
+        const topY = Math.min(yO, yC, yH);
+        const hammerH = Math.max(4, Math.min(8.5, cw * 0.45));
+        const bodyTop = Math.min(topBase - hammerH, Math.max(mT, topY));
+        const bodyBottom = bodyTop + hammerH;
+        const wickBottom = Math.max(bodyBottom, yL);
+
+        // Long lower shadow / wick extending downwards
+        s += `<line x1="${x}" x2="${x}" y1="${bodyBottom}" y2="${wickBottom}" stroke="${col}" stroke-width="1.4" shape-rendering="crispEdges"/>`;
+
+        // Tiny upper wick if high extends above hammer body
+        if (yH < bodyTop) {
+          s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${bodyTop}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges"/>`;
+        }
+
+        // Hammer head (compact body at top of the range)
+        s += `<rect x="${x - cw / 2}" y="${bodyTop}" width="${cw}" height="${hammerH}" rx="1" fill="${fillCol}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges"/>`;
+      } else {
+        // Standard Rising / Forecast Candle:
+        // 1. High-Low Wick line
+        s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${yL}" stroke="${col}" stroke-width="${d.isForecast ? "1" : "1.2"}" shape-rendering="crispEdges" ${d.isForecast ? 'stroke-dasharray="2 2"' : ""}/>`;
+
+        // 2. Candle body
+        const bTop = Math.min(yO, yC);
+        const bH = Math.max(1.8, Math.abs(yC - yO));
+        s += `<rect x="${x - cw / 2}" y="${bTop}" width="${cw}" height="${bH}" rx="${d.isForecast ? 1 : 0.5}" fill="${fillCol}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges" ${d.isForecast ? 'stroke-dasharray="3 2"' : ""}/>`;
+      }
+
+      // 3. Volume bar in bottom sub-pane (colored by sentiment: green for positive & neutral, red for negative)
+      if (show.volume && !d.isForecast && d.volume) {
+        const vy = yV(d.volume);
+        const vCol = isNeg ? "rgba(242,54,69,0.45)" : "rgba(8,153,129,0.5)";
+        s += `<rect x="${x - cw / 2}" y="${vy}" width="${cw}" height="${volBase - vy}" fill="${vCol}" shape-rendering="crispEdges"/>`;
+      }
+    });
+
+    // 4. Moving Average (7-period) overlay line
+    if (show.avg && S.avg?.length) {
+      let dStr = "", pen = false;
+      S.avg.forEach((v, i) => {
+        if (v == null || i >= n) { pen = false; return; }
+        dStr += `${pen ? "L" : "M"}${X(i).toFixed(1)},${yS(v).toFixed(1)}`;
+        pen = true;
+      });
+      if (dStr) {
+        s += `<path d="${dStr}" fill="none" stroke="#2962ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
+      }
+    }
+
+    // 5. Verified trigger diamonds
+    (S.triggers ?? []).forEach((t, idxTrg) => {
+      const x = X(t.bin);
+      const cd = rawOhlc[t.bin];
+      const ty = cd?.high != null ? yS(cd.high) - 8 : mT + 12;
+      s += `<g class="trg" data-i="${idxTrg}" style="cursor:pointer"><path d="M${x},${ty - 6} l6,6 -6,6 -6,-6Z" fill="var(--forecast)" stroke="var(--surface)" stroke-width="1.5"/><text x="${x}" y="${ty + 3}" text-anchor="middle" style="fill:#fff;font-size:8px;font-weight:800">${idxTrg + 1}</text></g>`;
+    });
+
+    // 6. X-axis time labels
+    const every = Math.max(1, Math.ceil(slots / 8));
+    allOhlc.forEach((d, i) => {
+      if (i % every === 0) {
+        s += `<text x="${X(i)}" y="${H - 10}" text-anchor="middle" style="font-size:10px;font-family:var(--mono,monospace);fill:var(--ink2)">${esc(fmtT(d.t, S.granularity))}</text>`;
+      }
+    });
+
+    // 7. Interactive Crosshair & Cursor Floating Badges
+    s += `
+      <g class="crosshair-group" style="display:none">
+        <line class="cross-x" x1="${mL}" x2="${W - mR}" y1="0" y2="0" stroke="var(--ink)" stroke-width="1" stroke-dasharray="2 2" opacity=".5"/>
+        <line class="cross-y" x1="0" x2="0" y1="${mT}" y2="${volBase}" stroke="var(--ink)" stroke-width="1" stroke-dasharray="2 2" opacity=".5"/>
+        <g class="cross-price-tag"><rect x="${W - mR}" y="0" width="${mR - 4}" height="16" rx="2" fill="var(--ink)"/><text x="${W - mR + (mR - 4)/2}" y="11" text-anchor="middle" style="font-size:9.5px;font-weight:700;font-family:var(--mono,monospace);fill:var(--surface)">--</text></g>
+        <g class="cross-time-tag"><rect x="0" y="${volBase + 3}" width="68" height="16" rx="2" fill="var(--ink)"/><text x="34" y="${volBase + 14}" text-anchor="middle" style="font-size:9.5px;font-weight:700;font-family:var(--mono,monospace);fill:var(--surface)">--</text></g>
+      </g>
+      <rect class="ov" x="${mL}" y="${mT}" width="${W - mL - mR}" height="${volBase - mT}" fill="transparent" style="cursor:crosshair"/>
+    </svg>`;
+
+    el.innerHTML = outHtml + s;
+
+    // Elements
+    const svg = el.querySelector("svg");
+    const ov = svg.querySelector(".ov");
+    const chGroup = svg.querySelector(".crosshair-group");
+    const crossX = svg.querySelector(".cross-x");
+    const crossY = svg.querySelector(".cross-y");
+    const chPriceTag = svg.querySelector(".cross-price-tag");
+    const chTimeTag = svg.querySelector(".cross-time-tag");
+    const chPriceText = chPriceTag.querySelector("text");
+    const chPriceRect = chPriceTag.querySelector("rect");
+    const chTimeText = chTimeTag.querySelector("text");
+    const chTimeRect = chTimeTag.querySelector("rect");
+
+    // Ticker strip DOM elements
+    const tkO = el.querySelector(".ct-o");
+    const tkH = el.querySelector(".ct-h");
+    const tkL = el.querySelector(".ct-l");
+    const tkC = el.querySelector(".ct-c");
+    const tkChg = el.querySelector(".ct-chg");
+    const tkV = el.querySelector(".ct-v");
+    const tkMA = el.querySelector(".ct-ma");
+    const tkT = el.querySelector(".ct-t");
+
+    // Helper to update ticker
+    const updateTicker = (d, i) => {
+      if (!d || d.open == null) return;
+      const isUp = d.close >= d.open;
+      const prevVol = i > 0 ? (allOhlc[i - 1]?.volume || 0) : d.volume;
+      const isVolDecline = d.volume < prevVol;
+      const isHammer = d.isHammer ?? (!isUp || (isVolDecline && d.close <= d.open * 1.01));
+      const chgVal = d.close - d.open;
+      const chgPct = d.open > 0 ? (chgVal / d.open) * 100 : 0;
+      const sign = chgVal >= 0 ? "+" : "";
+
+      const sent = getSentiment(d);
+      const sentCol = getCandleColor(sent);
+
+      tkO.textContent = pct(d.open);
+      tkH.textContent = pct(d.high);
+      tkL.textContent = pct(d.low);
+      tkC.textContent = pct(d.close);
+      tkChg.textContent = `${isHammer && !isUp ? "🔨 " : ""}${sign}${pct(chgVal)} (${sign}${chgPct.toFixed(2)}%)`;
+      tkChg.className = `candle-ticker-chg ${isHammer && !isUp ? "hammer" : (isUp ? "up" : "down")}`;
+      tkChg.style.color = sentCol;
+      tkChg.style.background = sent === "negative" ? "rgba(242,54,69,0.12)" : "rgba(8,153,129,0.14)";
+      tkV.textContent = d.isForecast ? "--" : (d.volume || 0);
+      const maVal = S.avg?.[i];
+      tkMA.textContent = maVal != null ? pct(maVal) : "--";
+      tkT.textContent = `${fmtT(d.t, S.granularity)}${d.isForecast ? " (Forecast)" : ""}`;
+    };
+
+    // Initialize ticker with latest candle
+    if (latestCandle) updateTicker(latestCandle, lastValidIdx >= 0 ? lastValidIdx : 0);
+
+    const at = (e) => {
+      const r = svg.getBoundingClientRect();
+      const relX = ((e.clientX - r.left) / r.width) * W;
+      const relY = ((e.clientY - r.top) / r.height) * H;
+      const i = Math.floor((relX - mL) / bw);
+      return { i, relX, relY };
+    };
+
+    ov.onmousemove = (e) => {
+      const { i, relX, relY } = at(e);
+      if (i < 0 || i >= slots) return;
+
+      const d = allOhlc[i];
+      if (!d) return;
+
+      chGroup.style.display = "";
+      const xPos = X(i);
+      crossY.setAttribute("x1", xPos);
+      crossY.setAttribute("x2", xPos);
+      crossX.setAttribute("y1", relY);
+      crossX.setAttribute("y2", relY);
+
+      // Price tag at mouse Y
+      const cursorShare = Math.max(0, (1 - (relY - mT) / topH) * maxShare);
+      chPriceRect.setAttribute("y", relY - 8);
+      chPriceText.setAttribute("y", relY + 3.5);
+      chPriceText.textContent = `${(cursorShare * 100).toFixed(2)}%`;
+
+      // Time tag at candle X
+      const timeTagW = 76;
+      chTimeTag.setAttribute("transform", `translate(${Math.max(mL, Math.min(W - mR - timeTagW, xPos - timeTagW / 2))}, 0)`);
+      chTimeText.textContent = fmtT(d.t, S.granularity);
+
+      // Update ticker bar
+      updateTicker(d, i);
+
+      // Show detailed floating tooltip
+      const isUp = d.close >= d.open;
+      const prevVol = i > 0 ? (allOhlc[i - 1]?.volume || 0) : d.volume;
+      const isVolDecline = d.volume < prevVol;
+      const isHammer = d.isHammer ?? (!isUp || (isVolDecline && d.close <= d.open * 1.01));
+      const chg = d.open > 0 ? (((d.close - d.open) / d.open) * 100).toFixed(2) : "0.00";
+      const chgSign = +chg >= 0 ? "+" : "";
+
+      const sent = getSentiment(d);
+      const sentCol = getCandleColor(sent);
+      const sentLabel = sent === "negative" ? "Negative (Red)" : (sent === "positive" ? "Positive (Green)" : "Neutral (Green)");
+
+      let h = `<b>${esc(fmtT(d.t, S.granularity))}${d.isForecast ? " (Forecast)" : ""}</b>`;
+      h += `<div class="row"><span>Open</span><span>${pct(d.open)}</span></div>`;
+      h += `<div class="row"><span>High</span><span>${pct(d.high)}</span></div>`;
+      h += `<div class="row"><span>Low</span><span>${pct(d.low)}</span></div>`;
+      h += `<div class="row"><span>Close</span><span>${pct(d.close)}</span></div>`;
+      h += `<div class="row"><span>Pattern</span><span style="color:${sentCol};font-weight:700">${isHammer && !d.isForecast ? "🔨 Hammer (Volume/Share Decline)" : "▲ Rising Candle"}</span></div>`;
+      h += `<div class="row"><span>Sentiment</span><span style="color:${sentCol};font-weight:700">● ${sentLabel} (${sent})</span></div>`;
+      h += `<div class="row"><span>Change</span><span style="color:${sentCol};font-weight:700">${chgSign}${chg}%</span></div>`;
+      if (!d.isForecast) {
+        h += `<div class="row"><span>Volume (Stories)</span><span>${d.volume || 0}</span></div>`;
+        if (d.origins) h += `<div class="row"><span>Origins</span><span>${d.origins}</span></div>`;
+        if (d.sentimentBreakdown) {
+          const sb = d.sentimentBreakdown;
+          if (sb.pos || sb.neg || sb.neu || sb.mixed) {
+            h += `<div class="tiny mute" style="margin-top:3px">${sb.pos} positive · ${sb.neg} negative · ${sb.neu + sb.mixed} neutral/mixed</div>`;
+          }
+        }
+        if (!d.isForecast && (d.volume > 0 || d.stories?.length)) {
+          h += `<div class="tiny" style="margin-top:6px;padding-top:4px;border-top:1px dashed rgba(255,255,255,0.22);color:#38bdf8;font-weight:700">👉 Click candle to view ${(d.stories?.length || d.volume || 0)} stories</div>`;
+        }
+      } else {
+        h += `<div class="tiny mute" style="margin-top:3px">Forecast confidence corridor</div>`;
+      }
+      tip.show(h, e);
+    };
+
+    ov.onmouseleave = () => {
+      chGroup.style.display = "none";
+      tip.hide();
+      if (latestCandle) updateTicker(latestCandle, lastValidIdx >= 0 ? lastValidIdx : 0);
+    };
+
+    ov.onclick = (e) => {
+      const { i } = at(e);
+      if (i < 0 || i >= slots) return;
+      const d = allOhlc[i];
+      if (!d || d.isForecast) return;
+
+      // Visual indicator for selected candle
+      svg.querySelectorAll(".candle-selection-highlight").forEach((el) => el.remove());
+      const xPos = X(i);
+      const hl = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      hl.setAttribute("class", "candle-selection-highlight");
+      hl.setAttribute("x", xPos - bw / 2);
+      hl.setAttribute("y", mT);
+      hl.setAttribute("width", bw);
+      hl.setAttribute("height", volBase - mT);
+      hl.setAttribute("fill", "var(--brand, #007aff)");
+      hl.setAttribute("opacity", "0.18");
+      hl.setAttribute("stroke", "var(--brand, #007aff)");
+      hl.setAttribute("stroke-width", "1.5");
+      hl.setAttribute("stroke-dasharray", "3 2");
+      hl.setAttribute("pointer-events", "none");
+      svg.insertBefore(hl, chGroup);
+
+      if (typeof opts.onCandleClick === "function") {
+        opts.onCandleClick(d, i, S);
+      }
+    };
+
+    svg.querySelectorAll(".trg").forEach((g) => {
+      const t = S.triggers[+g.dataset.i];
+      g.onmousemove = (e) => tip.show(`<b>Verified trigger ${+g.dataset.i + 1}</b>${esc(clip(t.title, 120))}<div style="opacity:.75;margin-top:3px">${esc(t.reason)} · ${esc(fmtT(t.t, "hour"))}</div><div style="opacity:.6">click to open</div>`, e);
+      g.onmouseleave = tip.hide;
+      g.onclick = () => window.open(t.url, "_blank", "noopener");
+    });
+  }
+
   // ---- social pulse line chart for X/Twitter tweet counts ----
   function socialChart(el, points, { baseline = null, title = "Hourly X (Twitter) Post Volume" } = {}) {
     if (!points?.length) { el.innerHTML = `<div class="empty">No X activity recorded yet.</div>`; return; }
@@ -250,5 +651,5 @@ const HC = (() => {
     el.innerHTML = s;
   }
 
-  return { esc, clip, spark, ring, hbars, heat, momentum, lineChart, radar, sentimentChart, socialChart, tip, fmtT, pct, PAL };
+  return { esc, clip, spark, ring, hbars, heat, momentum, candlestick, lineChart, radar, sentimentChart, socialChart, tip, fmtT, pct, PAL };
 })();
