@@ -462,7 +462,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     if (closed || warming || anyJobRunning()) return;
     warming = true;
     try {
-      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/backtest"];
+      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?"];
       for (const co of companies.list()) {
         urls.push(`/api/overview?company=${co.id}`);
         for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
