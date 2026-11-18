@@ -40,8 +40,10 @@ const DATA = join(root, "data");
 const BRACKETS = join(DATA, "brackets-v3.json");
 const loadRegistry = () => new BracketRegistry(BRACKETS, readJson("config/brackets.seed.json"));
 
-function openStore() {
+function openStore({ legacy = true } = {}) {
   const store = new Store(join(DATA, "hivemind.db"));
+  // The export sync fills the database from the live server, so the old sample files are never imported into it.
+  if (!legacy) { if (!store.getMeta("legacy_imported")) store.setMeta("legacy_imported", "skipped: export sync"); return store; }
   const imported = store.importLegacy(DATA); // one time: pulls in the earlier readings-v3.json / stories-v3.json
   if (imported) console.log(`Imported earlier data into the database: ${imported.readings} readings, ${imported.stories} stories`);
   return store;
@@ -509,10 +511,10 @@ const pool_ = pool;
 // Poll data from the HiveMind export API (read-only datasets + reference data)
 async function syncExport(opts) {
   const { ExportSyncer } = await import("./sync_export.mjs");
-  const store = openStore();
+  const store = openStore({ legacy: false });
   const syncer = new ExportSyncer({
-    baseUrl: opts.url || process.env.HIVEMIND_EXPORT_BASE_URL,
-    apiKey: opts.key || process.env.HIVEMIND_EXPORT_KEY,
+    baseUrl: opts.url || process.env.HIVEMIND_SYNC_URL,
+    apiKey: opts.key || process.env.HIVEMIND_SYNC_KEY,
     store,
     rootDir: root,
     log: console.log

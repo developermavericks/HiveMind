@@ -82,8 +82,8 @@ function getJson(urlStr, apiKey, options = {}) {
 
 export class ExportSyncer {
   constructor({ baseUrl, apiKey, store, rootDir, log = console.log }) {
-    this.baseUrl = (baseUrl || process.env.HIVEMIND_EXPORT_BASE_URL || "https://34-100-157-5.sslip.io/api/export").replace(/\/+$/, "");
-    this.apiKey = apiKey || process.env.HIVEMIND_EXPORT_KEY;
+    this.baseUrl = (baseUrl || process.env.HIVEMIND_SYNC_URL || "https://34-100-157-5.sslip.io/api/export").replace(/\/+$/, "");
+    this.apiKey = apiKey || process.env.HIVEMIND_SYNC_KEY;
     this.store = store;
     this.rootDir = rootDir;
     this.log = log;
@@ -297,7 +297,7 @@ export class ExportSyncer {
     this.log(`[sync] Starting HiveMind export sync from ${this.baseUrl}...`);
 
     if (!this.apiKey) {
-      throw new Error("Missing HiveMind export API key (HIVEMIND_EXPORT_KEY).");
+      throw new Error("Missing HiveMind sync key (HIVEMIND_SYNC_KEY): the key of the server you sync from.");
     }
 
     let catalog;

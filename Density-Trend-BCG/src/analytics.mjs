@@ -31,20 +31,110 @@ const tallySentiment = (list) => {
 };
 const STAGES = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
 
+// Whole-word keyword test: short words match exactly ("ai" never matches "said", "port" never matches "report");
+// entries ending in "*" are stems and match any ending ("regulat*" -> regulation, regulator).
+const wordRx = (words) => new RegExp(`\\b(?:${words.map((w) => (w.endsWith("*") ? w.slice(0, -1).replace(/[.&/]/g, "\\$&") + "\\w*" : w.replace(/[.&/]/g, "\\$&"))).join("|")})\\b`, "i");
+const PRACTICE_RULES = [
+  ["Travel, Cities and Infrastructure", wordRx(["aviation", "flight*", "plane*", "aircraft", "airport*", "runway*", "airline*", "rail*", "train", "trains", "metro", "highway*", "port", "ports", "shipping", "transport*", "infrastructure", "urban"])],
+  ["Healthcare", wordRx(["health*", "hospital*", "pharma*", "drug*", "medicine*", "vaccin*", "doctor*", "clinical", "disease*", "medtech"])],
+  ["Industrial Goods", wordRx(["auto", "automobile*", "automotive", "car", "cars", "motor*", "steel", "mining", "metal*", "chemical*", "factory", "factories", "industrial", "manufactur*"])],
+  ["Financial Institutions", wordRx(["bank*", "lending", "lender*", "credit", "nbfc*", "payment*", "fintech*", "rbi", "upi", "loan*", "insurer*", "insurance", "fraud*", "scam*"])],
+  ["Energy", wordRx(["energy", "oil", "petrol", "diesel", "gas", "power", "grid", "solar", "renewable*", "fuel*"])],
+  ["Technology, Media, Telecommunications", wordRx(["cyber*", "cloud", "software", "telecom*", "semiconductor*", "chip", "chips", "ai", "artificial intelligence", "data", "digital", "tech", "technology", "outage*", "hack*", "malware", "ransomware"])],
+  ["Climate & Sustainability", wordRx(["climate", "carbon", "emission*", "flood*", "cyclone*", "weather", "pollution", "esg", "heatwave*", "monsoon"])],
+  ["Public Sector", wordRx(["policy", "policies", "ministry", "court*", "regulat*", "governance", "defence", "defense", "election*", "panchayat*", "government", "parliament"])],
+  ["Corporate Finance and Strategy", wordRx(["merger*", "acquisition*", "acquire*", "ipo", "valuation*", "stake", "deal", "deals", "funding", "investor*", "private equity"])],
+];
 function detectPracticeArea(labelName, text) {
-  const t = `${labelName || ""} ${text || ""}`.toLowerCase();
-  if (/aviation|flight|plane|crash|airport|runway|airline|rail|train|metro|highway|port|shipping|transport/.test(t)) return "Travel, Cities and Infrastructure";
-  if (/health|hospital|pharma|drug|medicine|vaccine|doctor|clinical|disease/.test(t)) return "Healthcare";
-  if (/auto|car|motor|steel|mining|metal|chemical|factory|industrial|manufacturing/.test(t)) return "Industrial Goods";
-  if (/bank|lending|credit|nbfc|payment|fintech|rbi|fund|capital|valuation|m&a|pe\/vc/.test(t)) return "Financial Institutions";
-  if (/energy|oil|petrol|diesel|gas|power|grid|solar|renewable|fuel/.test(t)) return "Energy";
-  if (/cyber|cloud|software|telecom|media|semiconductor|chip|ai|data/.test(t)) return "Technology, Media & BCG X";
-  if (/climate|carbon|emission|flood|cyclone|weather|pollution|esg/.test(t)) return "Climate & Sustainability";
-  if (/policy|ministry|court|regulat|governance|defence|election|panchayat/.test(t)) return "Public Sector";
-  return "Corporate Strategy & Leadership";
+  const t = `${labelName || ""} ${text || ""}`;
+  for (const [practice, rx] of PRACTICE_RULES) if (rx.test(t)) return practice;
+  return DEFAULT_PRACTICE;
+}
+const DEFAULT_PRACTICE = "Corporate Strategy & Leadership";
+
+// What kind of event a cluster is, from the AI's event type for each story (and the headline as a fallback).
+const KIND_RULES = [
+  ["nonbusiness", wordRx(["sport*", "cricket*", "football", "match", "matches", "tournament*", "series", "olympic*", "film*", "movie*", "celebrit*", "entertainment", "bollywood", "music", "wedding*", "festival*", "horoscope*", "obituar*"])],
+  ["crisis", wordRx(["accident*", "crash*", "disaster*", "outage*", "failure*", "fire*", "explosion*", "collapse*", "flood*", "cyclone*", "attack*", "breach*", "hack*", "fraud*", "scam*", "death*", "deaths", "killed", "injur*", "derail*", "leak*", "strike*", "shortage*", "disruption*", "incident*", "glitch*", "delay*"])],
+  ["policy", wordRx(["policy", "policies", "regulat*", "ruling*", "verdict*", "ban", "bans", "banned", "law", "laws", "bill", "budget*", "tariff*", "tax", "taxes", "mandate*", "directive*", "guideline*", "notification*", "court*", "government decision"])],
+  ["deal", wordRx(["merger*", "acquisition*", "acquire*", "deal", "deals", "partnership*", "investment*", "funding", "ipo", "stake*", "launch*", "expansion*", "results", "earnings", "profit*", "revenue*"])],
+  ["market", wordRx(["price*", "inflation", "rate", "rates", "market*", "demand", "exports?", "imports?", "trade", "currency", "rupee", "stock*", "shares"])],
+];
+// Each story's kind comes from its AI event type (else its headline); the cluster takes the most common kind, so one stray
+// story (e.g. a cricket item grouped into a fraud event) does not decide it. "nonbusiness" needs a real majority.
+function storyKind(s) {
+  for (const [kind, rx] of KIND_RULES) if (rx.test(s.eventType || "")) return kind;
+  for (const [kind, rx] of KIND_RULES) if (rx.test(s.title || "")) return kind;
+  return "general";
+}
+function eventKind(cl) {
+  const counts = new Map();
+  for (const s of cl.stories) { const k = storyKind(s); counts.set(k, (counts.get(k) || 0) + 1); }
+  const n = cl.stories.length || 1;
+  if ((counts.get("nonbusiness") || 0) / n > 0.5) return "nonbusiness";
+  counts.delete("nonbusiness");
+  const lead = storyKind(cl.stories[0] ?? {});
+  let best = "general", bestN = 0;
+  for (const [k, c] of counts) if (c > bestN || (c === bestN && k === lead)) { best = k; bestN = c; }
+  return best;
 }
 
-function buildTopicEventClusters(items, labelName) {
+// Question sets per event kind; place and company names are filled in per event.
+const ANGLE_KINDS = {
+  crisis: {
+    format: "Op-Ed / Executive Leadership Column", ending: "From Crisis Response to Structural Resilience",
+    questions: (loc, ent) => [
+      `Operational Resilience: Are our control towers, vendor SLAs and fallback systems insulated against the single-point failures seen in ${loc}?`,
+      `Regulatory & Statutory Exposure: What is our exposure to the directives, tighter mandates and penalties likely to follow in ${loc}?`,
+      `Capex & Capital Allocation: What balance between redundancy capex, monitoring and quarterly margins gives durable resilience?`,
+      `Brand & Market Positioning: Can transparency and reliability become a differentiator while ${ent} manage the fallout?`,
+      `Board Oversight: How quickly can the board's risk committee verify maintenance records, supplier certifications and emergency SOPs?`,
+    ],
+  },
+  policy: {
+    format: "Policy Perspective / Op-Ed", ending: "What Leaders Must Do Before the Rules Bite",
+    questions: (loc, ent) => [
+      `Regulatory & Statutory Exposure: Which of our products, contracts and operations in ${loc} does this change touch, and by when?`,
+      `Compliance Cost & Timeline: What will compliance cost, and what is the realistic transition window?`,
+      `Strategic Positioning: Where does the change open room to gain share against ${ent}?`,
+      `Government & Stakeholder Engagement: Where should we engage regulators and industry bodies before the details are final?`,
+      `Scenario Planning: How do our plans change under strict, moderate and delayed enforcement?`,
+    ],
+  },
+  deal: {
+    format: "Strategy Perspective / Op-Ed", ending: "Where the Value Will Really Be Created",
+    questions: (loc, ent) => [
+      `Value Creation: Where will this move by ${ent} create or destroy value, and for whom?`,
+      `Competitive Response: How should competitors in ${loc} respond: match, partner or differentiate?`,
+      `Integration & Execution: What usually goes wrong in executing moves like this, and how is it avoided?`,
+      `Capex & Capital Allocation: Does this change where capital should go in the sector over the next 2-3 years?`,
+      `Regulatory & Antitrust: What approvals or scrutiny could change the outcome?`,
+    ],
+  },
+  market: {
+    format: "Market Perspective / Op-Ed", ending: "How Leaders Should Respond to the Shift",
+    questions: (loc, ent) => [
+      `Demand & Pricing: How will customers in ${loc} react, and how much can be passed on in prices?`,
+      `Cost & Margin: Which cost lines move first, and what is the margin impact over two quarters?`,
+      `Supply Chain: Which suppliers and inputs are most exposed, and what are the alternatives?`,
+      `Capex & Capital Allocation: Should investment plans be accelerated, paused or redirected?`,
+      `Scenario Planning: What do the next 6-12 months look like if the trend continues, reverses or deepens for ${ent}?`,
+    ],
+  },
+  general: {
+    format: "Executive Perspective / Op-Ed", ending: "What It Means for the Boardroom",
+    questions: (loc, ent) => [
+      `Strategic Implications: What does this development in ${loc} change about our strategy?`,
+      `Operating Model: Which processes, partners or capabilities need to adapt?`,
+      `Capex & Capital Allocation: Does it change where we invest or what we stop?`,
+      `Talent & Capability: Do we have the people and skills to act on it?`,
+      `Stakeholder Communication: What should we say to customers, employees, investors and ${ent}?`,
+    ],
+  },
+};
+
+// match: the topic's existing AI sector match for the client ({ sector, why, angle } or { irrelevant: true }), or null.
+function buildTopicEventClusters(items, labelName, match = null) {
   const clusters = [];
   for (const item of items) {
     const loc = (item.geography && item.geography.length) ? item.geography[0] : null;
@@ -97,27 +187,33 @@ function buildTopicEventClusters(items, labelName) {
 
   return clusters.slice(0, 10).map((cl) => {
     const locStr = cl.location || "Regional";
-    const entityStr = cl.entities.length ? cl.entities.join(", ") : "Industry operators";
-    const practice = detectPracticeArea(labelName, `${cl.title} ${cl.summary}`);
-
-    const mdpAngles = [
+    const entityStr = cl.entities.length ? cl.entities.join(", ") : "industry players";
+    const shortTitle = cl.title.replace(/\s*[|–]\s.*$/, "").replace(/\s+-\s.*$/, "").trim();
+    const kind = eventKind(cl);
+    // Practice area: the BCG sector the AI already matched to this topic (no new AI call); keywords only when there is no match.
+    // A topic judged directly by the AI gives its sector. A broad bracket's inherited sector is the same for every event in it, so there
+    // the event's own words decide first, and the bracket's sector is used only when they name no practice area.
+    const kw = detectPracticeArea(null, `${cl.title} ${cl.summary}`);
+    const practice = match?.sector && !match.inherited ? match.sector : (kw !== DEFAULT_PRACTICE ? kw : match?.sector || DEFAULT_PRACTICE);
+    const basedOn = match?.sector && !match.inherited ? "sector match" : kw !== DEFAULT_PRACTICE ? "keywords" : match?.sector ? "sector match" : "default";
+    const k = ANGLE_KINDS[kind] ?? ANGLE_KINDS.general;
+    // No op-ed angle for sport, entertainment and similar events, or for topics the AI judged irrelevant to every sector.
+    const mdpAngles = kind === "nonbusiness" || match?.irrelevant ? [] : [
       {
         id: `${cl.id}-mdp-1`,
         role: "BCG Managing Director & Senior Partner (MDP)",
         practice,
-        editorialFormat: "Op-Ed / Executive Leadership Column",
-        title: `${cl.title.replace(/\s*[-|–].*$/, "")}: From Tactical Crisis Management to Structural Redundancy`,
-        thesis: `The unfolding ${cl.title.slice(0, 60)} in ${locStr} reveals critical vulnerabilities across ${entityStr}. C-suites must pivot from public relations damage control to institutional stress-testing of operations and supplier dependency.`,
-        boardroomQuestions: [
-          `Operational Resilience: Are our operational control towers, vendor SLAs, and fallback systems insulated against single-point failure modes observed in ${locStr}?`,
-          `Regulatory & Statutory Exposure: What is our quantified corporate exposure to imminent ministry directives, tightened statutory mandates, and compliance penalties across ${locStr} corridors?`,
-          `Capex & Capital Allocation: What balance between capex redundancy buffers, automated telemetry, and quarterly margin targets provides durable enterprise resilience?`,
-          `Brand & Market Positioning: Can we leverage proactive safety transparency and institutional reliability as a premium differentiator while disrupted competitors struggle with public fallout?`,
-          `Board Audit & Oversight Integrity: How swiftly can board audit and risk committees verify asset maintenance records, critical supplier certifications, and emergency SOP failovers before regulatory scrutiny intensifies?`
-        ],
-        targetAudience: "CEOs, Board Risk Committees, Ministry Regulators, and Infrastructure Investors",
+        eventKind: kind,
+        basedOn,
+        editorialFormat: k.format,
+        title: `${shortTitle}: ${k.ending}`,
+        thesis: match?.why
+          ? `${shortTitle} (${locStr}). ${match.why}`
+          : `${shortTitle} (${locStr}) matters for ${practice}: leaders need to judge what it changes for strategy, operations and risk, not only react to the news.`,
+        boardroomQuestions: k.questions(locStr, entityStr),
+        targetAudience: kind === "policy" ? "CEOs, CFOs, Regulatory Affairs heads and Industry Bodies" : kind === "deal" ? "CEOs, Strategy heads, Boards and Investors" : kind === "market" ? "CEOs, CFOs, Commercial and Supply Chain heads" : "CEOs, Boards, Risk Committees and Investors",
         targetOutlets: "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
-        pitch: `An executive op-ed arguing why the ${locStr} event represents an industry inflection point requiring a modern resilience architecture, moving beyond reactive compensation toward proactive capacity assurance.`
+        pitch: match?.angle || `An executive op-ed on what ${shortTitle.slice(0, 80)} means for ${practice} leaders and what they should do next.`,
       }
     ];
 
@@ -393,6 +489,31 @@ export class Analytics {
     return { asOf: c.asOf, granularity: gran, series: out };
   }
 
+  // The client's existing AI sector match for a topic or bracket (already stored, so no new AI call): the most relevant sector,
+  // or { irrelevant: true } when the AI judged the topic relevant to none of the client's sectors, or null when never judged.
+  topicSectorMatch(m, companyId) {
+    try {
+      const company = this.companies?.get?.(companyId);
+      const best = (sectors) => [...sectors].sort((a, b) => b.relevance - a.relevance)[0];
+      if (m.level === "topic") {
+        const judged = this.store.topicMatches?.(companyId)?.get(m.id) ?? null;
+        if (judged) {
+          const s = judged.sectors.filter((x) => x.relevance >= 0.3);
+          if (!s.length) return { irrelevant: true };
+          const b = best(s);
+          return { sector: b.sector, why: b.why, angle: b.write_about };
+        }
+      }
+      const bracketId = m.level === "bracket" ? m.id : m.parent;
+      const inherited = bracketId && company?.matches ? company.matches[this.registry?.canonical?.(bracketId) ?? bracketId] ?? company.matches[bracketId] : null;
+      const s = (inherited?.sectors ?? []).filter((x) => x.relevance >= 0.3);
+      if (!s.length) return null;
+      const b = best(s);
+      // an inherited bracket match is broad: use its sector, but not its angle text, which was written for the whole bracket
+      return { sector: b.sector, why: null, angle: null, inherited: true };
+    } catch { return null; }
+  }
+
   topic({ key, company: companyId = "bcg", date = null, geo = null, eventId = null }) {
     const c = this.context(date);
     const m = c?.analysis.labels.get(key);
@@ -431,7 +552,7 @@ export class Analytics {
     const geoBreakdown = Array.from(geoMap.values()).sort((a, b) => b.count - a.count).slice(0, 16);
 
     // 3. Event-specific clusters with tailored BCG MDP editorial angles
-    const eventClusters = buildTopicEventClusters(recentList.length ? recentList : allList.slice(0, 50), name);
+    const eventClusters = buildTopicEventClusters(recentList.length ? recentList : allList.slice(0, 50), name, this.topicSectorMatch(m, companyId));
 
     // 4. Specific-based news filtering (by location or specific event cluster)
     let displayList = recentList.length ? recentList : allList;

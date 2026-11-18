@@ -172,7 +172,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // or after a collection when online.analyze is switched on in the config. The daily cap (online.dailyCap) bounds it either way.
   const startOnline = (trigger = "manual", onDone = null) => startJob("online", ["online"], { trigger, onDone: (code) => { if (code === 0) analytics.cache.clear(); onDone?.(code); } });
   const startFulltext = (trigger = "manual", onDone = null) => startJob("fulltext", ["fulltext"], { trigger, onDone });
-  const startSync = (full = false, trigger = "manual", onDone = null) => startJob("sync", ["sync", ...(full ? ["--full"] : [])], { trigger, onDone: (code) => { if (code === 0) { analytics.cache.clear(); matchNow(); } onDone?.(code); } });
+  const syncConfigured = () => !!String(process.env.HIVEMIND_SYNC_KEY || "").trim();
+  const startSync = (full = false, trigger = "manual", onDone = null) => !syncConfigured() ? { code: 400, error: "Sync is not set up on this copy (set HIVEMIND_SYNC_KEY, and HIVEMIND_SYNC_URL if not the default server)." } : startJob("sync", ["sync", ...(full ? ["--full"] : [])], { trigger, onDone: (code) => { if (code === 0) { analytics.cache.clear(); matchNow(); } onDone?.(code); } });
 
   // Automated 8-hour Twitter / X trending sync (India & Worldwide)
   const XTRENDS_SCHEDULE_MS = 8 * 3600e3;
@@ -360,7 +361,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // }
   // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
   const status = () => ({
-    llm, runner: runnerState(), live: liveRun(),
+    llm, runner: runnerState(), live: liveRun(), syncConfigured: syncConfigured(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
     sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: store.sentimentCount(), pending: store.unsentimentedCount() },
     topicMerge: { running: jobs["topic-merge"].running, merged: store.mergedTopicCount() },
@@ -419,7 +420,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   timers.push(setInterval(() => { runXTrendsSync("scheduled").catch(() => {}); }, XTRENDS_SCHEDULE_MS));
   // HiveMind live export data polling (every 8 hours when API key is present)
   const EXPORT_SYNC_MS = 8 * 3600e3;
-  if (process.env.HIVEMIND_EXPORT_KEY) {
+  // Only a copy that syncs FROM another server (HIVEMIND_SYNC_KEY set) polls it. The live server itself has only HIVEMIND_EXPORT_KEY
+  // (the key that protects its own /api/export), so it never tries to sync from itself.
+  if (process.env.HIVEMIND_SYNC_KEY) {
     timers.push(setInterval(() => {
       if (!jobs.sync?.running && !anyJobRunning()) {
         startSync(false, "scheduled");
@@ -459,7 +462,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     if (closed || warming || anyJobRunning()) return;
     warming = true;
     try {
-      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?"];
+      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/backtest"];
       for (const co of companies.list()) {
         urls.push(`/api/overview?company=${co.id}`);
         for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);

@@ -319,7 +319,7 @@ async function pgMomentum(el) {
         <div class="mdp-showcase-header">
           <div>
             <h3>🏛️ BCG MDP THOUGHT LEADERSHIP &amp; STRATEGIC ADVISORY BOARD (${allMdpAngles.length})</h3>
-            <div class="mdp-showcase-sub">Executive POV and boardroom advisory briefs grouped by geographical region with localized incident intelligence.</div>
+            <div class="mdp-showcase-sub">${allMdpAngles.length ? "Executive POV and boardroom advisory briefs grouped by geographical region with localized incident intelligence." : "No BCG op-ed angle for these events: they are not business events (e.g. sport or entertainment), or the topic was judged not relevant to any BCG sector. The events and stories are still listed below."}</div>
           </div>
         </div>
 
