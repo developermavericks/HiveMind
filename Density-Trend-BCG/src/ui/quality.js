@@ -242,9 +242,11 @@ async function pgUsers(el) {
   const users = d.users ?? [], pending = users.filter((u) => u.status === "pending"), rest = users.filter((u) => u.status !== "pending");
   const st = (s) => `<span class="pill ${s === "active" ? "p-ok" : s === "pending" ? "p-medium" : "p-muted"}">${esc(s)}</span>`;
   const companies = S.status?.companies || [{ id: "bcg", name: "BCG" }];
-  const coOpts = (cur) => companies.map(c => `<option value="${esc(c.id)}"${c.id === (cur || "bcg") ? " selected" : ""}>${esc(c.name)}</option>`).join("");
+  // a client typed at sign-up that is not set up yet is still shown (and selected), so it is never silently replaced by BCG
+  const coOpts = (cur) => (cur && !companies.some((c) => c.id === cur) ? `<option value="${esc(cur)}" selected>${esc(cur.toUpperCase())} (not set up yet)</option>` : "") +
+    companies.map(c => `<option value="${esc(c.id)}"${c.id === (cur || "bcg") ? " selected" : ""}>${esc(c.name)}</option>`).join("");
   const row = (u) => `<tr>
-    <td class="b">${esc(u.name || "–")}<div class="small mute">${esc(u.email)}</div></td>
+    <td class="b">${esc(u.name || "–")}<div class="small mute">${esc(u.email)}</div>${u.clientRequested ? `<div class="tiny mute">Client typed: ${esc(u.clientRequested)}</div>` : ""}</td>
     <td>${st(u.status)}</td>
     <td>${esc(u.role)}</td>
     <td><select data-user-co="${esc(String(u.id))}" class="sel-co" style="font-size:12px;padding:3px 6px;border-radius:4px;border:1px solid var(--line2);background:var(--surface)">${coOpts(u.company)}</select></td>

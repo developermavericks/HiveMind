@@ -57,6 +57,8 @@
     const isReset = mode === "reset";
 
     fName.hidden = !up;
+    const fClient = $("f-client");
+    if (fClient) fClient.hidden = !up || setup; // the administrator's own first account has no client
     fEmail.hidden = isReset;
     fPassword.hidden = isForgot;
     fConfirm.hidden = !isReset;
@@ -170,6 +172,7 @@
     const email = $("email").value.trim();
     const password = pw.value;
     const name = $("name").value.trim();
+    const client = $("client") ? $("client").value.trim() : "";
     const confirm = confirmPw ? confirmPw.value : "";
 
     if (mode === "forgot") {
@@ -225,12 +228,13 @@
     const up = mode === "signup" || setup;
     if (!email || !password) return say("Enter your email and password.");
     if (up && !name) return say("Enter your full name.");
+    if (up && !setup && client.replace(/[^a-z0-9]/gi, "").length < 2) return say("Enter the client you belong to (for example BCG).");
 
     busy = true; submit.disabled = true; say("");
     const label = submit.textContent; submit.textContent = "Please wait…";
     try {
       if (up) {
-        const r = await post("/api/auth/signup", { name, email, password });
+        const r = await post("/api/auth/signup", { name, email, password, client });
         if (!r.ok) {
           say(r.data.error || "Could not create the account.");
         } else if (r.data.first) {

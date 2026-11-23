@@ -51,7 +51,7 @@ test("auth: first account is the admin, later ones wait for approval, and the wh
     assert.deepEqual([s1.status, s1.first], ["active", true]);
     assert.equal((await (await t.call("GET", "/api/auth/state")).json()).setup, false);
     // second sign-up is pending and cannot log in, even with the right password
-    const s2 = await (await t.call("POST", "/api/auth/signup", { name: "Bob Member", email: "bob@x.com", password: PW })).json();
+    const s2 = await (await t.call("POST", "/api/auth/signup", { name: "Bob Member", email: "bob@x.com", password: PW, client: "BCG" })).json();
     assert.deepEqual([s2.status, s2.first], ["pending", false]);
     const pend = await t.call("POST", "/api/auth/login", { email: "bob@x.com", password: PW });
     assert.equal(pend.status, 403); assert.equal((await pend.json()).status, "pending");
@@ -210,7 +210,7 @@ test("members: pages and data meant for administrators are closed to normal acco
   const t = await boot();
   try {
     await t.call("POST", "/api/auth/signup", { name: "Ada Admin", email: "ada@x.com", password: PW });
-    await t.call("POST", "/api/auth/signup", { name: "Bob Member", email: "bob@x.com", password: PW });
+    await t.call("POST", "/api/auth/signup", { name: "Bob Member", email: "bob@x.com", password: PW, client: "BCG" });
     const adminC = t.cookieOf(await t.call("POST", "/api/auth/login", { email: "ada@x.com", password: PW }));
     const bob = (await (await t.call("GET", "/api/users", undefined, adminC)).json()).users.find((u) => u.email === "bob@x.com");
     await t.call("POST", "/api/users/approve", { id: bob.id }, adminC);
@@ -231,7 +231,7 @@ test("members: every read endpoint the Trends and Opportunities pages call answe
   const t = await boot();
   try {
     await t.call("POST", "/api/auth/signup", { name: "Ada Admin", email: "ada@x.com", password: PW });
-    await t.call("POST", "/api/auth/signup", { name: "Pooja Rana", email: "pooja@x.com", password: PW });
+    await t.call("POST", "/api/auth/signup", { name: "Pooja Rana", email: "pooja@x.com", password: PW, client: "BCG" });
     const adminC = t.cookieOf(await t.call("POST", "/api/auth/login", { email: "ada@x.com", password: PW }));
     const id = (await (await t.call("GET", "/api/users", undefined, adminC)).json()).users.find((u) => u.email === "pooja@x.com").id;
     await t.call("POST", "/api/users/approve", { id }, adminC);
