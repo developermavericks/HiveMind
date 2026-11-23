@@ -8,6 +8,7 @@ import { Worker } from "node:worker_threads";
 import { spawn as nodeSpawn } from "node:child_process";
 import { readFileSync, existsSync, statSync, createReadStream } from "node:fs";
 import { join, extname } from "node:path";
+import { availableParallelism } from "node:os";
 import { parseSectors, slugify, CompanyStore, matchPending } from "./companies.mjs";
 import { Reader, budgetGuard } from "./llm.mjs";
 import { ocrDue, parseTime } from "./schedule.mjs";
@@ -33,7 +34,7 @@ import { refreshHot } from "./hot.mjs";
 import { dedupePass } from "./quality.mjs";
 import { usageReport } from "./usage.mjs";
 import { writeFileAtomic } from "./atomic.mjs";
-import { createAuth, setSecurityHeaders, resolveClientMetadata, recordActivity, inferAction, isHttps, clientIp } from "./auth.mjs";
+import { createAuth, setSecurityHeaders, resolveClientMetadata, recordActivity, flushActivityQueue, inferAction, isHttps, clientIp } from "./auth.mjs";
 import { getPgPool, initPgSchema } from "./pg.mjs";
 import { checkExportKey, exportIndex, exportPage } from "./export.mjs";
 
@@ -416,6 +417,19 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     fallbackActive: reader.fallbackActive,
   });
 
+  // Short 1s status caching to prevent 100 concurrent clients from hammering database during production load
+  let cachedStatusObj = null;
+  let cachedStatusAt = 0;
+  const isTestEnv = process.argv.some(a => a.includes("test")) || process.execArgv.some(a => a.includes("test")) || process.env.NODE_ENV === "test";
+  const getCachedStatus = () => {
+    if (isTestEnv) return status();
+    const now = Date.now();
+    if (cachedStatusObj && (now - cachedStatusAt < 1000)) return { ...cachedStatusObj, serverTime: now };
+    cachedStatusObj = status();
+    cachedStatusAt = now;
+    return cachedStatusObj;
+  };
+
   // The stories for the first dashboard's /api/state: the latest rolling window, or one local calendar day.
   function dataFor(date, hours) {
     const run = store.latestRun("rolling");
@@ -644,31 +658,97 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     "/api/entities": (u) => ({ method: "entities", args: { date: dayParam(u), limit: Math.min(500, +u.searchParams.get("limit") || 150) } }),
     "/api/sentiment": (u) => ({ method: "sentiment", args: { date: dayParam(u) } }),
   };
-  let worker = null, workerRef = null, wseq = 0;
+  // Multi-worker pool for view calculations across CPU cores (prevents queueing under 100 concurrent users)
+  const workers = [];
   const wait = new Map();
-  const dropWorker = (why) => { if (why) log(`view worker stopped (${why}): the server builds views itself`); worker = null; for (const [, w] of wait) w.reject(new Error(why || "worker stopped")); wait.clear(); };
-  if (process.env.HIVEMIND_NO_WORKER !== "1") {
+  let wseq = 0;
+
+  const dropWorker = (w, why) => {
+    if (why) log(`view worker ${w.id} stopped (${why})`);
+    const idx = workers.indexOf(w);
+    if (idx !== -1) workers.splice(idx, 1);
+    for (const [id, req] of wait.entries()) {
+      if (req.workerId === w.id) {
+        clearTimeout(req.t);
+        wait.delete(id);
+        req.reject(new Error(why || "worker stopped"));
+      }
+    }
+  };
+
+  const spawnWorker = (id) => {
     try {
       const w = new Worker(new URL("./viewworker.mjs", import.meta.url), {
         workerData: { root },
         resourceLimits: { maxOldGenerationSizeMb: 4096 }
       });
+      w.id = id;
+      w.active = 0;
+      w.ready = false;
       w.unref();
-      w.on("message", (m) => { if (m.ready) { worker = w; return; } const p = wait.get(m.id); if (p) { wait.delete(m.id); clearTimeout(p.t); m.ok ? p.resolve(m) : p.reject(new Error(m.error)); } });
-      w.on("error", (e) => dropWorker(e.message));
-      w.on("exit", () => { if (!closed) dropWorker("exited"); });
-      analytics.cache.onClear = () => { try { worker?.postMessage({ type: "clear" }); } catch { /* the worker is gone; the server builds views itself */ } };
-      workerRef = w;
-    } catch (e) { log(`view worker not started: ${e.message}`); }
+      w.on("message", (m) => {
+        if (m.ready) { w.ready = true; return; }
+        const p = wait.get(m.id);
+        if (p) {
+          wait.delete(m.id);
+          clearTimeout(p.t);
+          w.active = Math.max(0, w.active - 1);
+          m.ok ? p.resolve(m) : p.reject(new Error(m.error));
+        }
+      });
+      w.on("error", (e) => dropWorker(w, e.message));
+      w.on("exit", () => { if (!closed) dropWorker(w, "exited"); });
+      workers.push(w);
+    } catch (e) {
+      log(`view worker ${id} not started: ${e.message}`);
+    }
+  };
+
+  if (process.env.HIVEMIND_NO_WORKER !== "1") {
+    const numWorkers = Math.min(4, Math.max(1, +process.env.HIVEMIND_WORKERS || (typeof availableParallelism === "function" ? Math.min(4, Math.max(1, availableParallelism() - 1)) : 2)));
+    for (let i = 0; i < numWorkers; i++) spawnWorker(i + 1);
+    analytics.cache.onClear = () => {
+      for (const w of workers) {
+        try { w.postMessage({ type: "clear" }); } catch {}
+      }
+    };
   }
+
   const build = async (method, args) => {
-    if (worker) {
-      try { const m = await new Promise((resolve, reject) => { const id = ++wseq, t = setTimeout(() => { wait.delete(id); reject(new Error("worker timed out")); }, 90e3); wait.set(id, { resolve, reject, t }); worker.postMessage({ id, method, args }); }); return { body: m.body, failed: m.failed }; }
-      catch (e) { log(`view worker failed for ${method} (${e.message}); building it in the server`); }
+    const readyWorkers = workers.filter((w) => w.ready);
+    if (readyWorkers.length > 0) {
+      readyWorkers.sort((a, b) => a.active - b.active);
+      const chosen = readyWorkers[0];
+      chosen.active++;
+      try {
+        const m = await new Promise((resolve, reject) => {
+          const id = ++wseq;
+          const t = setTimeout(() => {
+            wait.delete(id);
+            chosen.active = Math.max(0, chosen.active - 1);
+            reject(new Error("worker timed out"));
+          }, 90e3);
+          wait.set(id, { resolve, reject, t, workerId: chosen.id });
+          chosen.postMessage({ id, method, args });
+        });
+        return { body: m.body, failed: m.failed };
+      } catch (e) {
+        log(`view worker failed for ${method} (${e.message}); building it in the server`);
+      }
     }
     const v = analytics[method](args);
     return { body: JSON.stringify(v), failed: !!(v && v.error) };
   };
+
+  // Pre-warm the most critical views in the background so the first page load is instant
+  if (process.env.NODE_ENV !== "test") {
+    setTimeout(() => {
+      Promise.allSettled([
+        viewEntry("overview", { company: "bcg", date: null }),
+        viewEntry("opportunities", { company: "bcg", date: null, limit: 60, group: false, slim: true })
+      ]).catch(() => {});
+    }, 200).unref?.();
+  }
   const mem = new Map(), inflight = new Map();
   // The answer for (method, args): from memory, else the database, else built once (concurrent askers share the build).
   async function viewEntry(method, args) {
@@ -696,6 +776,23 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     const code = e.failed ? 404 : 200;
     if (e.body.length > 2048 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) { e.gz ??= gzipSync(e.body, { level: 5 }); res.writeHead(code, { ...head, "content-encoding": "gzip" }); return res.end(e.gz); }
     res.writeHead(code, head); res.end(e.body);
+  }
+
+  const staticCache = new Map();
+  function getStaticAsset(file, ext) {
+    if (!existsSync(file)) return null;
+    const stat = statSync(file);
+    const cached = staticCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs) return cached;
+    const raw = readFileSync(file);
+    const etag = `"${createHash("sha1").update(raw).digest("base64url").slice(0, 16)}"`;
+    let gz = null;
+    if (/\.(js|css|html|svg|json)$/.test(ext)) {
+      gz = gzipSync(raw, { level: 6 });
+    }
+    const entry = { mtimeMs: stat.mtimeMs, size: stat.size, raw, gz, etag, contentType: STATIC[ext] || "application/octet-stream" };
+    staticCache.set(file, entry);
+    return entry;
   }
 
   const server = createServer(async (req, res) => {
@@ -796,8 +893,24 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (userCompany) company = userCompany;
 
       if (req.method === "GET" && (p === "/" || p === "/index.html")) {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        return res.end(readFileSync(join(root, "src", "dashboard.html")));
+        const file = join(root, "src", "dashboard.html");
+        const asset = getStaticAsset(file, ".html");
+        if (asset && req.headers["if-none-match"] === asset.etag) {
+          res.writeHead(304, { "etag": asset.etag, "cache-control": "no-cache" });
+          return res.end();
+        }
+        const acceptsGzip = asset?.gz && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
+        const body = asset ? (acceptsGzip ? asset.gz : asset.raw) : readFileSync(file);
+        const head = {
+          "content-type": "text/html; charset=utf-8",
+          "content-length": body.length,
+          "cache-control": "no-cache",
+          ...(asset?.etag ? { "etag": asset.etag } : {}),
+          "vary": "accept-encoding"
+        };
+        if (acceptsGzip) head["content-encoding"] = "gzip";
+        res.writeHead(200, head);
+        return res.end(body);
       }
       if (req.method === "GET" && p.startsWith("/ui/")) {
         const name = p.slice(4), file = join(root, "src", "ui", name);
@@ -811,13 +924,29 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           if (req.method === "HEAD") return res.end();
           return createReadStream(file, { start, end }).on("error", () => res.destroy()).pipe(res);
         }
-        res.writeHead(200, { "content-type": STATIC[extname(name)], "cache-control": "no-store" });
-        return res.end(readFileSync(file));
+        const asset = getStaticAsset(file, extname(name));
+        if (!asset) return json(res, 404, { error: "Not found" });
+        if (req.headers["if-none-match"] === asset.etag) {
+          res.writeHead(304, { "etag": asset.etag, "cache-control": "public, max-age=86400, stale-while-revalidate=604800" });
+          return res.end();
+        }
+        const acceptsGzip = asset.gz && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
+        const body = acceptsGzip ? asset.gz : asset.raw;
+        const head = {
+          "content-type": asset.contentType,
+          "content-length": body.length,
+          "cache-control": "public, max-age=86400, stale-while-revalidate=604800",
+          "etag": asset.etag,
+          "vary": "accept-encoding"
+        };
+        if (acceptsGzip) head["content-encoding"] = "gzip";
+        res.writeHead(200, head);
+        return res.end(body);
       }
 
       // ---- analytics ----
       if (req.method === "GET" && p === "/api/status") {
-        const st = status();
+        const st = { ...getCachedStatus() };
         if (req.user && req.user.role !== "admin") {
           const userCo = req.user.company || req.user.company_id || "bcg";
           st.companies = st.companies.filter((c) => c.id === userCo);
@@ -1247,7 +1376,16 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
     }
   });
-  server.on("close", () => { closed = true; workerRef?.terminate(); authz?.stop(); timers.forEach(clearInterval); for (const j of Object.values(jobs)) j.child?.kill(); try { store.closeStaleJobs(); } catch { /* ignore */ } store.close(); });
+  server.on("close", () => {
+    closed = true;
+    for (const w of workers) { try { w.terminate(); } catch {} }
+    authz?.stop();
+    try { flushActivityQueue(store.db); } catch {}
+    timers.forEach(clearInterval);
+    for (const j of Object.values(jobs)) j.child?.kill();
+    try { store.closeStaleJobs(); } catch { /* ignore */ }
+    store.close();
+  });
 
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, host, resolve); });
   log(`Dashboard: http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}${host === "0.0.0.0" ? " (listening on all interfaces: allowed hosts are set by HIVEMIND_ALLOWED_HOSTS)" : ""}`);

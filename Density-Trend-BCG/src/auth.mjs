@@ -139,35 +139,65 @@ export async function resolveClientMetadata(req) {
   return { ip, location, network };
 }
 
-// Records rich audit activity with optional HTML5 GPS coordinates
-export function recordActivity(db, info) {
+// Records rich audit activity with optional HTML5 GPS coordinates via an asynchronous in-memory batch queue
+const activityQueue = [];
+let flushTimer = null;
+
+export function flushActivityQueue(db) {
+  if (!db || activityQueue.length === 0) return;
+  const batch = activityQueue.splice(0, activityQueue.length);
   try {
-    db.prepare(`
+    const stmt = db.prepare(`
       INSERT INTO activity_log (
         ts, user_id, email, name, company_id, action, path, method, status_code, error, ip, location, network, ua, duration_ms, lat, lon, geo_accuracy
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      Date.now(),
-      info.userId ?? null,
-      info.email ?? null,
-      info.name ?? null,
-      info.companyId ?? "bcg",
-      info.action ?? "Unknown Action",
-      info.path ?? "/",
-      info.method ?? "GET",
-      info.statusCode ?? 200,
-      info.error ? String(info.error).slice(0, 300) : null,
-      info.ip ?? "unknown",
-      info.location ?? "unknown",
-      info.network ?? "unknown",
-      String(info.ua ?? "").slice(0, 200),
-      info.durationMs ?? 0,
-      info.lat != null ? +info.lat : null,
-      info.lon != null ? +info.lon : null,
-      info.geoAccuracy != null ? +info.geoAccuracy : null
-    );
+    `);
+    db.exec("BEGIN");
+    for (const item of batch) {
+      stmt.run(
+        item.ts, item.userId, item.email, item.name, item.companyId,
+        item.action, item.path, item.method, item.statusCode, item.error,
+        item.ip, item.location, item.network, item.ua, item.durationMs,
+        item.lat, item.lon, item.geoAccuracy
+      );
+    }
+    db.exec("COMMIT");
   } catch (e) {
-    // never block request execution on logging error
+    try { db.exec("ROLLBACK"); } catch {}
+  }
+}
+
+export function recordActivity(db, info) {
+  if (!db) return;
+  activityQueue.push({
+    ts: Date.now(),
+    userId: info.userId ?? null,
+    email: info.email ?? null,
+    name: info.name ?? null,
+    companyId: info.companyId ?? "bcg",
+    action: info.action ?? "Unknown Action",
+    path: info.path ?? "/",
+    method: info.method ?? "GET",
+    statusCode: info.statusCode ?? 200,
+    error: info.error ? String(info.error).slice(0, 300) : null,
+    ip: info.ip ?? "unknown",
+    location: info.location ?? "unknown",
+    network: info.network ?? "unknown",
+    ua: String(info.ua ?? "").slice(0, 200),
+    durationMs: info.durationMs ?? 0,
+    lat: info.lat != null ? +info.lat : null,
+    lon: info.lon != null ? +info.lon : null,
+    geoAccuracy: info.geoAccuracy != null ? +info.geoAccuracy : null
+  });
+
+  if (activityQueue.length >= 50) {
+    flushActivityQueue(db);
+  } else if (!flushTimer) {
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushActivityQueue(db);
+    }, 2000);
+    flushTimer.unref?.();
   }
 }
 
@@ -355,13 +385,48 @@ export function createAuth({ store, log = () => {}, root }) {
 
   const tokenOf = (req) => parseCookies(req.headers.cookie)[COOKIE] || null;
 
+  // In-memory session cache to avoid redundant SQLite queries on every request for 100+ concurrent users
+  const sessionCache = new Map();
+  const clearSessionCache = (userId = null, idh = null) => {
+    if (idh) { sessionCache.delete(idh); return; }
+    if (userId) {
+      for (const [k, v] of sessionCache.entries()) {
+        if (v.user?.id === userId) sessionCache.delete(k);
+      }
+      return;
+    }
+    sessionCache.clear();
+  };
+
   const sessionUser = (req) => {
     const token = tokenOf(req);
     if (!token || token.length > 100) return null;
-    const idh = sha256(token), s = db.prepare("SELECT * FROM sessions WHERE id_hash = ?").get(idh), now = Date.now();
-    if (!s) return null;
+    const idh = sha256(token), now = Date.now();
+    const cached = sessionCache.get(idh);
+    let s, u;
+    if (cached && (now - cached.cachedAt < 30_000)) {
+      s = cached.s;
+      u = cached.user;
+    } else {
+      s = db.prepare("SELECT * FROM sessions WHERE id_hash = ?").get(idh);
+      if (!s) { sessionCache.delete(idh); return null; }
+      if (s.expires_at <= now || now - s.last_seen > IDLE_MS) {
+        db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+        sessionCache.delete(idh);
+        return null;
+      }
+      u = userById(s.user_id);
+      if (!u || u.status !== "active") {
+        db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+        sessionCache.delete(idh);
+        return null;
+      }
+      sessionCache.set(idh, { s, user: u, cachedAt: now });
+    }
+
     if (s.expires_at <= now || now - s.last_seen > IDLE_MS) {
       db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+      sessionCache.delete(idh);
       return null;
     }
     // Anti-Session Hijacking check
@@ -369,18 +434,25 @@ export function createAuth({ store, log = () => {}, root }) {
     if (!isUaCompatible(s.ua, incomingUa)) {
       audit("session_hijack_blocked", null, clientIp(req), `UA mismatch: stored=${(s.ua || "").slice(0, 30)}, incoming=${incomingUa.slice(0, 30)}`);
       db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+      sessionCache.delete(idh);
       return null;
     }
-    const u = userById(s.user_id);
-    if (!u || u.status !== "active") {
+    if (u.status !== "active") {
       db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+      sessionCache.delete(idh);
       return null;
     }
-    if (now - s.last_seen > 60e3) db.prepare("UPDATE sessions SET last_seen = ? WHERE id_hash = ?").run(now, idh);
+    if (now - s.last_seen > 60e3) {
+      db.prepare("UPDATE sessions SET last_seen = ? WHERE id_hash = ?").run(now, idh);
+      s.last_seen = now;
+    }
     return { ...u, _sid: idh, _lat: s.lat, _lon: s.lon, _accuracy: s.geo_accuracy };
   };
 
-  const dropSessions = (userId, exceptHash = null) => db.prepare("DELETE FROM sessions WHERE user_id = ? AND id_hash != ?").run(userId, exceptHash ?? "");
+  const dropSessions = (userId, exceptHash = null) => {
+    clearSessionCache(userId);
+    db.prepare("DELETE FROM sessions WHERE user_id = ? AND id_hash != ?").run(userId, exceptHash ?? "");
+  };
   const sweep = () => { const now = Date.now(); try { db.prepare("DELETE FROM sessions WHERE expires_at <= ? OR last_seen < ?").run(now, now - IDLE_MS); } catch {} };
   const timer = setInterval(sweep, 10 * 60e3); timer.unref();
   sweep();
@@ -497,7 +569,12 @@ Check the client before approving; the person will only see that client's data.`
   }
 
   const logout = (req, res) => {
-    const t = tokenOf(req); if (t) db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(sha256(t));
+    const t = tokenOf(req);
+    if (t) {
+      const idh = sha256(t);
+      clearSessionCache(null, idh);
+      db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idh);
+    }
     return send(res, 200, { ok: true }, { "set-cookie": cookieHeader(req, "", 0) });
   };
 
@@ -717,7 +794,13 @@ Check the client before approving; the person will only see that client's data.`
     return send(res, 404, { error: "Unknown action" });
   }
 
-  const loginPage = () => { const f = join(root, "src", "login.html"); return existsSync(f) ? readFileSync(f) : Buffer.from("<h1>Login page missing</h1>"); };
+  let cachedLoginPage = null;
+  const loginPage = () => {
+    if (cachedLoginPage) return cachedLoginPage;
+    const f = join(root, "src", "login.html");
+    cachedLoginPage = existsSync(f) ? readFileSync(f) : Buffer.from("<h1>Login page missing</h1>");
+    return cachedLoginPage;
+  };
   const WRITE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
   // Returns true when the response has been sent (login page, redirect, auth route, or a refusal); false to let the server carry on.
@@ -749,6 +832,7 @@ Check the client before approving; the person will only see that client's data.`
       
       // HTML5 Geolocation endpoint
       if (req.method === "POST" && p === "/api/auth/geo") {
+        flushActivityQueue(db);
         const b = await readJson(req);
         const lat = +b.lat, lon = +b.lon, accuracy = +b.accuracy;
         if (!isNaN(lat) && !isNaN(lon) && u._sid) {
@@ -763,6 +847,7 @@ Check the client before approving; the person will only see that client's data.`
       }
 
       if (req.method === "GET" && p === "/api/admin/audit-logs") {
+        flushActivityQueue(db);
         if (u.role !== "admin") { send(res, 403, { error: "Admin only" }); return true; }
         const limit = Math.min(200, Math.max(10, +url.searchParams.get("limit") || 50));
         const offset = Math.max(0, +url.searchParams.get("offset") || 0);
@@ -796,5 +881,5 @@ Check the client before approving; the person will only see that client's data.`
     }
   }
 
-  return { handle, sessionUser, userCount, stop: () => clearInterval(timer) };
+  return { handle, sessionUser, userCount, stop: () => { clearInterval(timer); flushActivityQueue(db); } };
 }

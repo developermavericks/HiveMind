@@ -67,14 +67,30 @@ const NAV_ICON = {
 const curTab = () => { const g = PAGES[S.page]; return g.tabs ? g.tabs.find((t) => t.k === S.tab) ?? g.tabs[0] : null; };
 
 // ---------------------------------------------------------------- helpers
+const apiCache = new Map();
+const API_CACHE_TTL = 30_000; // 30s cache for instantaneous tab switching and back-navigation
+
 async function api(path, opts) {
+  const isGet = !opts || !opts.method || opts.method === "GET";
+  if (isGet && apiCache.has(path)) {
+    const hit = apiCache.get(path);
+    if (Date.now() - hit.ts < API_CACHE_TTL) {
+      return hit.data;
+    }
+  }
   const r = await fetch(path, opts);
   const j = await r.json().catch(() => ({}));
   if (r.status === 401 && j.login) { location.href = j.login; throw new Error("Please sign in."); }
   if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+  if (isGet) {
+    apiCache.set(path, { data: j, ts: Date.now() });
+    if (apiCache.size > 200) apiCache.delete(apiCache.keys().next().value);
+  } else {
+    apiCache.clear();
+  }
   return j;
 }
-const post = (path, body) => api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+const post = (path, body) => { apiCache.clear(); return api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); };
 const qs = (extra = "") => `company=${encodeURIComponent(S.company)}${S.date ? `&date=${S.date}` : ""}${extra}`;
 const n0 = (v) => (v == null ? "–" : Number(v).toLocaleString());
 const x2 = (v) => (v == null ? "–" : `×${v.toFixed(2)}`);
@@ -269,7 +285,7 @@ async function loadStatus() {
     renderTop();
     if (S.me !== undefined && isAdmin()) loadNotifs(); // the bell is for administrators (not before we know who is signed in)
     const was = prev && busyNow(prev), now = busyNow(S.status);
-    if (was && !now) render(); // a job just finished
+    if (was && !now) { apiCache.clear(); render(); } // a job just finished
     else if (now && !document.activeElement?.matches("input,textarea,select") && !$("#drawer").classList.contains("on")) renderSoft();
   } catch (e) { $("#sub").textContent = "Cannot reach the server: " + e.message; }
   setTimeout(loadStatus, S.status && busyNow(S.status) ? 4000 : 10000);
@@ -897,8 +913,9 @@ function init() {
   buildShell();
   xInitNotifs();
   loadMe();
-  $("#csel").onchange = (e) => { S.company = e.target.value; ls.set("company", S.company); S.oppByKey.clear(); render(); };
+  $("#csel").onchange = (e) => { apiCache.clear(); S.company = e.target.value; ls.set("company", S.company); S.oppByKey.clear(); render(); };
   $("#dsel").onchange = (e) => {
+    apiCache.clear();
     S.date = e.target.value || null;
     toast(S.date ? `Viewing date: ${fmtDay(S.date)}` : "Viewing Live (latest data)");
     render();
