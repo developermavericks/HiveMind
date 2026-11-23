@@ -59,6 +59,10 @@ export function buildEntities(items, asOf, cfg, { recentHours = 24, minStories =
   }
   const baseDepth = Number.isFinite(firstAt) ? Math.min(B, Math.max(0, (recentFrom - firstAt) / HOUR)) : 0;
   const baselineOk = totBase >= iv.minBaselineClusters && baseDepth >= iv.minBaselineHours;
+  // Stories per 6-hour step of the 72 h sparkline: the same for every entity, so counted once (it was re-counted over all stories
+  // for each of thousands of entities, which made this view take minutes).
+  const sparkFrom = [], sparkTot = [];
+  for (let h = 72; h > 0; h -= 6) { const a = asOf - h * HOUR; sparkFrom.push(a); sparkTot.push(items.reduce((n, i) => n + (i.at >= a && i.at < a + 6 * HOUR ? 1 : 0), 0)); }
   const rows = [];
   for (const e of byEntity.values()) {
     if (e.items.length < minStories) continue;
@@ -67,9 +71,8 @@ export function buildEntities(items, asOf, cfg, { recentHours = 24, minStories =
     const ratio = baseShare == null ? null : (cur.length + 1) / (baseShare * totRecent + 1);
     const origins = new Set(cur.flatMap((i) => i.origins));
     const spark = [];
-    for (let h = 72; h > 0; h -= 6) {
-      const a = asOf - h * HOUR, b = a + 6 * HOUR;
-      const tot = items.reduce((n, i) => n + (i.at >= a && i.at < b ? 1 : 0), 0);
+    for (let s = 0; s < sparkFrom.length; s++) {
+      const a = sparkFrom[s], b = a + 6 * HOUR, tot = sparkTot[s];
       spark.push(tot ? e.items.filter((i) => i.at >= a && i.at < b).length / tot : 0);
     }
     const stage = ratio == null || cur.length < 2 || origins.size < (cfg.topics?.minOrigins ?? 3) ? "watch" : ratio >= cfg.stage.risingRatio ? "rising" : ratio <= cfg.stage.decliningRatio ? "declining" : "steady";

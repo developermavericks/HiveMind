@@ -529,12 +529,15 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     const t0 = Date.now(), stop = () => closed || anyJobRunning();
     let n = 0;
     try {
-      const pages = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/origins?key=all"];
+      // Most-opened first (Overview, Opportunities, their panels, Trends); the heavy, less-opened pages last, so they never hold up the others.
+      const pages = [];
       for (const co of companies.list()) {
         pages.push(`/api/overview?company=${co.id}`);
         for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) pages.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
-        for (const m of ["whitespace", "validated"]) pages.push(`/api/opportunities?company=${co.id}&limit=300&group=pair&mode=${m}&slim=1`); // a shared opportunity link
       }
+      pages.push("/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300");
+      const later = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/sources?", "/api/origins?key=all", "/api/sentiment?", "/api/entities?"];
+      for (const co of companies.list()) for (const m of ["whitespace", "validated"]) later.unshift(`/api/opportunities?company=${co.id}&limit=300&group=pair&mode=${m}&slim=1`); // a shared opportunity link
       const got = new Map();
       for (const u of pages) { if (stop()) break; try { got.set(u, await warmView(u)); n++; } catch { /* one view failing must not stop the others */ } }
       // The opportunity panels people open first: the top of the default list (Topics, white space, by score) for each company.
@@ -564,6 +567,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           try { await warmView(`/api/topic?company=bcg&key=${encodeURIComponent(r.key)}`); await warmView(`/api/series?keys=${encodeURIComponent(r.key)}&gran=hour`); n += 2; } catch { /* next */ }
         }
       }
+      for (const u of later) { if (stop()) break; try { await warmView(u); n++; } catch { /* next */ } }
       if (Date.now() - t0 > 20e3) log(`pages ready: ${n} checked or built in ${Math.round((Date.now() - t0) / 1000)} s`);
     } catch (e) { log(`warm-up skipped: ${e.message}`); }
     warming = false;
