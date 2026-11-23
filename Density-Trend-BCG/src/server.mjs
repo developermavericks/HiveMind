@@ -661,6 +661,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Multi-worker pool for view calculations across CPU cores (prevents queueing under 100 concurrent users)
   const workers = [];
   const wait = new Map();
+  const VIEW_WAIT_MS = Math.max(5e3, +process.env.HIVEMIND_VIEW_WAIT_MS || 300e3); // how long a helper may take on one view
   let wseq = 0;
 
   const dropWorker = (w, why) => {
@@ -727,12 +728,18 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
             wait.delete(id);
             chosen.active = Math.max(0, chosen.active - 1);
             reject(new Error("worker timed out"));
-          }, 90e3);
+          }, VIEW_WAIT_MS);
           wait.set(id, { resolve, reject, t, workerId: chosen.id });
           chosen.postMessage({ id, method, args });
         });
         return { body: m.body, failed: m.failed };
       } catch (e) {
+        // A slow helper must never make the server build the view itself: that blocks every other person until it finishes.
+        // The person gets "still preparing" (not saved anywhere), and the next ask finds the view ready or joins a new build.
+        if (/timed out/.test(e.message)) {
+          log(`view worker still busy with ${method} after ${Math.round(VIEW_WAIT_MS / 1000)} s; asking the person to retry`);
+          return { body: JSON.stringify({ error: "This page is still being prepared. Please try again in a minute.", retry: true }), failed: true, transient: true };
+        }
         log(`view worker failed for ${method} (${e.message}); building it in the server`);
       }
     }
@@ -761,7 +768,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       const ik = k + "@" + sig;
       let p = inflight.get(ik);
       if (!p) { p = build(method, args).finally(() => inflight.delete(ik)); inflight.set(ik, p); }
-      ({ body, failed } = await p);
+      const r = await p;
+      if (r.transient) return { sig, body: r.body, failed: true, transient: true, etag: null };
+      ({ body, failed } = r);
       if (!failed && body.length < 4e6) { try { store.putView(k, sig, body); } catch { /* a saved copy is only a convenience */ } }
     }
     e = { sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` };
@@ -773,7 +782,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     const e = await viewEntry(method, args);
     const head = { "content-type": "application/json", "cache-control": e.etag ? "private, no-cache" : "no-store", vary: "accept-encoding", ...(e.etag ? { etag: e.etag } : {}) };
     if (e.etag && !e.failed && req.headers["if-none-match"] === e.etag) { res.writeHead(304, head); return res.end(); }
-    const code = e.failed ? 404 : 200;
+    const code = e.transient ? 503 : e.failed ? 404 : 200;
     if (e.body.length > 2048 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) { e.gz ??= gzipSync(e.body, { level: 5 }); res.writeHead(code, { ...head, "content-encoding": "gzip" }); return res.end(e.gz); }
     res.writeHead(code, head); res.end(e.body);
   }
