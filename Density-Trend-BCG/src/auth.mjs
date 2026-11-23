@@ -20,7 +20,11 @@ import { sendEmail, getAdminEmail } from "./email.mjs";
 const scryptAsync = promisify(scrypt);
 const SCRYPT = { N: 32768, r: 8, p: 1, keylen: 64, maxmem: 64 * 1024 * 1024 };
 const COOKIE = "hm_session";
-const ABSOLUTE_MS = 7 * 864e5, IDLE_MS = 12 * 3600e3, LOCK_MS = 15 * 60e3, MAX_FAILS = 5, IP_WINDOW_MS = 10 * 60e3;
+// A session ends after HIVEMIND_SESSION_IDLE_MIN minutes without user activity (default 30), and after 7 days at most.
+const IDLE_MS = Math.max(1, +process.env.HIVEMIND_SESSION_IDLE_MIN || 30) * 60e3;
+// Requests the page makes by itself every few seconds (status, notifications) are not user activity: they never extend a session.
+const BACKGROUND = /^\/api\/(status|notifications|sync\/status)$/;
+const ABSOLUTE_MS = 7 * 864e5, LOCK_MS = 15 * 60e3, MAX_FAILS = 5, IP_WINDOW_MS = 10 * 60e3;
 const MAX_BODY = 65536; // 64 KB JSON payload limit (prevents memory buffer inflation attacks)
 const GENERIC = "Incorrect email or password.";
 
@@ -442,7 +446,8 @@ export function createAuth({ store, log = () => {}, root }) {
       sessionCache.delete(idh);
       return null;
     }
-    if (now - s.last_seen > 60e3) {
+    const background = req.method === "GET" && BACKGROUND.test(String(req.url || "").split("?")[0]);
+    if (!background && now - s.last_seen > 60e3) {
       db.prepare("UPDATE sessions SET last_seen = ? WHERE id_hash = ?").run(now, idh);
       s.last_seen = now;
     }
