@@ -7,6 +7,7 @@
 //
 // Two processes use it at once (`run` writes, `serve` reads); WAL mode lets them.
 import { DatabaseSync } from "node:sqlite";
+import { PgDatabaseSync } from "./pgsync.mjs";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
@@ -20,9 +21,21 @@ export const DAY_MS = 24 * 3600e3;
 
 export class Store {
   constructor(path) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.path = path;
-    this.db = new DatabaseSync(path);
+    // PostgreSQL when DATABASE_URL is set (all reads and writes go there), else the SQLite file at `path`.
+    // HIVEMIND_PG_SCHEMA picks the schema (default public); HIVEMIND_PG_SCHEMA_PER_PATH=1 gives each path its own schema (tests).
+    const pgUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    if (pgUrl && process.env.HIVEMIND_DB !== "sqlite") {
+      const schema = path === ":memory:" ? "m_" + createHash("sha1").update(String(Math.random()) + Date.now()).digest("hex").slice(0, 16) // a throw-away database of its own
+        : process.env.HIVEMIND_PG_SCHEMA_PER_PATH === "1" ? "t_" + createHash("sha1").update(String(path)).digest("hex").slice(0, 16)
+        : process.env.HIVEMIND_PG_SCHEMA || "public";
+      this.db = new PgDatabaseSync(pgUrl, { schema });
+      this.isPg = true;
+    } else {
+      if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+      this.db = new DatabaseSync(path);
+      this.isPg = false;
+    }
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
@@ -182,9 +195,12 @@ export class Store {
   }
   eventAnglesSince(ms) { return this.db.prepare("SELECT COUNT(*) AS n FROM event_angles WHERE created_at >= ?").get(ms).n; }
 
-  close() { try { this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
+  close() { try { if (!this.isPg) this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
   // Consistent copy of the whole database (safe while other processes use it).
-  backup(dest) { this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`); }
+  backup(dest) {
+    if (this.isPg) throw new Error("In PostgreSQL mode the database is backed up by pg_dump (the pgbackup service), not by the app.");
+    this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`);
+  }
 
   #tx(fn) {
     this.db.exec("BEGIN IMMEDIATE");
