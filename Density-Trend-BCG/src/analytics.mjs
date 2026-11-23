@@ -17,7 +17,10 @@ import { getCachedIndiaTrends, matchOpportunityTrend } from "./xtrends.mjs";
 const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily chart
 // The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
 // labels, a finished job) and dropped by cache.clear() (jobs, edits), so a longer life only saves work, it never shows older data.
-const TTL_MS = 300000;
+// The signature already changes with every new story, reading, label, job or edit, so an unchanged signature means unchanged data: the context
+// is kept for 30 min (HIVEMIND_CONTEXT_TTL_MS), not rebuilt every 5 min with every panel and topic recalculated from scratch.
+const TTL_MS = Math.max(60e3, +(process.env.HIVEMIND_CONTEXT_TTL_MS ?? 1800e3));
+const MEMO_MAX = Math.max(200, +(process.env.HIVEMIND_MEMO_MAX ?? 3000)); // remembered results per process (panels, topics, charts)
 const SIG_TTL_MS = Math.max(0, +(process.env.HIVEMIND_SIG_TTL_MS ?? 3000)); // how long a data signature is reused (see signature())
 // Part of every signature: when any source file changes (a new version is deployed) the saved views from the old code are not reused.
 const CODE_STAMP = (() => { try { const d = new URL(".", import.meta.url); return String(Math.max(...readdirSync(d).filter((f) => f.endsWith(".mjs")).map((f) => statSync(new URL(f, d)).mtimeMs))); } catch { return "0"; } })();
@@ -292,7 +295,8 @@ export class Analytics {
         const key = "memo|" + name + "|" + JSON.stringify(args), hit = this.cache.get(key);
         if (hit && hit.ctx === c) return hit.value;
         const value = raw(args);
-        if (this.cache.size > 600) for (const k of this.cache.keys()) if (k.startsWith("memo|")) this.cache.delete(k);
+        // Full: forget the oldest small results, never the big shared lists (opportunities, labels) that every panel and topic is cut from.
+        if (this.cache.size > MEMO_MAX) { let drop = this.cache.size - Math.floor(MEMO_MAX * 0.8); for (const k of this.cache.keys()) { if (drop <= 0) break; if (k.startsWith("memo|") && !/^memo\|(opportunities|labels|overview)\|/.test(k)) { this.cache.delete(k); drop--; } } }
         this.cache.set(key, { ctx: c, value, at: Date.now() });
         return value;
       };

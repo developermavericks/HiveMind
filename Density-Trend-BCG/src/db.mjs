@@ -214,6 +214,7 @@ export class Store {
   // instead of recomputing; they are used only while the signature still matches, and are derived data (safe to drop at any time).
   #views() { if (!this._viewsReady) { this.db.exec("CREATE TABLE IF NOT EXISTS response_cache (k TEXT PRIMARY KEY, sig TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)"); this._viewsReady = true; } }
   getView(k, sig) { this.#views(); const r = this.db.prepare("SELECT body FROM response_cache WHERE k = ? AND sig = ?").get(k, sig); return r ? r.body : null; }
+  latestView(k) { this.#views(); const r = this.db.prepare("SELECT sig, body FROM response_cache WHERE k = ?").get(k); return r ? { sig: r.sig, body: r.body } : null; } // the last saved version, whatever data it was built from
   putView(k, sig, body) { this.#views(); this.db.prepare("INSERT INTO response_cache (k, sig, body, at) VALUES (?, ?, ?, ?) ON CONFLICT(k) DO UPDATE SET sig = excluded.sig, body = excluded.body, at = excluded.at").run(k, sig, body, Date.now()); }
   pruneViews(maxAgeMs = 3 * 864e5) { this.#views(); return this.db.prepare("DELETE FROM response_cache WHERE at < ?").run(Date.now() - maxAgeMs).changes; }
   // Changes whenever a background job finishes: part of the dashboard cache's signature, so a longer cache lifetime never serves stale data.

@@ -78,8 +78,14 @@ async function api(path, opts) {
       return hit.data;
     }
   }
-  const r = await fetch(path, opts);
-  const j = await r.json().catch(() => ({}));
+  let r, j;
+  // 503 + retry: a helper is still preparing this page (it never blocks the server); ask again a few times while the loader stays up.
+  for (let tries = 0; ; tries++) {
+    r = await fetch(path, opts);
+    j = await r.json().catch(() => ({}));
+    if (!(isGet && r.status === 503 && j.retry && tries < 12)) break;
+    await new Promise((res) => setTimeout(res, 5000));
+  }
   if (r.status === 401 && j.login) { location.href = j.login; throw new Error("Please sign in."); }
   if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
   if (isGet) {

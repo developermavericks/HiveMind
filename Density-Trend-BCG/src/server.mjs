@@ -144,7 +144,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       Object.assign(j, { running: false, lastExit: code, lastMessage: message, child: null });
       try { store.finishJob(j.logId, { status: code === 0 ? "ok" : "failed", summary: message, stats, error: code === 0 ? null : message }); } catch { /* database closing */ }
       log(`${kind} ${date ?? ""} finished (exit ${code}): ${message}`);
-      if (code === 0) { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } try { after?.(); } catch (e) { log(`post-run step failed: ${e.message}`); } }
+      if (code === 0) { snapshotNow(); try { after?.(); } catch (e) { log(`post-run step failed: ${e.message}`); } }
       try { onDone?.(code); } catch (e) { log(`follow-up step failed: ${e.message}`); }
     };
     child.on("error", (e) => finish(-1, e.message));
@@ -228,6 +228,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       while (i < steps.length) { const r = steps[i++](); if (r?.ok) return; }
       if (!light) store.setMeta("followups.lastFullAt", String(Date.now()));
       chainRunning = false;
+      setTimeout(() => { try { warm(); } catch { /* the 3-minute timer tries again */ } }, 3000).unref?.(); // new data is complete: build the pages now
     }
     next();
   }
@@ -487,8 +488,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     }
   }, 2000).unref();
   // Recommendation history: re-evaluate every few minutes and log what changed and why.
-  timers.push(setInterval(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 5 * 60e3));
-  setTimeout(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 4000).unref();
+  // It rebuilds the whole analysis, so it runs in a helper (never on the server's own thread, where it froze every page for seconds).
+  function snapshotNow() { if (!closed) build("snapshot", {}, { helperOnly: true }).catch((e) => log(`snapshot error: ${e.message}`)); }
+  timers.push(setInterval(snapshotNow, 5 * 60e3));
+  setTimeout(snapshotNow, 60000).unref(); // after the helpers have started and the first pages are ready
   // Optional scheduled collection (the document's pilot polls hourly). Off unless HIVEMIND_SCHEDULE_MINUTES / --schedule is set.
   if (scheduleMinutes && scheduleMinutes >= 15) {
     // Each scheduled run polls the time since the last run (plus an hour of overlap), up to maxCatchupHours (default 48).
@@ -508,23 +511,63 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Keep the dashboard's views ready: shortly after start and then every minute, the views the pages ask for are built (in the worker thread) whenever the data
   // has changed, so a person opening a tab reads a finished result. Unchanged data costs almost nothing: the saved answer is still current.
   // The addresses are the ones the pages request (same arguments, so they hit the same saved answers).
-  let warming = false;
+  // Every page people open first is built ahead (by a helper, so nobody is blocked): all page variations, then the top opportunity panels and the top
+  // topics/sectors on Trends. Pages whose saved version is current cost nothing. Runs shortly after start, every 3 minutes, and when the follow-up
+  // jobs after a collection finish. Pauses while a job is running (the data is still changing) - people then get the last ready versions.
+  const WARM_PANELS = Math.max(0, +(process.env.HIVEMIND_WARM_PANELS ?? 100)), WARM_TOPICS = Math.max(0, +(process.env.HIVEMIND_WARM_TOPICS ?? 50));
+  let warming = false, warmAgain = false;
+  const warmView = async (u) => {
+    const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
+    if (v.error) return null;
+    const e = await viewEntry(v.method, v.args, { wait: true });
+    return e && !e.failed ? e : null;
+  };
   const warm = async () => {
-    if (closed || warming || anyJobRunning()) return;
+    if (closed || anyJobRunning()) return;
+    if (warming) { warmAgain = true; return; }
     warming = true;
+    const t0 = Date.now(), stop = () => closed || anyJobRunning();
+    let n = 0;
     try {
-      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?"];
+      const pages = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?", "/api/origins?key=all"];
       for (const co of companies.list()) {
-        urls.push(`/api/overview?company=${co.id}`);
-        for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
+        pages.push(`/api/overview?company=${co.id}`);
+        for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) pages.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
+        for (const m of ["whitespace", "validated"]) pages.push(`/api/opportunities?company=${co.id}&limit=300&group=pair&mode=${m}&slim=1`); // a shared opportunity link
       }
-      for (const u of urls) {
-        if (closed || anyJobRunning()) break;
-        const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
-        try { await viewEntry(v.method, v.args); } catch { /* one view failing must not stop the others */ }
+      const got = new Map();
+      for (const u of pages) { if (stop()) break; try { got.set(u, await warmView(u)); n++; } catch { /* one view failing must not stop the others */ } }
+      // The opportunity panels people open first: the top of the default list (Topics, white space, by score) for each company.
+      // A panel loads the opportunity, its topic and the topic's hourly chart.
+      const labelKeys = [];
+      for (const co of companies.list()) {
+        const list = got.get(`/api/opportunities?company=${co.id}&limit=1000&group=topic&mode=whitespace&slim=1`);
+        const items = list ? (JSON.parse(list.body).items || []).slice(0, WARM_PANELS) : [];
+        for (const o of items) {
+          if (stop()) break;
+          const lk = o.label?.key;
+          try {
+            await warmView(`/api/opportunity?company=${co.id}&key=${encodeURIComponent(o.key)}&mode=whitespace&group=topic`);
+            if (lk) { await warmView(`/api/topic?company=${co.id}&key=${encodeURIComponent(lk)}`); await warmView(`/api/series?keys=${encodeURIComponent(lk)}&gran=hour`); }
+            n += lk ? 3 : 1;
+          } catch { /* next */ }
+          if (lk && co.id === "bcg") labelKeys.push(lk);
+        }
       }
+      // Trends: the top sectors and topics (their chart and detail), in the order the page lists them.
+      for (const lv of ["bracket", "topic"]) {
+        const lab = got.get(`/api/labels?level=${lv}&limit=300`);
+        const rows = lab ? (JSON.parse(lab.body).rows || JSON.parse(lab.body).items || []) : [];
+        for (const r of rows.slice(0, lv === "topic" ? WARM_TOPICS : 20)) {
+          if (stop()) break;
+          if (!r.key || labelKeys.includes(r.key)) continue;
+          try { await warmView(`/api/topic?company=bcg&key=${encodeURIComponent(r.key)}`); await warmView(`/api/series?keys=${encodeURIComponent(r.key)}&gran=hour`); n += 2; } catch { /* next */ }
+        }
+      }
+      if (Date.now() - t0 > 20e3) log(`pages ready: ${n} checked or built in ${Math.round((Date.now() - t0) / 1000)} s`);
     } catch (e) { log(`warm-up skipped: ${e.message}`); }
     warming = false;
+    if (warmAgain && !closed) { warmAgain = false; setTimeout(warm, 1000).unref?.(); }
   };
   try { store.pruneViews(); } catch { /* derived data; nothing depends on it */ }
   setTimeout(warm, 10000).unref(); timers.push(setInterval(warm, 180e3));
@@ -557,7 +600,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       } catch (e) { log(`start-up clean-up failed: ${e.message}`); }
     }, 8000).unref();
     // Judge recommendations once their 72 hours are up (a live hit rate), every half hour.
-    const judge = () => { if (closed) return; try { analytics.judgeForecasts(); } catch (e) { log(`forecast check failed: ${e.message}`); } try { const r = analytics.judgeOutcomes(); if (r.evaluated) { const id = store.startJob({ kind: "outcomes", trigger: "auto" }); store.finishJob(id, { status: "ok", summary: `Judged ${r.evaluated} recommendations: ${r.hits} hit, ${r.misses} did not`, stats: r }); } } catch (e) { log(`outcome check failed: ${e.message}`); } };
+    const judge = async () => { if (closed) return; try { await build("judgeForecasts", {}, { helperOnly: true }); } catch (e) { log(`forecast check failed: ${e.message}`); } try { const m = await build("judgeOutcomes", {}, { helperOnly: true }); const r = m.skipped ? {} : JSON.parse(m.body); if (r.evaluated) { const id = store.startJob({ kind: "outcomes", trigger: "auto" }); store.finishJob(id, { status: "ok", summary: `Judged ${r.evaluated} recommendations: ${r.hits} hit, ${r.misses} did not`, stats: r }); } } catch (e) { log(`outcome check failed: ${e.message}`); } };
     timers.push(setInterval(judge, 30 * 60e3)); setTimeout(judge, 30000).unref();
   }
   timers.forEach((t) => t.unref());
@@ -620,18 +663,25 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // DDoS & Rate Limiting Protection (Sliding Window per IP)
   const rateLimitMap = new Map();
   const RATE_WINDOW_MS = 60000;
-  const MAX_REQUESTS_PER_MINUTE = 200;
+  const MAX_REQUESTS_PER_MINUTE = Math.max(50, +process.env.HIVEMIND_RATE_PER_PERSON || 300);   // one person (one sign-in session, or one address without one)
+  const MAX_PER_ADDRESS_PER_MINUTE = Math.max(MAX_REQUESTS_PER_MINUTE, +process.env.HIVEMIND_RATE_PER_ADDRESS || 6000); // a whole office behind one internet address
 
+  // Counted per person, not only per address: a client's whole team usually shares one office address, and a per-address limit of a few hundred
+  // would block them all. The address keeps a much higher ceiling of its own, so one machine still cannot flood the server.
+  const overLimit = (key, max, now) => {
+    let hits = rateLimitMap.get(key);
+    if (!hits) { hits = []; rateLimitMap.set(key, hits); }
+    while (hits.length && hits[0] <= now - RATE_WINDOW_MS) hits.shift();
+    if (hits.length >= max) return Math.max(1, Math.ceil((hits[0] + RATE_WINDOW_MS - now) / 1000));
+    hits.push(now);
+    return 0;
+  };
   function checkDdosRateLimit(req) {
     const ip = clientIp(req);
     const now = Date.now();
-    let hits = rateLimitMap.get(ip);
-    if (!hits) { hits = []; rateLimitMap.set(ip, hits); }
-    while (hits.length && hits[0] <= now - RATE_WINDOW_MS) hits.shift();
-    if (hits.length >= MAX_REQUESTS_PER_MINUTE) {
-      return Math.max(1, Math.ceil((hits[0] + RATE_WINDOW_MS - now) / 1000));
-    }
-    hits.push(now);
+    const sid = /(?:^|;\s*)hm_session=([^;]{16,200})/.exec(String(req.headers.cookie || ""))?.[1];
+    const wait = overLimit("a|" + ip, MAX_PER_ADDRESS_PER_MINUTE, now) || overLimit(sid ? "s|" + ip + "|" + sid : "p|" + ip, sid ? MAX_REQUESTS_PER_MINUTE : 2 * MAX_REQUESTS_PER_MINUTE, now); // not signed in yet: the sign-in page, shared by everyone at that address
+    if (wait) return wait;
     if (rateLimitMap.size > 2000) {
       for (const [k, v] of rateLimitMap.entries()) {
         if (!v.length || v[v.length - 1] <= now - RATE_WINDOW_MS) rateLimitMap.delete(k);
@@ -715,8 +765,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     };
   }
 
-  const build = async (method, args) => {
+  // helperOnly: background work (snapshot, checks) that must never run on the server's own thread; without a ready helper it is skipped this time.
+  const build = async (method, args, { helperOnly = false } = {}) => {
     const readyWorkers = workers.filter((w) => w.ready);
+    if (helperOnly && !readyWorkers.length) return process.env.HIVEMIND_NO_WORKER === "1" ? { body: JSON.stringify(analytics[method](args)), failed: false } : { skipped: true, body: "null", failed: true };
     if (readyWorkers.length > 0) {
       readyWorkers.sort((a, b) => a.active - b.active);
       const chosen = readyWorkers[0];
@@ -740,6 +792,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           log(`view worker still busy with ${method} after ${Math.round(VIEW_WAIT_MS / 1000)} s; asking the person to retry`);
           return { body: JSON.stringify({ error: "This page is still being prepared. Please try again in a minute.", retry: true }), failed: true, transient: true };
         }
+        if (helperOnly) throw e;
         log(`view worker failed for ${method} (${e.message}); building it in the server`);
       }
     }
@@ -747,36 +800,50 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     return { body: JSON.stringify(v), failed: !!(v && v.error) };
   };
 
-  // Pre-warm the most critical views in the background so the first page load is instant
-  if (process.env.NODE_ENV !== "test") {
-    setTimeout(() => {
-      Promise.allSettled([
-        viewEntry("overview", { company: "bcg", date: null }),
-        viewEntry("opportunities", { company: "bcg", date: null, limit: 60, group: false, slim: true })
-      ]).catch(() => {});
-    }, 200).unref?.();
+  // Instant pages. Every page answer is kept (memory + response_cache table, which survives restarts) with the data version it was built from.
+  // When the data has moved on (a job finished, new stories, an edit), people are NOT made to wait: they get the last ready version at once and the
+  // new one is built in the background by a helper; the next click shows it. Only a page that was never built before makes the person wait.
+  // Right after someone edits something (a POST), answers wait up to EDIT_WAIT_MS for the new version, so the person sees their own change.
+  const mem = new Map(), inflight = new Map(), refreshing = new Map();
+  let lastEditAt = 0;
+  const FRESH_WAIT_MS = Math.max(0, +(process.env.HIVEMIND_FRESH_WAIT_MS ?? 0)); // how long a click waits for the new version before getting the last one
+  const EDIT_WAIT_MS = 20e3;
+  const MEM_MAX = Math.max(50, +process.env.HIVEMIND_VIEW_MEM || 800);
+  const remember = (k, e) => { mem.delete(k); mem.set(k, e); if (mem.size > MEM_MAX) mem.delete(mem.keys().next().value); return e; }; // least recently used goes first
+  const entryOf = (sig, body, failed) => ({ sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` });
+  // Builds (once, however many people ask) the version for this data signature, saves and remembers it.
+  function fresh(method, args, k, sig) {
+    const ik = k + "@" + sig;
+    let p = inflight.get(ik);
+    if (!p) {
+      p = build(method, args).then((r) => {
+        if (r.transient) return { sig, body: r.body, failed: true, transient: true, etag: null };
+        if (!r.failed && r.body.length < 4e6) { try { store.putView(k, sig, r.body); } catch { /* a saved copy is only a convenience */ } }
+        return remember(k, entryOf(sig, r.body, r.failed));
+      }).finally(() => inflight.delete(ik));
+      inflight.set(ik, p);
+    }
+    return p;
   }
-  const mem = new Map(), inflight = new Map();
-  // The answer for (method, args): from memory, else the database, else built once (concurrent askers share the build).
-  async function viewEntry(method, args) {
+  // The answer for (method, args). wait: true (the warm-up) always waits for the current version.
+  async function viewEntry(method, args, { wait = false } = {}) {
     const k = method + "|" + JSON.stringify(args), sig = analytics.signature(args.date ?? null);
     if (sig == null) { const v = analytics[method](args); return { body: JSON.stringify(v), failed: !!(v && v.error), etag: null }; }
     let e = mem.get(k);
-    if (e && e.sig === sig) return e;
-    let body = store.getView(k, sig), failed = false;
-    if (body == null) {
-      const ik = k + "@" + sig;
-      let p = inflight.get(ik);
-      if (!p) { p = build(method, args).finally(() => inflight.delete(ik)); inflight.set(ik, p); }
-      const r = await p;
-      if (r.transient) return { sig, body: r.body, failed: true, transient: true, etag: null };
-      ({ body, failed } = r);
-      if (!failed && body.length < 4e6) { try { store.putView(k, sig, body); } catch { /* a saved copy is only a convenience */ } }
-    }
-    e = { sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` };
-    if (mem.size > 300) mem.clear();
-    mem.set(k, e);
-    return e;
+    if (e && e.sig === sig) return remember(k, e);
+    const body = store.getView(k, sig);
+    if (body != null) return remember(k, entryOf(sig, body, false));
+    if (!e || e.failed) { const s = store.latestView(k); if (s) e = remember(k, entryOf(s.sig, s.body, false)); } // last version saved (also before a restart)
+    if (!e || e.failed || wait) return fresh(method, args, k, sig); // nothing to show yet: this one waits (the helper builds it; the server never blocks)
+    // A last version exists: start (one) background refresh for this page and give the new version a moment; otherwise answer with the last one.
+    let p = refreshing.get(k);
+    if (!p) { p = fresh(method, args, k, sig).catch(() => null).finally(() => refreshing.delete(k)); refreshing.set(k, p); }
+    const waitMs = Date.now() - lastEditAt < EDIT_WAIT_MS ? EDIT_WAIT_MS : FRESH_WAIT_MS;
+    if (!waitMs) return e;
+    let timer;
+    const r = await Promise.race([p, new Promise((res) => { timer = setTimeout(res, waitMs, null); timer.unref?.(); })]);
+    clearTimeout(timer);
+    return r && !r.transient && !r.failed ? r : e;
   }
   async function view(req, res, method, args) {
     const e = await viewEntry(method, args);
@@ -860,7 +927,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     });
 
     // Anything that changes data (matching, briefs, edits, tuning) drops the cached views once it is done; logging in or out does not.
-    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) analytics.cache.clear(); });
+    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) { analytics.cache.clear(); lastEditAt = Date.now(); } });
     // Liveness and readiness for containers and load balancers. It answers before the host check and the login, and says nothing but ok / not ok.
     if (p === "/healthz" && (req.method === "GET" || req.method === "HEAD")) {
       try { store.db.prepare("SELECT 1").get(); res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(req.method === "HEAD" ? undefined : '{"ok":true}'); }
