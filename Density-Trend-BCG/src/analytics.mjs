@@ -18,6 +18,7 @@ const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily cha
 // The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
 // labels, a finished job) and dropped by cache.clear() (jobs, edits), so a longer life only saves work, it never shows older data.
 const TTL_MS = 300000;
+const SIG_TTL_MS = Math.max(0, +(process.env.HIVEMIND_SIG_TTL_MS ?? 3000)); // how long a data signature is reused (see signature())
 // Part of every signature: when any source file changes (a new version is deployed) the saved views from the old code are not reused.
 const CODE_STAMP = (() => { try { const d = new URL(".", import.meta.url); return String(Math.max(...readdirSync(d).filter((f) => f.endsWith(".mjs")).map((f) => statSync(new URL(f, d)).mtimeMs))); } catch { return "0"; } })();
 // The heavy read-only views, remembered per (view, arguments) against the context they were computed from.
@@ -282,6 +283,7 @@ export class Analytics {
     // clear() also moves the saved-views revision on, so views saved before an edit or a job are never served afterwards (also after a restart).
     const store_ = store;
     this.cache = new (class extends Map { clear() { super.clear(); try { store_?.setMeta?.("cache.rev", String(Date.now()) + Math.random().toString(36).slice(2, 6)); } catch { /* a counter must not break an edit */ } this.onClear?.(); } })();
+    { const clearMap = this.cache.clear.bind(this.cache), self = this; this.cache.clear = () => { self._sigMemo?.clear(); return clearMap(); }; } // a cleared cache also forgets the signature
     for (const name of MEMO) {
       const raw = this[name].bind(this);
       this[name] = (args = {}) => {
@@ -300,10 +302,16 @@ export class Analytics {
   // ---------------------------------------------------------------- shared context (cached for a few seconds)
   // A short fingerprint of everything the views are computed from: it changes when stories, readings, labels or weights change, when a job finishes, or
   // when cache.clear() is called after an edit. Cheap (a few counts), so it can decide whether a saved view is still current without building anything.
+  // The data signature counts across whole tables. One page asks for it many times while it is built, so the answer is kept
+  // for SIG_TTL_MS (3 s): the data only changes when a job finishes or an edit is made, and both clear the cache, which
+  // also drops this memo, so a change is never missed. On SQLite this saves a little; on PostgreSQL it saves seconds per page.
   signature(date = null) {
+    const now = Date.now(), memo = (this._sigMemo ??= new Map()), hit = memo.get(date);
+    if (hit && now - hit.at < SIG_TTL_MS) return hit.value;
     const span = this.store.span();
-    if (!span.last) return null;
-    return `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${this.store.jobRev()}|${this.registry().size}|${JSON.stringify(this.cfg.weights)}|${this.store.getMeta("cache.rev", "0")}|${CODE_STAMP}`;
+    const value = !span.last ? null : `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${this.store.jobRev()}|${this.registry().size}|${JSON.stringify(this.cfg.weights)}|${this.store.getMeta("cache.rev", "0")}|${CODE_STAMP}`;
+    memo.set(date, { at: now, value });
+    return value;
   }
   context(date = null) {
     const span = this.store.span();

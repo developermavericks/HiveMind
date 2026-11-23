@@ -19,6 +19,7 @@ import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_thread
 
 const WAIT_MS = +process.env.HIVEMIND_PG_WAIT_MS || 15 * 60e3;
 const DEBUG = process.env.HIVEMIND_PG_DEBUG === "1";
+const SLOW_MS = +process.env.HIVEMIND_PG_SLOW_MS || 0; // log every query slower than this (0 = off)
 
 export class PgDatabaseSync {
   constructor(url, { schema = "public" } = {}) {
@@ -41,8 +42,11 @@ export class PgDatabaseSync {
     if (DEBUG) process.stderr.write(`[pg] ${msg.op} ${(msg.sql ?? (msg.list || []).join(" ; ")).replace(/\s+/g, " ").slice(0, 300)}
 `);
     Atomics.store(this.flag, 0, 0);
+    const t0 = SLOW_MS ? Date.now() : 0;
     this.port.postMessage(msg);
     const r = Atomics.wait(this.flag, 0, 0, WAIT_MS);
+    if (SLOW_MS && Date.now() - t0 >= SLOW_MS) process.stderr.write(`[pg-slow] ${Date.now() - t0} ms ${String(msg.sql ?? (msg.list || []).join("; ")).replace(/\s+/g, " ").slice(0, 500)}
+`);
     if (r === "timed-out") throw new Error("PostgreSQL did not answer in time");
     const got = receiveMessageOnPort(this.port);
     if (!got) throw new Error("PostgreSQL answer missing");
