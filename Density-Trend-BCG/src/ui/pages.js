@@ -378,7 +378,7 @@ async function pgMomentum(el) {
 
                       <div class="mdp-card-footer">
                         <div class="mdp-outlet-hint">
-                          <b>Target Outlets:</b> ${esc(ang.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute")}
+                          <b>Target Outlets:</b> ${esc(ang.targetOutlets || "–")}
                         </div>
                         <div class="mdp-actions">
                           <button class="btn sm ghost" data-copybrief="${esc(ang.id)}">📋 Copy Advisory Brief</button>
@@ -444,7 +444,7 @@ async function pgMomentum(el) {
           targetAng.targetAudience || "CEOs, Board Risk Committees, Regulators, and Infrastructure Investors",
           ``,
           `RECOMMENDED MEDIA PLACEMENT:`,
-          targetAng.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+          targetAng.targetOutlets || "–",
           ``,
           `PITCH SUMMARY:`,
           targetAng.pitch || targetAng.thesis

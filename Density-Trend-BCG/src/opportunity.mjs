@@ -159,17 +159,22 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
       if (evidenceStatus === "hypothesis") missing.push(inherited ? "Sector link inherited from the parent bracket: a hypothesis" : judged ? `Sector link judged for this topic but only moderately relevant (${h.relevance.toFixed(2)}): a hypothesis` : "Sector link not yet backed by enough stories: a hypothesis");
       if (!trigger?.verified) missing.push("No verified trigger (needs a primary source or ≥3 independent origins)");
       const top = [...list].sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount).slice(0, 5)
-        .map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3) }));
+        .map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 8) }));
       const bracketName = bracketId ? registry.get(bracketId)?.name : null;
       const secDesc = company.sectors?.find((s) => s.name === h.sector)?.description || "";
-      const geoCounts = new Map();
+      const geoCounts = new Map(); // key -> { name, count }; "Global" and "global" are one place
       for (const it of list) {
+        const seenHere = new Set();
         for (const g of (it.geography || [])) {
-          const trimmed = String(g).trim();
-          if (trimmed) geoCounts.set(trimmed, (geoCounts.get(trimmed) || 0) + 1);
+          const name = String(g).trim().replace(/[.,;:]+$/, ""), k = name.replace(/\s+/g, " ").toLowerCase();
+          if (!k || seenHere.has(k)) continue;
+          seenHere.add(k);
+          const e = geoCounts.get(k) ?? geoCounts.set(k, { name, count: 0 }).get(k);
+          if (e.name === e.name.toLowerCase() && name !== name.toLowerCase()) e.name = name;
+          e.count++;
         }
       }
-      const oppGeo = Array.from(geoCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([gName, cnt]) => ({ name: gName, count: cnt }));
+      const oppGeo = Array.from(geoCounts.values()).sort((a, b) => b.count - a.count).slice(0, 6).map((e) => ({ name: e.name, count: e.count }));
 
       out.push({
         key: oppKey, company: company.id, sector: h.sector, sectorDescription: secDesc,

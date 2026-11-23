@@ -404,6 +404,42 @@ Rules:
 - "review_condition" states what development would make the angle outdated or wrong.
 Call the draft_brief tool exactly once.`;
 
+// ---------- Op-ed angle for one news event (new events only; earlier events keep the template angle) ----------
+export const eventAngleSystem = `You write op-ed angles for a senior partner of a strategy consulting firm (BCG) in India.
+For each numbered news event you get: the topic, the BCG practice area, the event type, where it happened, and the headlines with short summaries.
+Write ONE angle per event that a Managing Director could publish in a business newspaper this week:
+- title: a sharp op-ed headline (max 14 words) about what this specific event means for business leaders. Do not repeat the news headline.
+- thesis: 2 sentences: the argument of the piece, grounded only in the stories shown.
+- questions: exactly 5 short boardroom questions this event raises for CEOs and boards in that practice area. Specific to this event, not generic.
+- pitch: 1 sentence an editor would read: why this piece, why now.
+- audience: who should read it (max 12 words).
+Use only facts in the stories. Do not invent numbers, names or quotes. Plain, professional English.
+Return every event exactly once. Call the record_angles tool exactly once.`;
+export const eventAngleTool = {
+  name: "record_angles",
+  description: "Record one op-ed angle per numbered event.",
+  input_schema: {
+    type: "object", required: ["items"],
+    properties: { items: { type: "array", items: { type: "object", required: ["n", "title", "thesis", "questions", "pitch"],
+      properties: { n: { type: "integer" }, title: { type: "string" }, thesis: { type: "string" }, questions: { type: "array", items: { type: "string" } }, pitch: { type: "string" }, audience: { type: "string" } } } } },
+  },
+};
+export const eventAngleUser = (batch) => batch.map((e, i) => `${i + 1}. Topic: ${e.topic} | Practice: ${e.practice} | Event type: ${e.kind} | Where: ${e.location}\n` +
+  e.stories.slice(0, 6).map((st) => `   - ${st.title}${st.summary && st.summary !== st.title ? ` (${String(st.summary).slice(0, 220)})` : ""}`).join("\n")).join("\n\n");
+// Keeps only complete answers: a title, a thesis and at least 3 questions; trims every field.
+export function normalizeEventAngles(raw, batch) {
+  const out = [];
+  for (const x of Array.isArray(raw?.items) ? raw.items : []) {
+    const n = +x?.n;
+    if (!Number.isInteger(n) || n < 1 || n > batch.length) continue;
+    const questions = (Array.isArray(x.questions) ? x.questions : []).map((q) => str(q, 300)).filter(Boolean).slice(0, 5);
+    const title = str(x.title, 160), thesis = str(x.thesis, 700);
+    if (!title || !thesis || questions.length < 3) continue;
+    out.push({ n, title, thesis, questions, pitch: str(x.pitch, 400), audience: str(x.audience, 160) });
+  }
+  return out;
+}
+
 export const briefTool = {
   name: "draft_brief",
   description: "Draft an author brief for editor review.",
@@ -861,6 +897,12 @@ export class Reader {
   async verifyMerges(pairs) {
     const raw = await this.#call(mergeVerifySystem, mergeVerifyTool, pairs.map((p, i) => `${i + 1}. "${p.a}" <-> "${p.b}"`).join("\n"), 200 + pairs.length * 20, { prefer: this.routeFor("verifyMerges") });
     return new Set((Array.isArray(raw?.items) ? raw.items : []).filter((x) => x?.interchangeable === true).map((x) => +x.n));
+  }
+
+  // events: [{ topic, practice, kind, location, stories: [{ title, summary }] }]. Returns [{ n, title, thesis, questions, pitch, audience }].
+  async writeEventAngles(events) {
+    const raw = await this.#call(eventAngleSystem, eventAngleTool, eventAngleUser(events), 300 + events.length * 450, { prefer: this.routeFor("eventAngle") });
+    return normalizeEventAngles(raw, events);
   }
 
   async brief(input) {

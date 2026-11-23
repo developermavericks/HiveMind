@@ -30,6 +30,14 @@ const tallySentiment = (list) => {
   return { ...t, n, net: n ? (t.pos - t.neg) / n : null };
 };
 const STAGES = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
+// One key per place, whatever the spelling: "Global", "global" and "Global." count as the same place.
+export const geoKey = (g) => String(g ?? "").trim().replace(/[.,;:]+$/, "").replace(/\s+/g, " ").toLowerCase();
+// The publications that covered an event most, as its suggested outlets (real coverage, not a fixed list).
+const topOutlets = (stories, n = 4) => {
+  const c = new Map();
+  for (const s of stories) for (const o of s.outlets || []) c.set(o, (c.get(o) || 0) + 1);
+  return [...c].sort((a, b) => b[1] - a[1]).slice(0, n).map(([o]) => o).join(", ");
+};
 
 // Whole-word keyword test: short words match exactly ("ai" never matches "said", "port" never matches "report");
 // entries ending in "*" are stems and match any ending ("regulat*" -> regulation, regulator).
@@ -134,7 +142,8 @@ const ANGLE_KINDS = {
 };
 
 // match: the topic's existing AI sector match for the client ({ sector, why, angle } or { irrelevant: true }), or null.
-function buildTopicEventClusters(items, labelName, match = null) {
+// saved: Map story_key -> AI-written angle (store.eventAnglesFor). An event shows a saved angle if any of its stories has one.
+function buildTopicEventClusters(items, labelName, match = null, saved = new Map()) {
   const clusters = [];
   for (const item of items) {
     const loc = (item.geography && item.geography.length) ? item.geography[0] : null;
@@ -198,7 +207,25 @@ function buildTopicEventClusters(items, labelName, match = null) {
     const basedOn = match?.sector && !match.inherited ? "sector match" : kw !== DEFAULT_PRACTICE ? "keywords" : match?.sector ? "sector match" : "default";
     const k = ANGLE_KINDS[kind] ?? ANGLE_KINDS.general;
     // No op-ed angle for sport, entertainment and similar events, or for topics the AI judged irrelevant to every sector.
-    const mdpAngles = kind === "nonbusiness" || match?.irrelevant ? [] : [
+    // The event's first story (earliest) is its anchor: a new AI angle is saved under it.
+    const anchor = [...cl.stories].sort((a, b) => a.at - b.at)[0];
+    const ai = cl.stories.map((st) => saved.get(st.id)).find(Boolean) ?? null;
+    const business = !(kind === "nonbusiness" || match?.irrelevant);
+    const mdpAngles = !business ? [] : ai ? [{
+        id: `${cl.id}-mdp-1`,
+        role: "BCG Managing Director & Senior Partner (MDP)",
+        practice,
+        eventKind: kind,
+        basedOn: "AI, written for this event",
+        editorialFormat: k.format,
+        title: ai.title,
+        thesis: ai.thesis,
+        boardroomQuestions: ai.questions,
+        targetAudience: ai.audience || "CEOs, Boards, Risk Committees and Investors",
+        targetOutlets: topOutlets(cl.stories),
+        pitch: ai.pitch,
+        aiWritten: true,
+      }] : [
       {
         id: `${cl.id}-mdp-1`,
         role: "BCG Managing Director & Senior Partner (MDP)",
@@ -212,13 +239,17 @@ function buildTopicEventClusters(items, labelName, match = null) {
           : `${shortTitle} (${locStr}) matters for ${practice}: leaders need to judge what it changes for strategy, operations and risk, not only react to the news.`,
         boardroomQuestions: k.questions(locStr, entityStr),
         targetAudience: kind === "policy" ? "CEOs, CFOs, Regulatory Affairs heads and Industry Bodies" : kind === "deal" ? "CEOs, Strategy heads, Boards and Investors" : kind === "market" ? "CEOs, CFOs, Commercial and Supply Chain heads" : "CEOs, Boards, Risk Committees and Investors",
-        targetOutlets: "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+        targetOutlets: topOutlets(cl.stories),
         pitch: match?.angle || `An executive op-ed on what ${shortTitle.slice(0, 80)} means for ${practice} leaders and what they should do next.`,
       }
     ];
 
     return {
       id: cl.id,
+      anchorKey: anchor?.id ?? null,
+      anchorAt: anchor?.at ?? null,
+      needsAngle: business && !ai,
+      kind, practice,
       title: cl.title,
       summary: cl.summary,
       location: cl.location,
@@ -514,6 +545,26 @@ export class Analytics {
     } catch { return null; }
   }
 
+  // New business events (first story at or after `since`) in the top topics that have no AI-written angle yet, most important topics first.
+  // Earlier events are left with the template angle on purpose.
+  eventAngleCandidates({ company = "bcg", since, topics = 30, limit = 50 }) {
+    const opps = this.opportunities({ company, limit: 300, group: true })?.items ?? [];
+    const keys = [...new Set(opps.map((o) => o.label?.key).filter((k) => k && k.startsWith("t:")))].slice(0, topics);
+    const out = [], seen = new Set();
+    for (const key of keys) {
+      const t = this.topic({ key, company });
+      if (!t || t.error) continue;
+      for (const cl of t.eventClusters ?? []) {
+        if (!cl.needsAngle || !cl.anchorKey || cl.anchorAt == null || cl.anchorAt < since || seen.has(cl.anchorKey)) continue;
+        seen.add(cl.anchorKey);
+        out.push({ anchorKey: cl.anchorKey, topicKey: key, topic: t.row?.name ?? key, practice: cl.practice, kind: cl.kind, location: cl.location,
+          stories: (cl.stories ?? []).slice(0, 6).map((st) => ({ title: st.title, summary: st.summary })) });
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
+
   topic({ key, company: companyId = "bcg", date = null, geo = null, eventId = null }) {
     const c = this.context(date);
     const m = c?.analysis.labels.get(key);
@@ -540,11 +591,14 @@ export class Analytics {
     const geoMap = new Map();
     for (const i of allList) {
       const geos = (i.geography && i.geography.length) ? i.geography : ["National / Global"];
+      const seenHere = new Set(); // a story naming the same place twice counts once
       for (const g of geos) {
-        const trimmed = String(g).trim();
-        if (!trimmed) continue;
-        if (!geoMap.has(trimmed)) geoMap.set(trimmed, { name: trimmed, count: 0, recentCount: 0 });
-        const entry = geoMap.get(trimmed);
+        const name = String(g).trim().replace(/[.,;:]+$/, ""), k = geoKey(g);
+        if (!k || seenHere.has(k)) continue;
+        seenHere.add(k);
+        if (!geoMap.has(k)) geoMap.set(k, { name, count: 0, recentCount: 0 });
+        const entry = geoMap.get(k);
+        if (entry.name === entry.name.toLowerCase() && name !== name.toLowerCase()) entry.name = name; // prefer "Global" over "global"
         entry.count++;
         if (c.asOf - i.at <= 72 * HOUR) entry.recentCount++;
       }
@@ -552,7 +606,9 @@ export class Analytics {
     const geoBreakdown = Array.from(geoMap.values()).sort((a, b) => b.count - a.count).slice(0, 16);
 
     // 3. Event-specific clusters with tailored BCG MDP editorial angles
-    const eventClusters = buildTopicEventClusters(recentList.length ? recentList : allList.slice(0, 50), name, this.topicSectorMatch(m, companyId));
+    const clusterItems = recentList.length ? recentList : allList.slice(0, 50);
+    const savedAngles = this.store.eventAnglesFor ? this.store.eventAnglesFor(clusterItems.map((i) => i.id)) : new Map();
+    const eventClusters = buildTopicEventClusters(clusterItems, name, this.topicSectorMatch(m, companyId), savedAngles);
 
     // 4. Specific-based news filtering (by location or specific event cluster)
     let displayList = recentList.length ? recentList : allList;
@@ -563,8 +619,14 @@ export class Analytics {
         displayList = displayList.filter((s) => clusterStoryIds.has(s.id));
       }
     } else if (geo && geo !== "all") {
-      const targetGeo = geo.toLowerCase();
-      displayList = displayList.filter((s) => (s.geography || []).some((g) => g.toLowerCase() === targetGeo || g.toLowerCase().includes(targetGeo) || targetGeo.includes(g.toLowerCase())));
+      // the place counts above are over all of the topic's stories, so the filter looks at all of them too (newest first)
+      const targetGeo = geoKey(geo);
+      const isDefault = targetGeo === geoKey("National / Global");
+      displayList = [...allList].sort((a, b) => b.at - a.at).filter((s) => {
+        const gs = (s.geography || []).map(geoKey).filter(Boolean);
+        if (isDefault) return gs.length === 0;
+        return gs.includes(targetGeo); // exactly the rule the place counts use, so "India (10)" shows those 10 stories
+      });
     }
 
     const pathways = [];
@@ -573,8 +635,8 @@ export class Analytics {
     const si = this.store.getSignal(norm(name));
     return {
       row: this.labelRow(c, m), asOf: c.asOf,
-      stories: displayList.slice(0, 100).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
-      allStories: allList.slice(0, 250).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      stories: displayList.slice(0, 100).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 8), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      allStories: allList.slice(0, 250).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 8), reconstructed: i.reconstructed, sentiment: i.sentiment })),
       storyTracking,
       geoBreakdown,
       eventClusters,

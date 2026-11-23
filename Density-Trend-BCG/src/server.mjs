@@ -214,6 +214,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       () => { dedupeNow(trigger); return null; },
       () => (light ? null : (topicVerifyNow(trigger).finally(next), { ok: true })),
       () => (light ? null : (topicMatchNow(trigger).finally(next), { ok: true })),
+      () => (light ? null : (eventAnglesNow(trigger).finally(next), { ok: true })),
       () => (!light && Date.now() - (+store.getMeta("secondOpinion.lastAt", 0) || 0) > 7 * 864e5 ? (secondOpinionNow(trigger).finally(next), { ok: true }) : null),
       () => (cfg.fulltext?.enabled && store.fulltextCandidates({ limit: 1, maxTries: cfg.fulltext?.maxTries ?? 2, retryAfterMs: (cfg.fulltext?.retryAfterHours ?? 12) * 3600e3 }).length && fulltextAllowanceLeft() > 0 ? startFulltext(trigger, next) : null),
       () => (light ? null : (hotNow(trigger).finally(next), { ok: true })),
@@ -295,6 +296,42 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       return { judged };
     } catch (e) { if (id != null) { try { store.finishJob(id, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } } return { error: e.message }; }
     finally { matchRunning = false; }
+  }
+
+  // Op-ed angles for NEW events, written by the AI (API) after each collection. Events that started before this feature was
+  // switched on keep the template angle. A daily cap bounds the cost (cfg.eventAngles.dailyMax), on top of the app's budget guard.
+  let anglesRunning = false;
+  async function eventAnglesNow(trigger = "manual") {
+    const ec = cfg.eventAngles ?? {};
+    if (ec.enabled === false) return { skipped: "switched off (eventAngles.enabled)" };
+    if (anglesRunning || closed || !llm.ok) return { skipped: "busy or model unavailable" };
+    anglesRunning = true;
+    let id = null, written = 0, badBatches = 0, lastError = "";
+    try {
+      let since = +store.getMeta("eventAngles.since", 0) || 0;
+      if (!since) { since = Date.now(); store.setMeta("eventAngles.since", String(since)); } // first run: only events from now on
+      const today = dayStart(dayOf(Date.now()));
+      const left = Math.max(0, (ec.dailyMax ?? 50) - store.eventAnglesSince(today));
+      if (!left) return { skipped: "daily limit reached" };
+      const cands = analytics.eventAngleCandidates({ company: "bcg", since, topics: ec.topics ?? 30, limit: left });
+      if (!cands.length) return { skipped: "no new events without an angle" };
+      id = store.startJob({ kind: "event-angles", trigger, summary: "" });
+      const size = Math.max(1, ec.batch ?? 5);
+      for (let i = 0; i < cands.length && !closed; i += size) {
+        const batch = cands.slice(i, i + size);
+        let res; try { res = await reader.writeEventAngles(batch); } catch (e) { badBatches++; lastError = e.message; continue; }
+        for (const r of res) {
+          const ev = batch[r.n - 1];
+          store.putEventAngle({ storyKey: ev.anchorKey, topic: ev.topicKey, kind: ev.kind, title: r.title, thesis: r.thesis, questions: r.questions, pitch: r.pitch, audience: r.audience, model: reader.label || null });
+          written++;
+        }
+      }
+      if (badBatches && !written) throw new Error(lastError);
+      store.finishJob(id, { status: "ok", summary: `Wrote op-ed angles for ${written} new event${written === 1 ? "" : "s"}${badBatches ? ` (${badBatches} batch${badBatches === 1 ? "" : "es"} skipped after errors)` : ""}`, stats: { written, skippedBatches: badBatches } });
+      if (written) analytics.cache.clear();
+      return { written };
+    } catch (e) { if (id != null) { try { store.finishJob(id, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } } return { error: e.message }; }
+    finally { anglesRunning = false; }
   }
 
   // A stronger model double-checks the readings behind the top opportunities.
@@ -928,6 +965,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (k === "topic-verify") { topicVerifyNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "topic-match") { topicMatchNow("manual", { force: true }); return json(res, 200, { ok: true }); }
         if (k === "second-opinion") { secondOpinionNow("manual"); return json(res, 200, { ok: true }); }
+        if (k === "event-angles") { eventAnglesNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "dedupe") return json(res, 200, { ok: true, ...dedupeNow("manual") });
         const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), ocr: () => startOcr("manual"), online: () => startOnline("manual"), enrich: () => startEnrich(+body.limit || 0, "manual"), sync: () => startSync(Boolean(body.full), "manual", () => matchNow()) }[k];
         if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich, sync or hot-topics." });

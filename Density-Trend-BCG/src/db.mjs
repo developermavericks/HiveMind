@@ -153,9 +153,35 @@ export class Store {
     if (!this.db.prepare("PRAGMA table_info(ocr_articles)").all().some((c) => c.name === "title")) this.db.exec("ALTER TABLE ocr_articles ADD COLUMN title TEXT; ALTER TABLE ocr_articles ADD COLUMN title_source TEXT");
     // the collected story an opinion-page entry turned out to be (set once the stories are stored)
     if (!this.db.prepare("PRAGMA table_info(section_pieces)").all().some((c) => c.name === "story_key")) this.db.exec("ALTER TABLE section_pieces ADD COLUMN story_key TEXT");
+    // Op-ed angles written by the AI for one event (a group of stories), saved under the event's first story. Events without one show the template angle.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS event_angles (
+        story_key TEXT PRIMARY KEY, topic TEXT NOT NULL, kind TEXT, title TEXT NOT NULL, thesis TEXT, questions TEXT NOT NULL DEFAULT '[]',
+        pitch TEXT, audience TEXT, model TEXT, created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS event_angles_at ON event_angles(created_at);`);
   }
 
   // Refresh the query planner's statistics before closing, so indexes keep being chosen well as the data grows.
+  // ---- AI-written op-ed angles per event ----
+  putEventAngle({ storyKey, topic, kind = null, title, thesis = "", questions = [], pitch = "", audience = "", model = null, at = Date.now() }) {
+    this.db.prepare(`INSERT INTO event_angles (story_key, topic, kind, title, thesis, questions, pitch, audience, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(story_key) DO UPDATE SET topic = excluded.topic, kind = excluded.kind, title = excluded.title, thesis = excluded.thesis, questions = excluded.questions,
+      pitch = excluded.pitch, audience = excluded.audience, model = excluded.model, created_at = excluded.created_at`)
+      .run(storyKey, topic, kind, title, thesis, JSON.stringify(questions), pitch, audience, model, at);
+  }
+  // Saved angles for any of these story keys: Map story_key -> angle.
+  eventAnglesFor(keys) {
+    const out = new Map(), list = [...new Set(keys)].filter(Boolean);
+    for (let i = 0; i < list.length; i += 500) {
+      const part = list.slice(i, i + 500);
+      for (const r of this.db.prepare(`SELECT * FROM event_angles WHERE story_key IN (${part.map(() => "?").join(",")})`).all(...part)) {
+        let questions = []; try { questions = JSON.parse(r.questions); } catch { /* keep empty */ }
+        out.set(r.story_key, { title: r.title, thesis: r.thesis, questions, pitch: r.pitch, audience: r.audience, kind: r.kind, model: r.model, at: r.created_at });
+      }
+    }
+    return out;
+  }
+  eventAnglesSince(ms) { return this.db.prepare("SELECT COUNT(*) AS n FROM event_angles WHERE created_at >= ?").get(ms).n; }
+
   close() { try { this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
   // Consistent copy of the whole database (safe while other processes use it).
   backup(dest) { this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`); }
