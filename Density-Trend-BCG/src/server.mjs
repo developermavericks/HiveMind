@@ -399,18 +399,18 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   //   return true;
   // }
   // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
-  const status = () => ({
+  const status = (n = statusCounts()) => ({
     llm, runner: runnerState(), live: liveRun(), syncConfigured: syncConfigured(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
-    sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: store.sentimentCount(), pending: store.unsentimentedCount() },
-    topicMerge: { running: jobs["topic-merge"].running, merged: store.mergedTopicCount() },
+    sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: n.sentimentLabelled, pending: n.sentimentPending },
+    topicMerge: { running: jobs["topic-merge"].running, merged: n.merged },
     activity: { topicVerify: verifyRunning, topicMatch: matchRunning, hot: hotRunning, secondOpinion: reviewRunning, followUps: chainRunning },
-    fulltext: { running: jobs.fulltext.running, headlineOnly: store.headlineOnlyCount(), allowanceLeft: fulltextAllowanceLeft() },
-    enrich: { running: jobs.enrich.running, startedAt: jobs.enrich.startedAt, lastExit: jobs.enrich.lastExit, lastMessage: jobs.enrich.lastMessage, labelled: store.enrichmentCount(), readings: store.readingCount(), pending: store.unenrichedCount() },
+    fulltext: { running: jobs.fulltext.running, headlineOnly: n.headlineOnly, allowanceLeft: fulltextAllowanceLeft() },
+    enrich: { running: jobs.enrich.running, startedAt: jobs.enrich.startedAt, lastExit: jobs.enrich.lastExit, lastMessage: jobs.enrich.lastMessage, labelled: n.enrichLabelled, readings: n.readings, pending: n.enrichPending },
     schedule: { minutes: scheduleMinutes, lastRunAt: store.latestRun("rolling")?.startedAt ?? null, nextRunAt: scheduleMinutes ? (store.latestRun("rolling")?.startedAt ?? Date.now()) + scheduleMinutes * 60e3 : null },
     searchInterest: searchInterestStatus(), serverTime: Date.now(),
     companies: companies.list().map((c) => ({ id: c.id, name: c.name, builtin: !!c.builtin, sectors: c.sectors.length, matched: Object.keys(c.matches).length })),
-    dates: store.days(), recommendations: store.recommendationCount(),
+    dates: n.dates, recommendations: n.recommendations,
     integrations: integrations.status({ ollama: { reachable: reader.chain.includes("ollama") }, journalists: { count: store.journalistCount() } }),
     // journalists: journalistStatus(), // JOURNALISTS DISABLED
     provider: reader.provider, noClaude: reader.noClaude, models: { groq: reader.groqOk ? reader.groqModel : null, openai: reader.openaiOk ? reader.openaiModel : null },
@@ -422,6 +422,22 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   let cachedStatusObj = null;
   let cachedStatusAt = 0;
   const isTestEnv = process.argv.some(a => a.includes("test")) || process.execArgv.some(a => a.includes("test")) || process.env.NODE_ENV === "test";
+  // The slow whole-table counts in the status (about 1 s together) are counted by the helper in the background, at most every COUNTS_MS
+  // or soon after the data changes. Before that, the last counts are shown. Only the very first status after a start counts them here.
+  const COUNTS_MS = 30e3;
+  let counts = null, countsBusy = false;
+  const refreshCounts = () => {
+    if (countsBusy) return;
+    countsBusy = true;
+    build("statusCounts", {}, { helperOnly: true }).then((m) => { if (!m.skipped && !m.failed) counts = JSON.parse(m.body); })
+      .catch(() => {}).finally(() => { countsBusy = false; });
+  };
+  function statusCounts() {
+    if (isTestEnv || process.env.HIVEMIND_NO_WORKER === "1") return analytics.statusCounts();
+    if (!counts) counts = analytics.statusCounts();
+    else if (Date.now() - counts.at > COUNTS_MS) refreshCounts();
+    return counts;
+  }
   const getCachedStatus = () => {
     if (isTestEnv) return status();
     const now = Date.now();
@@ -610,7 +626,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   timers.forEach((t) => t.unref());
 
   // What the bell shows: recent finished jobs and any service that needs attention. Derived, never stored separately.
-  function notifications() {
+  async function notifications() {
     const items = [];
     const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check", xtrends: "Twitter / X trends poll" };
     for (const e of store.jobLog({ limit: 40 })) {
@@ -624,7 +640,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       else if (i.health === "error" && i.state.lastErrorAt && Date.now() - i.state.lastErrorAt < 6 * 3600e3) items.push({ id: `int-${i.name}-err-${i.state.lastErrorAt}`, ts: i.state.lastErrorAt, level: "warn", kind: "service", title: `${i.label}: recent errors`, text: String(i.state.lastError ?? "").slice(0, 160) });
     }
     try {
-      const q = analytics.quality();
+      const qe = await viewEntry("quality", {}); // built by the helper (last ready version at once), never on the server's own thread
+      const q = qe.failed ? null : JSON.parse(qe.body);
+      if (!q) throw new Error("quality not ready");
       for (const s of q.sources.filter((x) => x.silent)) items.push({ id: `src-${s.name}-${s.lastSeen ?? 0}`, ts: s.lastSeen ?? Date.now(), level: s.severe ? "bad" : "warn", kind: "source", title: `Source quiet: ${s.name}`, text: s.hoursSilent == null ? "No stories seen in the last 7 days." : `No new stories for ${s.hoursSilent} hours (usual gap ${s.typicalGapHours} h).` });
       if (q.status === "red") items.push({ id: `quality-red-${q.generatedAt}`, ts: q.generatedAt, level: "bad", kind: "quality", title: "Data quality is below the safe threshold", text: `Write now is held back. ${q.flags.join("; ")}.` });
     } catch { /* no data yet */ }
@@ -766,6 +784,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       for (const w of workers) {
         try { w.postMessage({ type: "clear" }); } catch {}
       }
+      if (counts) counts.at = 0; // the data changed: the next status asks the helper for fresh counts
     };
   }
 
@@ -1037,7 +1056,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         return json(res, 200, st);
       }
       if (req.method === "GET" && ROUTES[p]) { const v = ROUTES[p](url, company); return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args); }
-      if (req.method === "GET" && p === "/api/leadership/pieces") return json(res, 200, analytics.pieces({ company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) }));
+      if (req.method === "GET" && p === "/api/leadership/pieces") return view(req, res, "pieces", { company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) });
       if (req.method === "GET" && p === "/api/config") return json(res, 200, { weights: cfg.weights, stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
       if (req.method === "GET" && p === "/api/recommendations") {
         const key = url.searchParams.get("key");
@@ -1046,8 +1065,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (req.method === "GET" && p === "/api/xtrends") {
         const regionParam = (url.searchParams.get("region") || "all").toLowerCase();
         const t = await getTrends({ store, maxAgeMs: XTRENDS_SCHEDULE_MS, region: regionParam });
-        const opps = analytics.opportunities({ company, limit: 100, group: true });
-        const items = opps?.items || [];
+        const oe = await viewEntry("opportunities", { company, limit: 100, group: true }); // from the helper, like the Opportunities page
+        const items = oe.failed ? [] : (JSON.parse(oe.body)?.items || []);
         const trends = (t.trends || []).map((tr) => {
           let matchedOpp = null;
           for (const o of items) {
@@ -1123,11 +1142,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (req.method === "GET" && p === "/api/entity") {
         const id = entityId(url.searchParams.get("id") ?? "");
         if (!id) return json(res, 400, { error: "Bad entity" });
-        const r = analytics.entity({ id, date: dayParam(url) });
-        return json(res, r.error ? 404 : 200, r);
+        return view(req, res, "entity", { id, date: dayParam(url) });
       }
-      if (req.method === "GET" && p === "/api/outcomes") return json(res, 200, analytics.outcomes());
-      if (req.method === "GET" && p === "/api/tuning") return json(res, 200, analytics.tuning());
+      if (req.method === "GET" && p === "/api/outcomes") return view(req, res, "outcomes", {});
+      if (req.method === "GET" && p === "/api/tuning") return view(req, res, "tuning", {});
       if (req.method === "POST" && p === "/api/tuning/apply") {
         if (!needJson(req, res)) return;
         const body = JSON.parse(await readBody(req) || "{}");
@@ -1142,16 +1160,16 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
 
       // ---- data quality, audit, forecast accuracy ----
-      if (req.method === "GET" && p === "/api/quality") return json(res, 200, analytics.quality());
-      if (req.method === "GET" && p === "/api/audit/queue") return json(res, 200, analytics.auditQueue({ limit: Math.min(100, +url.searchParams.get("limit") || 50), company }));
+      if (req.method === "GET" && p === "/api/quality") return view(req, res, "quality", {});
+      if (req.method === "GET" && p === "/api/audit/queue") return view(req, res, "auditQueue", { limit: Math.min(100, +url.searchParams.get("limit") || 50), company });
       if (req.method === "POST" && p === "/api/audit/review") {
         if (!needJson(req, res)) return;
         const body = JSON.parse(await readBody(req) || "{}");
         try { return json(res, 200, analytics.reviewAudit({ key: String(body.key || ""), verdict: body.verdict, note: String(body.note || ""), reviewer: req.user?.email ?? "" })); }
         catch (e) { return json(res, 400, { error: e.message }); }
       }
-      if (req.method === "GET" && p === "/api/audit/second-opinion") return json(res, 200, analytics.secondOpinion());
-      if (req.method === "GET" && p === "/api/forecast-accuracy") return json(res, 200, analytics.forecastAccuracy());
+      if (req.method === "GET" && p === "/api/audit/second-opinion") return view(req, res, "secondOpinion", {});
+      if (req.method === "GET" && p === "/api/forecast-accuracy") return view(req, res, "forecastAccuracy", {});
 
       // ---- logs, usage, notifications ----
       if (req.method === "GET" && p === "/api/logs") {
@@ -1163,7 +1181,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
       if (req.method === "GET" && p === "/api/usage") return json(res, 200, await usageReport({ store, integrations, cfg }));
       if (req.method === "POST" && p === "/api/usage/refresh") { if (!needJson(req, res)) return; return json(res, 200, await usageReport({ store, integrations, cfg, refresh: true })); }
-      if (req.method === "GET" && p === "/api/notifications") return json(res, 200, { items: notifications() });
+      if (req.method === "GET" && p === "/api/notifications") return json(res, 200, { items: await notifications() });
       // Manual starts of the background jobs (each is logged as a manual run).
       if (req.method === "POST" && p === "/api/job") {
         if (!needJson(req, res)) return;
@@ -1291,7 +1309,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         };
         return json(res, 200, { job: jobs.sync, meta });
       }
-      if (req.method === "GET" && p === "/api/dates") return json(res, 200, store.days());
+      if (req.method === "GET" && p === "/api/dates") return json(res, 200, statusCounts().dates);
 
       // ---- first dashboard's state payload (kept for compatibility) ----
       if (req.method === "GET" && p === "/api/state") {
@@ -1299,7 +1317,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const { data, hours } = dataFor(date, Math.min(168, Math.max(6, +url.searchParams.get("window") || 48)));
         return json(res, 200, buildState({
           data, registry: registry(), companies: companies.list(), companyId: url.searchParams.get("company") || "bcg", bcg, hours, llm,
-          dates: store.days(), view: { date }, runner: runnerState(), live: liveRun(),
+          dates: statusCounts().dates, view: { date }, runner: runnerState(), live: liveRun(),
         }));
       }
 

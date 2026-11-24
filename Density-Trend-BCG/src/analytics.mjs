@@ -756,6 +756,13 @@ export class Analytics {
       items: rows.slice(0, 200).map((r) => ({ id: r.id, oppKey: r.oppKey, label: r.label, sector: r.sector, action: r.action, score: r.score, ts: r.ts, hit: r.hit, peakRatio: r.peakRatio, origins: r.peakOrigins })) };
   }
   tuning() { return tuneWeights(this.store.outcomes(), this.cfg); }
+  // The whole-table counts shown in the status bar (about 1 s together on 90k stories). The server asks its helper for them in the background,
+  // so the status that every open tab checks every few seconds never makes the web server count tables.
+  statusCounts() {
+    const s = this.store;
+    return { sentimentLabelled: s.sentimentCount(), sentimentPending: s.unsentimentedCount(), merged: s.mergedTopicCount(), headlineOnly: s.headlineOnlyCount(),
+      enrichLabelled: s.enrichmentCount(), readings: s.readingCount(), enrichPending: s.unenrichedCount(), dates: s.days(), recommendations: s.recommendationCount(), at: Date.now() };
+  }
 
   // ---------------------------------------------------------------- sources and collection health
   sourcesView({ date = null } = {}) {
@@ -809,7 +816,9 @@ export class Analytics {
   // ---------------------------------------------------------------- data quality, judged links, audit, forecasts
   aliases() { if (!this._al || Date.now() - this._al.at > 30000) this._al = { at: Date.now(), map: this.store.entityAliases() }; return this._al.map; }
 
-  quality(c = this.context(null)) {
+  // Takes the shared context, or (when asked as a page by the server's helper) a plain {date} object.
+  quality(arg = null) {
+    const c = arg?.analysis ? arg : this.context(arg?.date ?? null);
     if (!c) return { status: "green", checks: [], sources: [], flags: [] };
     if (this._q && this._q.asOf === c.asOf && Date.now() - this._q.at < 120000) return this._q.value;
     const topicRows = [...c.analysis.labels.values()].filter((m) => m.level === "topic" && this.topicOk(c, m)).map((m) => ({ key: m.key, name: this.labelName(c, m.key), count: m.storiesAll, parentShare: m.parentShare }));
