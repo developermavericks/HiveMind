@@ -229,6 +229,7 @@ function changePasswordDialog() {
     e.preventDefault();
     const [a, n, r] = ["#pw0", "#pw1", "#pw2"].map((s) => b.querySelector(s).value);
     if (n !== r) { b.querySelector("#pwe").textContent = "The new passwords do not match."; return; }
+    if (n === a) { b.querySelector("#pwe").textContent = "The new password must be different from the current one."; return; }
     try { await post("/api/auth/password", { current: a, next: n }); toast("Password updated"); document.getElementById("modal").classList.remove("on"); }
     catch (err) { b.querySelector("#pwe").textContent = err.message; }
   };

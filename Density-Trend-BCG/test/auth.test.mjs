@@ -22,7 +22,7 @@ async function boot() {
   const H = { "content-type": "application/json", "x-requested-with": "hivemind" };
   const call = (method, path, body, cookie, extra = {}) => fetch(base + path, { method, redirect: "manual", headers: { ...(method === "GET" ? {} : H), ...(cookie ? { cookie } : {}), ...extra }, body: body === undefined ? undefined : JSON.stringify(body) });
   const cookieOf = (r) => (r.headers.get("set-cookie") || "").split(";")[0];
-  return { server, base, call, cookieOf, close: () => server.close() };
+  return { root, server, base, call, cookieOf, close: () => server.close() };
 }
 const PW = "correct horse battery staple";
 
@@ -242,5 +242,32 @@ test("members: every read endpoint the Trends and Opportunities pages call answe
       const r = await t.call("GET", p, undefined, memC);
       assert.notEqual(r.status, 403, `${p} must stay open to members`); assert.notEqual(r.status, 401, p);
     }
+  } finally { t.close(); }
+});
+
+test("auth: forgot password only emails the link, and the new password must differ from the old one", async () => {
+  const t = await boot();
+  try {
+    await t.call("POST", "/api/auth/signup", { name: "Ada", email: "ada@x.com", password: PW });
+    const f = await t.call("POST", "/api/auth/forgot-password", { email: "ada@x.com" });
+    assert.equal(f.status, 200);
+    assert.equal((await f.json()).resetUrl, undefined); // the link never comes back to the browser, only by email
+    // stand in for the emailed link: put a known token in place of the one that was mailed
+    const { DatabaseSync } = await import("node:sqlite");
+    const { createHash } = await import("node:crypto");
+    const db = new DatabaseSync(join(t.root, "data", "hivemind.db"));
+    const token = "a".repeat(48);
+    db.prepare("UPDATE password_resets SET token_hash = ? WHERE email = ? AND used = 0").run(createHash("sha256").update(token).digest("hex"), "ada@x.com");
+    db.close();
+    assert.equal((await t.call("POST", "/api/auth/reset-password", { token, password: PW })).status, 400); // same as the old one
+    assert.equal((await t.call("POST", "/api/auth/reset-password", { token, password: "a brand new passphrase 7" })).status, 200);
+    assert.equal((await t.call("POST", "/api/auth/reset-password", { token, password: "another new passphrase 8" })).status, 400); // a link works once
+    assert.equal((await t.call("POST", "/api/auth/login", { email: "ada@x.com", password: PW })).status, 401);
+    const c = t.cookieOf(await t.call("POST", "/api/auth/login", { email: "ada@x.com", password: "a brand new passphrase 7" }));
+    assert.ok(c);
+    // change password: the new one must differ from the current one
+    assert.equal((await t.call("POST", "/api/auth/password", { current: "a brand new passphrase 7", next: "a brand new passphrase 7" }, c)).status, 400);
+    assert.equal((await t.call("POST", "/api/auth/password", { current: "a brand new passphrase 7", next: "third fresh passphrase 9" }, c)).status, 200);
+    assert.equal((await t.call("POST", "/api/auth/login", { email: "ada@x.com", password: "third fresh passphrase 9" })).status, 200);
   } finally { t.close(); }
 });

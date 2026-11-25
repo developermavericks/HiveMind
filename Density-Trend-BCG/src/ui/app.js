@@ -139,7 +139,7 @@ function startLoadTimer() {
   }, 1000);
 }
 const banner = (kind, html) => `<div class="banner ${kind}"><span>${kind === "bad" ? "⚠" : kind === "warn" ? "⚠" : "ⓘ"}</span><div>${html}</div></div>`;
-const stack = (comp) => `<div class="stack">${Object.entries(comp).map(([k, c]) => `<i class="c-${k}" style="width:${c.points}%" title="${COMP[k]}: ${c.points.toFixed(1)} pts"></i>`).join("")}</div>`;
+const stack = (comp) => !isAdmin() ? "" : `<div class="stack">${Object.entries(comp).map(([k, c]) => `<i class="c-${k}" style="width:${c.points}%" title="${COMP[k]}${isAdmin() ? `: ${c.points.toFixed(1)} pts` : ""}"></i>`).join("")}</div>`;
 const stackLegend = () => `<div class="legend">${Object.keys(COMP).map((k) => `<span><i class="c-${k}"></i>${COMP[k]}${typeof info === "function" ? info("c_" + k) : ""}</span>`).join("")}</div>`;
 
 // ---------------------------------------------------------------- shell
@@ -247,7 +247,7 @@ function renderTop() {
       badge.style.letterSpacing = "0.03em";
       $("#csel").parentNode.insertBefore(badge, $("#csel"));
     }
-    badge.textContent = `${assignedCo} (Client Scoped)`;
+    badge.textContent = assignedCo;
     badge.title = `Your account is scoped strictly to ${assignedCo}. Client switching is restricted to administrators.`;
   } else {
     $("#csel").style.display = "";
@@ -512,7 +512,7 @@ async function openOpp(key) {
         <div style="text-align:center">${HC.radar ? HC.radar(o.components, 250) : ""}</div>
         <div>
           ${stack(o.components)}${stackLegend()}
-          <div style="margin-top:10px">${Object.entries(o.components).map(([k2, c]) => `<div class="compo"><span title="${esc(c.note)}">${COMP[k2]}${info("c_" + k2)} <span class="mute tiny">${c.weight}%</span></span><div class="bar"><i style="width:${c.score}%"></i></div><span class="num small" style="text-align:right">${c.score.toFixed(0)} → ${c.points.toFixed(1)}</span></div><div class="tiny mute" style="margin:-3px 0 4px 140px">${esc(c.note)}</div>`).join("")}</div>
+          <div style="margin-top:10px">${Object.entries(o.components).map(([k2, c]) => `<div class="compo"><span title="${esc(c.note)}">${COMP[k2]}${info("c_" + k2)} ${isAdmin() ? `<span class="mute tiny">${c.weight}%</span>` : ""}</span><div class="bar"><i style="width:${c.score}%"></i></div><span class="num small" style="text-align:right">${isAdmin() ? `${c.score.toFixed(0)} → ${c.points.toFixed(1)}` : ""}</span></div><div class="tiny mute" style="margin:-3px 0 4px 140px">${esc(c.note)}</div>`).join("")}</div>
         </div>
       </div>
     </div>
@@ -918,7 +918,7 @@ function showSyncBox() { const b = document.getElementById("rsyncbox"); if (b) b
 function init() {
   buildShell();
   xInitNotifs();
-  loadMe();
+  const meReady = loadMe(); // who is signed in decides what a page shows (client logins see less), so the first page waits for it
   $("#csel").onchange = (e) => { apiCache.clear(); S.company = e.target.value; ls.set("company", S.company); S.oppByKey.clear(); render(); };
   $("#dsel").onchange = (e) => {
     apiCache.clear();
@@ -933,6 +933,6 @@ function init() {
   const th = ls.get("theme"); if (th) document.documentElement.dataset.theme = th;
   bindRunPanel();
   addEventListener("hashchange", route);
-  loadStatus().then(route);
+  Promise.all([loadStatus(), meReady.catch(() => {})]).then(route);
 }
 init();

@@ -588,6 +588,7 @@ Check the client before approving; the person will only see that client's data.`
     if (!(await verifyPassword(cur, u.pw_hash))) { audit("password_fail", u.email, clientIp(req)); return send(res, 400, { error: "Your current password is not correct." }); }
     const problem = passwordProblem(next, { email: u.email, name: u.name });
     if (problem) return send(res, 400, { error: problem });
+    if (next === cur) return send(res, 400, { error: "The new password must be different from the current one." });
     db.prepare("UPDATE users SET pw_hash = ? WHERE id = ?").run(await hashPassword(next), u.id);
     dropSessions(u.id, u._sid);
     audit("password_change", u.email, clientIp(req));
@@ -633,8 +634,7 @@ Check the client before approving; the person will only see that client's data.`
 
     return send(res, 200, {
       ok: true,
-      message: "If that email is registered, password reset instructions have been sent.",
-      resetUrl: resetUrl || undefined
+      message: "If that email is registered, a reset link has been sent to it. Check your inbox (and spam folder)."
     });
   }
 
@@ -655,6 +655,7 @@ Check the client before approving; the person will only see that client's data.`
 
     const problem = passwordProblem(newPassword, { email: user.email, name: user.name });
     if (problem) return send(res, 400, { error: problem });
+    if (await verifyPassword(newPassword, user.pw_hash)) return send(res, 400, { error: "Choose a new password, not your old one." });
 
     const hash = await hashPassword(newPassword);
     db.prepare("UPDATE users SET pw_hash = ?, failed_count = 0, locked_until = NULL WHERE id = ?").run(hash, user.id);

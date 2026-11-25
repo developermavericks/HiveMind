@@ -826,11 +826,20 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Instant pages. Every page answer is kept (memory + response_cache table, which survives restarts) with the data version it was built from.
   // When the data has moved on (a job finished, new stories, an edit), people are NOT made to wait: they get the last ready version at once and the
   // new one is built in the background by a helper; the next click shows it. Only a page that was never built before makes the person wait.
-  // Right after someone edits something (a POST), answers wait up to EDIT_WAIT_MS for the new version, so the person sees their own change.
+  // Right after someone edits something (a POST), THAT person's answers wait up to EDIT_WAIT_MS for the new version, so they see their own change.
+  // Everyone else keeps getting the last ready version at once while the new one is built in the background (an edit never slows other people).
   const mem = new Map(), inflight = new Map(), refreshing = new Map();
-  let lastEditAt = 0;
+  const editedAt = new Map(); // login session -> time of its last edit
+  const editorKey = (req) => req?.user?._sid ?? (req?.user ? "user:" + req.user.id : "local"); // "local": a copy without sign-in (one person)
+  const markEdit = (req) => {
+    const now = Date.now();
+    editedAt.set(editorKey(req), now);
+    if (editedAt.size > 200) for (const [k, t] of editedAt) if (now - t >= EDIT_WAIT_MS) editedAt.delete(k);
+  };
+  const editedRecently = (req) => { const t = req ? editedAt.get(editorKey(req)) : undefined; return t !== undefined && Date.now() - t < EDIT_WAIT_MS; };
   const FRESH_WAIT_MS = Math.max(0, +(process.env.HIVEMIND_FRESH_WAIT_MS ?? 0)); // how long a click waits for the new version before getting the last one
   const EDIT_WAIT_MS = 20e3;
+  const NO_DATA_POST = new Set(["/api/tickets", "/api/tickets/update", "/api/usage/refresh", "/api/integrations/test"]);
   const MEM_MAX = Math.max(50, +process.env.HIVEMIND_VIEW_MEM || 800);
   const remember = (k, e) => { mem.delete(k); mem.set(k, e); if (mem.size > MEM_MAX) mem.delete(mem.keys().next().value); return e; }; // least recently used goes first
   const entryOf = (sig, body, failed) => ({ sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` });
@@ -849,7 +858,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     return p;
   }
   // The answer for (method, args). wait: true (the warm-up) always waits for the current version.
-  async function viewEntry(method, args, { wait = false } = {}) {
+  async function viewEntry(method, args, { wait = false, req = null } = {}) {
     const k = method + "|" + JSON.stringify(args), sig = analytics.signature(args.date ?? null);
     if (sig == null) { const v = analytics[method](args); return { body: JSON.stringify(v), failed: !!(v && v.error), etag: null }; }
     let e = mem.get(k);
@@ -861,15 +870,28 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     // A last version exists: start (one) background refresh for this page and give the new version a moment; otherwise answer with the last one.
     let p = refreshing.get(k);
     if (!p) { p = fresh(method, args, k, sig).catch(() => null).finally(() => refreshing.delete(k)); refreshing.set(k, p); }
-    const waitMs = Date.now() - lastEditAt < EDIT_WAIT_MS ? EDIT_WAIT_MS : FRESH_WAIT_MS;
+    const waitMs = editedRecently(req) ? EDIT_WAIT_MS : FRESH_WAIT_MS;
     if (!waitMs) return e;
     let timer;
     const r = await Promise.race([p, new Promise((res) => { timer = setTimeout(res, waitMs, null); timer.unref?.(); })]);
     clearTimeout(timer);
     return r && !r.transient && !r.failed ? r : e;
   }
+  // Client logins never receive how the score is weighted: each score part keeps its own 0-100 score and note, but its weight and points are taken
+  // out of the data (not only hidden on screen). Done once per page version and kept with it.
+  const isClient = (req) => !!req?.user && req.user.role !== "admin";
+  const hideScoreParts = (body) => !body.includes('"points"') ? body : JSON.stringify(JSON.parse(body, (k, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v) && "weight" in v && "points" in v && "score" in v) { const { weight, points, ...rest } = v; return rest; }
+    return v;
+  }));
+  const clientEntry = (e) => {
+    if (e.failed || !e.body.includes('"points"')) return e;
+    if (!e.client) { const body = hideScoreParts(e.body); e.client = { ...entryOf(e.sig, body, false), transient: e.transient }; }
+    return e.client;
+  };
   async function view(req, res, method, args) {
-    const e = await viewEntry(method, args);
+    let e = await viewEntry(method, args, { req });
+    if (isClient(req)) e = clientEntry(e);
     const head = { "content-type": "application/json", "cache-control": e.etag ? "private, no-cache" : "no-store", vary: "accept-encoding", ...(e.etag ? { etag: e.etag } : {}) };
     if (e.etag && !e.failed && req.headers["if-none-match"] === e.etag) { res.writeHead(304, head); return res.end(); }
     const code = e.transient ? 503 : e.failed ? 404 : 200;
@@ -950,7 +972,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     });
 
     // Anything that changes data (matching, briefs, edits, tuning) drops the cached views once it is done; logging in or out does not.
-    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) { analytics.cache.clear(); lastEditAt = Date.now(); } });
+    // Requests that never change the news data (issue reports, the usage refresh, testing a key) do not drop anything.
+    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth") && !NO_DATA_POST.has(p)) res.on("finish", () => { if (res.statusCode < 400) { analytics.cache.clear(); markEdit(req); } });
     // Liveness and readiness for containers and load balancers. It answers before the host check and the login, and says nothing but ok / not ok.
     if (p === "/healthz" && (req.method === "GET" || req.method === "HEAD")) {
       try { store.db.prepare("SELECT 1").get(); res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(req.method === "HEAD" ? undefined : '{"ok":true}'); }
@@ -1057,10 +1080,12 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
       if (req.method === "GET" && ROUTES[p]) { const v = ROUTES[p](url, company); return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args); }
       if (req.method === "GET" && p === "/api/leadership/pieces") return view(req, res, "pieces", { company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) });
-      if (req.method === "GET" && p === "/api/config") return json(res, 200, { weights: cfg.weights, stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
+      if (req.method === "GET" && p === "/api/config") return json(res, 200, { ...(isClient(req) ? {} : { weights: cfg.weights }), stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
       if (req.method === "GET" && p === "/api/recommendations") {
         const key = url.searchParams.get("key");
-        return json(res, 200, { history: key ? store.recommendationHistory(company, key) : [], total: store.recommendationCount() });
+        let history = key ? store.recommendationHistory(company, key) : [];
+        if (isClient(req)) history = history.map(({ components, ...h }) => ({ ...h, reason: typeof h.reason === "string" ? h.reason.replace(/ \(driven by [^)]*\)/, "") : h.reason })); // no points per score part for clients
+        return json(res, 200, { history, total: store.recommendationCount() });
       }
       if (req.method === "GET" && p === "/api/xtrends") {
         const regionParam = (url.searchParams.get("region") || "all").toLowerCase();
