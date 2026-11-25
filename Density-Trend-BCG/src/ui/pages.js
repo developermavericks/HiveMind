@@ -1708,6 +1708,10 @@ async function pgPitch(el) {
 
   try {
     const data = await api(`/api/pitch?${qs()}`);
+    if (data?.notConfigured) {
+      el.innerHTML = `<div class="card" style="padding:40px 24px;text-align:center"><h3 style="margin:0 0 8px">Your MDPs haven't been configured yet</h3><p style="margin:0;color:var(--mute);font-size:14px">Pitch matching needs your firm's list of Managing Directors and Partners. Please contact the HiveMind team to set it up.</p></div>`;
+      return;
+    }
     if (!data || !data.mdps) {
       el.innerHTML = `<div class="card"><div class="banner bad">No MDP pitch data available.</div></div>`;
       return;

@@ -183,3 +183,18 @@ test("topic match: old pre-cutoff matches behind a current opportunity are re-ju
   judged.set("b", { judgedAt: NOW, storyCount: 5 });
   assert.deepEqual(Analytics.prototype.topicMatchCandidates.call(fake, "bcg").map((o) => o.key), ["t:d"]); // a and b are never picked again
 });
+
+test("pitch: a client other than BCG gets 'not configured' and never sees BCG's partners", () => {
+  const a = new Analytics({
+    store: { span: () => ({ last: 1, days: 1 }), readingCount: () => 1, enrichmentCount: () => 1, sentimentCount: () => 1, mergedTopicCount: () => 1, jobRev: () => 1, getMeta: () => "1", loadTopics: () => [], spanTopics: () => ({ last: 1 }) },
+    registry: () => ({ size: 1, get: () => null }), sources: null,
+    cfg: { intervals: { hourView: 24, dayView: 14, rollingHours: 6, rollingDays: 3, observedLagHours: 12 }, weights: {} },
+    companies: { get: (id) => (id === "acme" ? { id, name: "Acme" } : null), list: () => [] },
+  });
+  a.opportunities = () => { throw new Error("must not be called for another client"); };
+  a.context = () => ({ asOf: 1700000000000 });
+  const res = a.pitch({ company: "acme" });
+  assert.equal(res.notConfigured, true);
+  assert.equal(res.company.name, "Acme");
+  assert.equal(res.mdps, undefined);
+});

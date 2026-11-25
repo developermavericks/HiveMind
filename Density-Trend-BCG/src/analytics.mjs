@@ -419,6 +419,12 @@ export class Analytics {
 
   // BCG Managing Directors & Partners (MDPs) matched to live topic opportunities for op-ed editorial pitching.
   pitch({ company: companyId = "bcg", date = null, limit = 100 } = {}) {
+    // The partner list is BCG's only. Any other client sees a "not configured yet" note instead of BCG's partners, until their own list is added.
+    if (companyId !== "bcg") {
+      let name = companyId;
+      try { name = this.companies?.get?.(companyId)?.name || companyId; } catch { /* the id is enough */ }
+      return { notConfigured: true, company: { id: companyId, name } };
+    }
     const opps = this.opportunities({ company: companyId, date, limit: Math.max(limit, 60), group: true });
     const mdps = loadBcgMdps();
     const matched = matchMdpsToOpportunities(mdps, opps.items || []);
