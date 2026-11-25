@@ -11,7 +11,7 @@
 //               "x-requested-with: hivemind" OR an Origin that is exactly this server's own host (cross-site pages can send neither).
 //   roles       admin: everything. member: read endpoints, drafting briefs and deciding on them, reviewing audit items.
 import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { reverse } from "node:dns/promises";
@@ -20,7 +20,11 @@ import { sendEmail, getAdminEmail } from "./email.mjs";
 const scryptAsync = promisify(scrypt);
 const SCRYPT = { N: 32768, r: 8, p: 1, keylen: 64, maxmem: 64 * 1024 * 1024 };
 const COOKIE = "hm_session";
-const ABSOLUTE_MS = 7 * 864e5, IDLE_MS = 12 * 3600e3, LOCK_MS = 15 * 60e3, MAX_FAILS = 5, IP_WINDOW_MS = 10 * 60e3;
+// A session ends after HIVEMIND_SESSION_IDLE_MIN minutes without user activity (default 30), and after 7 days at most.
+const IDLE_MS = Math.max(1, +process.env.HIVEMIND_SESSION_IDLE_MIN || 30) * 60e3;
+// Requests the page makes by itself every few seconds (status, notifications) are not user activity: they never extend a session.
+const BACKGROUND = /^\/api\/(status|notifications|sync\/status)$/;
+const ABSOLUTE_MS = 7 * 864e5, LOCK_MS = 15 * 60e3, MAX_FAILS = 5, IP_WINDOW_MS = 10 * 60e3;
 const MAX_BODY = 65536; // 64 KB JSON payload limit (prevents memory buffer inflation attacks)
 const GENERIC = "Incorrect email or password.";
 
@@ -333,6 +337,7 @@ export function createAuth({ store, log = () => {}, root }) {
     CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
   `);
   try { db.exec("ALTER TABLE users ADD COLUMN company_id TEXT NOT NULL DEFAULT 'bcg'"); } catch {}
+  try { db.exec("ALTER TABLE users ADD COLUMN client_requested TEXT"); } catch {} // the client name exactly as typed at sign-up
   try { db.exec("ALTER TABLE sessions ADD COLUMN lat REAL"); } catch {}
   try { db.exec("ALTER TABLE sessions ADD COLUMN lon REAL"); } catch {}
   try { db.exec("ALTER TABLE sessions ADD COLUMN geo_accuracy REAL"); } catch {}
@@ -442,7 +447,8 @@ export function createAuth({ store, log = () => {}, root }) {
       sessionCache.delete(idh);
       return null;
     }
-    if (now - s.last_seen > 60e3) {
+    const background = req.method === "GET" && BACKGROUND.test(String(req.url || "").split("?")[0]);
+    if (!background && now - s.last_seen > 60e3) {
       db.prepare("UPDATE sessions SET last_seen = ? WHERE id_hash = ?").run(now, idh);
       s.last_seen = now;
     }
@@ -478,11 +484,69 @@ export function createAuth({ store, log = () => {}, root }) {
     return send(res, 200, { ok: true, user: pub(user) }, { "set-cookie": cookieHeader(req, token, Math.floor(ABSOLUTE_MS / 1000)) });
   }
 
+  // ---- client typed at sign-up ----
+  // "google", "Google", "GOOgle ", "Google." and "B.C.G" / "bcg" all compare equal: only letters and digits count, case ignored.
+  const clientKey = (s) => String(s ?? "").normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const knownClients = () => {
+    const dir = join(root ?? ".", "data", "companies");
+    try {
+      return readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => {
+        try { const c = JSON.parse(readFileSync(join(dir, f), "utf8")); return { id: c.id, name: c.name }; } catch { return null; }
+      }).filter((c) => c && c.id);
+    } catch { return []; }
+  };
+  // The client id an account is scoped to: an existing client whose id or name matches the typed text, else a new id made from it.
+  const resolveClient = (typed) => {
+    const k = clientKey(typed);
+    const hit = knownClients().find((c) => clientKey(c.id) === k || clientKey(c.name) === k);
+    if (hit) return { id: hit.id, existing: true };
+    const slug = String(typed).normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50);
+    return { id: slug || k || "unassigned", existing: false };
+  };
+  // Who is told about a new sign-up: HIVEMIND_SIGNUP_NOTIFY (comma/space separated), else the administrator address.
+  const signupRecipients = () => {
+    const list = String(process.env.HIVEMIND_SIGNUP_NOTIFY || "").split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter((x) => EMAIL_RE.test(x));
+    return list.length ? [...new Set(list)] : [getAdminEmail()];
+  };
+  const htmlEsc = (x) => String(x ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  function notifySignup({ name, email, typed, client, host }) {
+    const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
+    const where = host ? `https://${host}` : "HiveMind";
+    const clientLine = client.existing ? `${typed} (matches existing client: ${client.id.toUpperCase()})` : `${typed} (new client, not set up in HiveMind yet: ${client.id})`;
+    const subject = `[HiveMind] New account waiting for approval: ${name} (${typed})`;
+    const text = `A new HiveMind account is waiting for approval.
+
+Name: ${name}
+Email: ${email}
+Client: ${clientLine}
+Requested: ${when} IST
+
+` +
+      `To approve or decline: ${where} -> Settings -> Users & Client Scoping.
+Check the client before approving; the person will only see that client's data.`;
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
+      <p><b>A new HiveMind account is waiting for approval.</b></p>
+      <table style="border-collapse:collapse">
+        <tr><td style="padding:4px 12px 4px 0;color:#64748b">Name</td><td>${htmlEsc(name)}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#64748b">Email</td><td>${htmlEsc(email)}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#64748b">Client</td><td>${htmlEsc(clientLine)}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#64748b">Requested</td><td>${htmlEsc(when)} IST</td></tr>
+      </table>
+      <p>To approve or decline: <b>${htmlEsc(where)}</b> &rarr; Settings &rarr; Users &amp; Client Scoping.<br>Check the client before approving; the person will only see that client's data.</p></div>`;
+    for (const to of signupRecipients()) {
+      sendEmail({ to, subject, text, html }).catch((err) => log(`sign-up notification to ${to} failed: ${err.message}`));
+    }
+  }
+
   async function signup(req, res) {
     const ip = clientIp(req), wait = ipAllowed(ip);
     if (wait) return send(res, 429, { error: `Too many attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`, retryAfter: wait }, { "retry-after": String(wait) });
     const b = await readJson(req), email = normEmail(b.email), name = String(b.name ?? "").trim().replace(/\s+/g, " "), password = typeof b.password === "string" ? b.password : "";
     if (name.length < 1 || name.length > 80) return send(res, 400, { error: "Enter your name (up to 80 characters)." });
+    const typedClient = String(b.client ?? "").trim().replace(/\s+/g, " ").slice(0, 60);
+    // every account after the administrator's must say which client it belongs to
+    if (userCount() > 0 && clientKey(typedClient).length < 2) return send(res, 400, { error: "Enter the client you belong to (for example BCG)." });
+    const client = typedClient ? resolveClient(typedClient) : { id: "bcg", existing: true };
     if (!EMAIL_RE.test(email) || email.length > 254) return send(res, 400, { error: "Enter a valid email address." });
     const problem = passwordProblem(password, { email, name });
     if (problem) return send(res, 400, { error: problem });
@@ -500,12 +564,13 @@ export function createAuth({ store, log = () => {}, root }) {
         db.exec("ROLLBACK");
         return send(res, 403, { error: "The first account can only be created by the administrator this server was set up for." });
       }
-      db.prepare("INSERT INTO users (id, email, name, pw_hash, role, status, created_at, company_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(randomUUID(), email, name, hash, first ? "admin" : "member", first ? "active" : "pending", Date.now(), "bcg");
+      db.prepare("INSERT INTO users (id, email, name, pw_hash, role, status, created_at, company_id, client_requested) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(randomUUID(), email, name, hash, first ? "admin" : "member", first ? "active" : "pending", Date.now(), first ? "bcg" : client.id, typedClient || null);
       created = true;
       db.exec("COMMIT");
     } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
-    audit(first ? "signup_admin" : "signup", email, ip);
+    audit(first ? "signup_admin" : "signup", email, ip, typedClient ? `client: ${typedClient} -> ${client.id}` : "");
+    if (!first) notifySignup({ name, email, typed: typedClient, client, host: String(req.headers.host || "").replace(/[^\w.:-]/g, "") });
     return send(res, 200, { ok: true, status: first ? "active" : "pending", first });
   }
 
@@ -524,6 +589,7 @@ export function createAuth({ store, log = () => {}, root }) {
     if (!(await verifyPassword(cur, u.pw_hash))) { audit("password_fail", u.email, clientIp(req)); return send(res, 400, { error: "Your current password is not correct." }); }
     const problem = passwordProblem(next, { email: u.email, name: u.name });
     if (problem) return send(res, 400, { error: problem });
+    if (next === cur) return send(res, 400, { error: "The new password must be different from the current one." });
     db.prepare("UPDATE users SET pw_hash = ? WHERE id = ?").run(await hashPassword(next), u.id);
     dropSessions(u.id, u._sid);
     audit("password_change", u.email, clientIp(req));
@@ -569,8 +635,7 @@ export function createAuth({ store, log = () => {}, root }) {
 
     return send(res, 200, {
       ok: true,
-      message: "If that email is registered, password reset instructions have been sent.",
-      resetUrl: resetUrl || undefined
+      message: "If that email is registered, a reset link has been sent to it. Check your inbox (and spam folder)."
     });
   }
 
@@ -591,6 +656,7 @@ export function createAuth({ store, log = () => {}, root }) {
 
     const problem = passwordProblem(newPassword, { email: user.email, name: user.name });
     if (problem) return send(res, 400, { error: problem });
+    if (await verifyPassword(newPassword, user.pw_hash)) return send(res, 400, { error: "Choose a new password, not your old one." });
 
     const hash = await hashPassword(newPassword);
     db.prepare("UPDATE users SET pw_hash = ?, failed_count = 0, locked_until = NULL WHERE id = ?").run(hash, user.id);
@@ -696,8 +762,8 @@ export function createAuth({ store, log = () => {}, root }) {
 
   async function adminUsers(req, res, p, u) {
     if (req.method === "GET" && p === "/api/users") {
-      const users = db.prepare("SELECT id, name, email, role, status, created_at, last_login_at, company_id FROM users ORDER BY created_at").all()
-        .map((x) => ({ id: x.id, name: x.name, email: x.email, role: x.role, status: x.status, createdAt: x.created_at, lastLoginAt: x.last_login_at, company: x.company_id || "bcg" }));
+      const users = db.prepare("SELECT id, name, email, role, status, created_at, last_login_at, company_id, client_requested FROM users ORDER BY created_at").all()
+        .map((x) => ({ id: x.id, name: x.name, email: x.email, role: x.role, status: x.status, createdAt: x.created_at, lastLoginAt: x.last_login_at, company: x.company_id || "bcg", clientRequested: x.client_requested || null }));
       return send(res, 200, { users });
     }
     if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });

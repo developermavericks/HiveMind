@@ -7,6 +7,7 @@
 //
 // Two processes use it at once (`run` writes, `serve` reads); WAL mode lets them.
 import { DatabaseSync } from "node:sqlite";
+import { PgDatabaseSync } from "./pgsync.mjs";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
@@ -20,9 +21,21 @@ export const DAY_MS = 24 * 3600e3;
 
 export class Store {
   constructor(path) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.path = path;
-    this.db = new DatabaseSync(path);
+    // PostgreSQL when DATABASE_URL is set (all reads and writes go there), else the SQLite file at `path`.
+    // HIVEMIND_PG_SCHEMA picks the schema (default public); HIVEMIND_PG_SCHEMA_PER_PATH=1 gives each path its own schema (tests).
+    const pgUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    if (pgUrl && process.env.HIVEMIND_DB !== "sqlite") {
+      const schema = path === ":memory:" ? "m_" + createHash("sha1").update(String(Math.random()) + Date.now()).digest("hex").slice(0, 16) // a throw-away database of its own
+        : process.env.HIVEMIND_PG_SCHEMA_PER_PATH === "1" ? "t_" + createHash("sha1").update(String(path)).digest("hex").slice(0, 16)
+        : process.env.HIVEMIND_PG_SCHEMA || "public";
+      this.db = new PgDatabaseSync(pgUrl, { schema });
+      this.isPg = true;
+    } else {
+      if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+      this.db = new DatabaseSync(path);
+      this.isPg = false;
+    }
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
@@ -153,12 +166,41 @@ export class Store {
     if (!this.db.prepare("PRAGMA table_info(ocr_articles)").all().some((c) => c.name === "title")) this.db.exec("ALTER TABLE ocr_articles ADD COLUMN title TEXT; ALTER TABLE ocr_articles ADD COLUMN title_source TEXT");
     // the collected story an opinion-page entry turned out to be (set once the stories are stored)
     if (!this.db.prepare("PRAGMA table_info(section_pieces)").all().some((c) => c.name === "story_key")) this.db.exec("ALTER TABLE section_pieces ADD COLUMN story_key TEXT");
+    // Op-ed angles written by the AI for one event (a group of stories), saved under the event's first story. Events without one show the template angle.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS event_angles (
+        story_key TEXT PRIMARY KEY, topic TEXT NOT NULL, kind TEXT, title TEXT NOT NULL, thesis TEXT, questions TEXT NOT NULL DEFAULT '[]',
+        pitch TEXT, audience TEXT, model TEXT, created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS event_angles_at ON event_angles(created_at);`);
   }
 
   // Refresh the query planner's statistics before closing, so indexes keep being chosen well as the data grows.
-  close() { try { this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
+  // ---- AI-written op-ed angles per event ----
+  putEventAngle({ storyKey, topic, kind = null, title, thesis = "", questions = [], pitch = "", audience = "", model = null, at = Date.now() }) {
+    this.db.prepare(`INSERT INTO event_angles (story_key, topic, kind, title, thesis, questions, pitch, audience, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(story_key) DO UPDATE SET topic = excluded.topic, kind = excluded.kind, title = excluded.title, thesis = excluded.thesis, questions = excluded.questions,
+      pitch = excluded.pitch, audience = excluded.audience, model = excluded.model, created_at = excluded.created_at`)
+      .run(storyKey, topic, kind, title, thesis, JSON.stringify(questions), pitch, audience, model, at);
+  }
+  // Saved angles for any of these story keys: Map story_key -> angle.
+  eventAnglesFor(keys) {
+    const out = new Map(), list = [...new Set(keys)].filter(Boolean);
+    for (let i = 0; i < list.length; i += 500) {
+      const part = list.slice(i, i + 500);
+      for (const r of this.db.prepare(`SELECT * FROM event_angles WHERE story_key IN (${part.map(() => "?").join(",")})`).all(...part)) {
+        let questions = []; try { questions = JSON.parse(r.questions); } catch { /* keep empty */ }
+        out.set(r.story_key, { title: r.title, thesis: r.thesis, questions, pitch: r.pitch, audience: r.audience, kind: r.kind, model: r.model, at: r.created_at });
+      }
+    }
+    return out;
+  }
+  eventAnglesSince(ms) { return this.db.prepare("SELECT COUNT(*) AS n FROM event_angles WHERE created_at >= ?").get(ms).n; }
+
+  close() { try { if (!this.isPg) this.db.exec("PRAGMA optimize"); } catch { /* read-only or busy: not essential */ } this.db.close(); }
   // Consistent copy of the whole database (safe while other processes use it).
-  backup(dest) { this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`); }
+  backup(dest) {
+    if (this.isPg) throw new Error("In PostgreSQL mode the database is backed up by pg_dump (the pgbackup service), not by the app.");
+    this.db.exec(`VACUUM INTO '${String(dest).replace(/'/g, "''")}'`);
+  }
 
   #tx(fn) {
     this.db.exec("BEGIN IMMEDIATE");
@@ -172,6 +214,7 @@ export class Store {
   // instead of recomputing; they are used only while the signature still matches, and are derived data (safe to drop at any time).
   #views() { if (!this._viewsReady) { this.db.exec("CREATE TABLE IF NOT EXISTS response_cache (k TEXT PRIMARY KEY, sig TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)"); this._viewsReady = true; } }
   getView(k, sig) { this.#views(); const r = this.db.prepare("SELECT body FROM response_cache WHERE k = ? AND sig = ?").get(k, sig); return r ? r.body : null; }
+  latestView(k) { this.#views(); const r = this.db.prepare("SELECT sig, body FROM response_cache WHERE k = ?").get(k); return r ? { sig: r.sig, body: r.body } : null; } // the last saved version, whatever data it was built from
   putView(k, sig, body) { this.#views(); this.db.prepare("INSERT INTO response_cache (k, sig, body, at) VALUES (?, ?, ?, ?) ON CONFLICT(k) DO UPDATE SET sig = excluded.sig, body = excluded.body, at = excluded.at").run(k, sig, body, Date.now()); }
   pruneViews(maxAgeMs = 3 * 864e5) { this.#views(); return this.db.prepare("DELETE FROM response_cache WHERE at < ?").run(Date.now() - maxAgeMs).changes; }
   // Changes whenever a background job finishes: part of the dashboard cache's signature, so a longer cache lifetime never serves stale data.

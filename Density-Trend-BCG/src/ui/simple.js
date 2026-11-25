@@ -25,12 +25,12 @@ async function pgGuideSimple(el) {
 
     ${card("How the score out of 100 is made", `<p>Every opportunity is a business sector paired with a news topic. Its score adds up six things, each one visible when you open it:</p>
       <ul style="margin:0;padding-left:20px;line-height:1.7">
-        <li><b>Momentum</b> (25): how far above normal the topic is.</li>
-        <li><b>Acceleration</b> (15): whether it is still speeding up.</li>
-        <li><b>Independent sources</b> (15): how many separate sources report it.</li>
-        <li><b>Sector fit</b> (20): how much it really matters to that sector.</li>
-        <li><b>Timing</b> (15): how fresh the confirming event is.</li>
-        <li><b>Room for a fresh angle</b> (10): the less crowded the topic, the better.</li></ul>
+        <li><b>Momentum</b>: how far above normal the topic is.</li>
+        <li><b>Acceleration</b>: whether it is still speeding up.</li>
+        <li><b>Independent sources</b>: how many separate sources report it.</li>
+        <li><b>Sector fit</b>: how much it really matters to that sector.</li>
+        <li><b>Timing</b>: how fresh the confirming event is.</li>
+        <li><b>Room for a fresh angle</b>: the less crowded the topic, the better.</li></ul>
       <p class="small mute" style="margin:8px 0 0">The score ranks opportunities. It is <b>not a probability</b>.</p>`)}
 
     ${card("What the actions mean", `<div class="tw" style="max-height:none"><table class="t"><tbody>

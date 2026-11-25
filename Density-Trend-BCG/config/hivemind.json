@@ -363,6 +363,13 @@
     "ocrAssemble": "claude-sonnet-5-5",
     "_note": "Model used for a job instead of the default (HIVEMIND_MODEL). Putting the columns of a printed article back together needs the stronger model: the default one missed column blocks and sometimes gave them to a neighbouring article. A job routed to groq ignores this."
   },
+  "eventAngles": {
+    "enabled": true,
+    "dailyMax": 50,
+    "topics": 30,
+    "batch": 5,
+    "_note": "Op-ed angles written by the AI for NEW events only, after each collection. Events that started before the feature was switched on keep the template angle. dailyMax caps the events per day; topics = how many top opportunity topics are looked at; batch = events per AI call. The job is 'eventAngle' in routing (Groq when Claude is off)."
+  },
   "routing": {
     "readFullText": "groq",
     "sentiment": "groq",

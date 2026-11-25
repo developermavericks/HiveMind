@@ -430,7 +430,7 @@ export function seriesFor(items, key, gran, ctx, asOf) {
         fullText: x.it.fullText,
         publishedAt: x.it.at,
         contentType: x.it.contentType,
-        geography: (x.it.geography || []).slice(0, 3),
+        geography: (x.it.geography || []).slice(0, 8),
         sentiment: x.it.sentiment,
       })),
     });

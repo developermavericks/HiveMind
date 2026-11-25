@@ -20,7 +20,11 @@ const REMATCH_BEFORE = "2026-11-18T12:56:00+05:30";
 const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily chart
 // The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
 // labels, a finished job) and dropped by cache.clear() (jobs, edits), so a longer life only saves work, it never shows older data.
-const TTL_MS = 300000;
+// The signature already changes with every new story, reading, label, job or edit, so an unchanged signature means unchanged data: the context
+// is kept for 30 min (HIVEMIND_CONTEXT_TTL_MS), not rebuilt every 5 min with every panel and topic recalculated from scratch.
+const TTL_MS = Math.max(60e3, +(process.env.HIVEMIND_CONTEXT_TTL_MS ?? 1800e3));
+const MEMO_MAX = Math.max(200, +(process.env.HIVEMIND_MEMO_MAX ?? 3000)); // remembered results per process (panels, topics, charts)
+const SIG_TTL_MS = Math.max(0, +(process.env.HIVEMIND_SIG_TTL_MS ?? 3000)); // how long a data signature is reused (see signature())
 // Part of every signature: when any source file changes (a new version is deployed) the saved views from the old code are not reused.
 const CODE_STAMP = (() => { try { const d = new URL(".", import.meta.url); return String(Math.max(...readdirSync(d).filter((f) => f.endsWith(".mjs")).map((f) => statSync(new URL(f, d)).mtimeMs))); } catch { return "0"; } })();
 // The heavy read-only views, remembered per (view, arguments) against the context they were computed from.
@@ -33,6 +37,14 @@ const tallySentiment = (list) => {
   return { ...t, n, net: n ? (t.pos - t.neg) / n : null };
 };
 const STAGES = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
+// One key per place, whatever the spelling: "Global", "global" and "Global." count as the same place.
+export const geoKey = (g) => String(g ?? "").trim().replace(/[.,;:]+$/, "").replace(/\s+/g, " ").toLowerCase();
+// The publications that covered an event most, as its suggested outlets (real coverage, not a fixed list).
+const topOutlets = (stories, n = 4) => {
+  const c = new Map();
+  for (const s of stories) for (const o of s.outlets || []) c.set(o, (c.get(o) || 0) + 1);
+  return [...c].sort((a, b) => b[1] - a[1]).slice(0, n).map(([o]) => o).join(", ");
+};
 
 // Whole-word keyword test: short words match exactly ("ai" never matches "said", "port" never matches "report");
 // entries ending in "*" are stems and match any ending ("regulat*" -> regulation, regulator).
@@ -137,7 +149,8 @@ const ANGLE_KINDS = {
 };
 
 // match: the topic's existing AI sector match for the client ({ sector, why, angle } or { irrelevant: true }), or null.
-function buildTopicEventClusters(items, labelName, match = null) {
+// saved: Map story_key -> AI-written angle (store.eventAnglesFor). An event shows a saved angle if any of its stories has one.
+function buildTopicEventClusters(items, labelName, match = null, saved = new Map()) {
   const clusters = [];
   for (const item of items) {
     const loc = (item.geography && item.geography.length) ? item.geography[0] : null;
@@ -201,7 +214,25 @@ function buildTopicEventClusters(items, labelName, match = null) {
     const basedOn = match?.sector && !match.inherited ? "sector match" : kw !== DEFAULT_PRACTICE ? "keywords" : match?.sector ? "sector match" : "default";
     const k = ANGLE_KINDS[kind] ?? ANGLE_KINDS.general;
     // No op-ed angle for sport, entertainment and similar events, or for topics the AI judged irrelevant to every sector.
-    const mdpAngles = kind === "nonbusiness" || match?.irrelevant ? [] : [
+    // The event's first story (earliest) is its anchor: a new AI angle is saved under it.
+    const anchor = [...cl.stories].sort((a, b) => a.at - b.at)[0];
+    const ai = cl.stories.map((st) => saved.get(st.id)).find(Boolean) ?? null;
+    const business = !(kind === "nonbusiness" || match?.irrelevant);
+    const mdpAngles = !business ? [] : ai ? [{
+        id: `${cl.id}-mdp-1`,
+        role: "BCG Managing Director & Senior Partner (MDP)",
+        practice,
+        eventKind: kind,
+        basedOn: "AI, written for this event",
+        editorialFormat: k.format,
+        title: ai.title,
+        thesis: ai.thesis,
+        boardroomQuestions: ai.questions,
+        targetAudience: ai.audience || "CEOs, Boards, Risk Committees and Investors",
+        targetOutlets: topOutlets(cl.stories),
+        pitch: ai.pitch,
+        aiWritten: true,
+      }] : [
       {
         id: `${cl.id}-mdp-1`,
         role: "BCG Managing Director & Senior Partner (MDP)",
@@ -215,13 +246,17 @@ function buildTopicEventClusters(items, labelName, match = null) {
           : `${shortTitle} (${locStr}) matters for ${practice}: leaders need to judge what it changes for strategy, operations and risk, not only react to the news.`,
         boardroomQuestions: k.questions(locStr, entityStr),
         targetAudience: kind === "policy" ? "CEOs, CFOs, Regulatory Affairs heads and Industry Bodies" : kind === "deal" ? "CEOs, Strategy heads, Boards and Investors" : kind === "market" ? "CEOs, CFOs, Commercial and Supply Chain heads" : "CEOs, Boards, Risk Committees and Investors",
-        targetOutlets: "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+        targetOutlets: topOutlets(cl.stories),
         pitch: match?.angle || `An executive op-ed on what ${shortTitle.slice(0, 80)} means for ${practice} leaders and what they should do next.`,
       }
     ];
 
     return {
       id: cl.id,
+      anchorKey: anchor?.id ?? null,
+      anchorAt: anchor?.at ?? null,
+      needsAngle: business && !ai,
+      kind, practice,
       title: cl.title,
       summary: cl.summary,
       location: cl.location,
@@ -254,6 +289,7 @@ export class Analytics {
     // clear() also moves the saved-views revision on, so views saved before an edit or a job are never served afterwards (also after a restart).
     const store_ = store;
     this.cache = new (class extends Map { clear() { super.clear(); try { store_?.setMeta?.("cache.rev", String(Date.now()) + Math.random().toString(36).slice(2, 6)); } catch { /* a counter must not break an edit */ } this.onClear?.(); } })();
+    { const clearMap = this.cache.clear.bind(this.cache), self = this; this.cache.clear = () => { self._sigMemo?.clear(); return clearMap(); }; } // a cleared cache also forgets the signature
     for (const name of MEMO) {
       const raw = this[name].bind(this);
       this[name] = (args = {}) => {
@@ -262,7 +298,8 @@ export class Analytics {
         const key = "memo|" + name + "|" + JSON.stringify(args), hit = this.cache.get(key);
         if (hit && hit.ctx === c) return hit.value;
         const value = raw(args);
-        if (this.cache.size > 600) for (const k of this.cache.keys()) if (k.startsWith("memo|")) this.cache.delete(k);
+        // Full: forget the oldest small results, never the big shared lists (opportunities, labels) that every panel and topic is cut from.
+        if (this.cache.size > MEMO_MAX) { let drop = this.cache.size - Math.floor(MEMO_MAX * 0.8); for (const k of this.cache.keys()) { if (drop <= 0) break; if (k.startsWith("memo|") && !/^memo\|(opportunities|labels|overview)\|/.test(k)) { this.cache.delete(k); drop--; } } }
         this.cache.set(key, { ctx: c, value, at: Date.now() });
         return value;
       };
@@ -272,10 +309,16 @@ export class Analytics {
   // ---------------------------------------------------------------- shared context (cached for a few seconds)
   // A short fingerprint of everything the views are computed from: it changes when stories, readings, labels or weights change, when a job finishes, or
   // when cache.clear() is called after an edit. Cheap (a few counts), so it can decide whether a saved view is still current without building anything.
+  // The data signature counts across whole tables. One page asks for it many times while it is built, so the answer is kept
+  // for SIG_TTL_MS (3 s): the data only changes when a job finishes or an edit is made, and both clear the cache, which
+  // also drops this memo, so a change is never missed. On SQLite this saves a little; on PostgreSQL it saves seconds per page.
   signature(date = null) {
+    const now = Date.now(), memo = (this._sigMemo ??= new Map()), hit = memo.get(date);
+    if (hit && now - hit.at < SIG_TTL_MS) return hit.value;
     const span = this.store.span();
-    if (!span.last) return null;
-    return `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${this.store.jobRev()}|${this.registry().size}|${JSON.stringify(this.cfg.weights)}|${this.store.getMeta("cache.rev", "0")}|${CODE_STAMP}`;
+    const value = !span.last ? null : `${date}|${span.last}|${span.days}|${this.store.readingCount()}|${this.store.enrichmentCount()}|${this.store.sentimentCount()}|${this.store.mergedTopicCount()}|${this.store.jobRev()}|${this.registry().size}|${JSON.stringify(this.cfg.weights)}|${this.store.getMeta("cache.rev", "0")}|${CODE_STAMP}`;
+    memo.set(date, { at: now, value });
+    return value;
   }
   context(date = null) {
     const span = this.store.span();
@@ -525,6 +568,26 @@ export class Analytics {
     } catch { return null; }
   }
 
+  // New business events (first story at or after `since`) in the top topics that have no AI-written angle yet, most important topics first.
+  // Earlier events are left with the template angle on purpose.
+  eventAngleCandidates({ company = "bcg", since, topics = 30, limit = 50 }) {
+    const opps = this.opportunities({ company, limit: 300, group: true })?.items ?? [];
+    const keys = [...new Set(opps.map((o) => o.label?.key).filter((k) => k && k.startsWith("t:")))].slice(0, topics);
+    const out = [], seen = new Set();
+    for (const key of keys) {
+      const t = this.topic({ key, company });
+      if (!t || t.error) continue;
+      for (const cl of t.eventClusters ?? []) {
+        if (!cl.needsAngle || !cl.anchorKey || cl.anchorAt == null || cl.anchorAt < since || seen.has(cl.anchorKey)) continue;
+        seen.add(cl.anchorKey);
+        out.push({ anchorKey: cl.anchorKey, topicKey: key, topic: t.row?.name ?? key, practice: cl.practice, kind: cl.kind, location: cl.location,
+          stories: (cl.stories ?? []).slice(0, 6).map((st) => ({ title: st.title, summary: st.summary })) });
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
+
   topic({ key, company: companyId = "bcg", date = null, geo = null, eventId = null }) {
     const c = this.context(date);
     const m = c?.analysis.labels.get(key);
@@ -551,11 +614,14 @@ export class Analytics {
     const geoMap = new Map();
     for (const i of allList) {
       const geos = (i.geography && i.geography.length) ? i.geography : ["National / Global"];
+      const seenHere = new Set(); // a story naming the same place twice counts once
       for (const g of geos) {
-        const trimmed = String(g).trim();
-        if (!trimmed) continue;
-        if (!geoMap.has(trimmed)) geoMap.set(trimmed, { name: trimmed, count: 0, recentCount: 0 });
-        const entry = geoMap.get(trimmed);
+        const name = String(g).trim().replace(/[.,;:]+$/, ""), k = geoKey(g);
+        if (!k || seenHere.has(k)) continue;
+        seenHere.add(k);
+        if (!geoMap.has(k)) geoMap.set(k, { name, count: 0, recentCount: 0 });
+        const entry = geoMap.get(k);
+        if (entry.name === entry.name.toLowerCase() && name !== name.toLowerCase()) entry.name = name; // prefer "Global" over "global"
         entry.count++;
         if (c.asOf - i.at <= 72 * HOUR) entry.recentCount++;
       }
@@ -563,7 +629,9 @@ export class Analytics {
     const geoBreakdown = Array.from(geoMap.values()).sort((a, b) => b.count - a.count).slice(0, 16);
 
     // 3. Event-specific clusters with tailored BCG MDP editorial angles
-    const eventClusters = buildTopicEventClusters(recentList.length ? recentList : allList.slice(0, 50), name, this.topicSectorMatch(m, companyId));
+    const clusterItems = recentList.length ? recentList : allList.slice(0, 50);
+    const savedAngles = this.store.eventAnglesFor ? this.store.eventAnglesFor(clusterItems.map((i) => i.id)) : new Map();
+    const eventClusters = buildTopicEventClusters(clusterItems, name, this.topicSectorMatch(m, companyId), savedAngles);
 
     // 4. Specific-based news filtering (by location or specific event cluster)
     let displayList = recentList.length ? recentList : allList;
@@ -574,8 +642,14 @@ export class Analytics {
         displayList = displayList.filter((s) => clusterStoryIds.has(s.id));
       }
     } else if (geo && geo !== "all") {
-      const targetGeo = geo.toLowerCase();
-      displayList = displayList.filter((s) => (s.geography || []).some((g) => g.toLowerCase() === targetGeo || g.toLowerCase().includes(targetGeo) || targetGeo.includes(g.toLowerCase())));
+      // the place counts above are over all of the topic's stories, so the filter looks at all of them too (newest first)
+      const targetGeo = geoKey(geo);
+      const isDefault = targetGeo === geoKey("National / Global");
+      displayList = [...allList].sort((a, b) => b.at - a.at).filter((s) => {
+        const gs = (s.geography || []).map(geoKey).filter(Boolean);
+        if (isDefault) return gs.length === 0;
+        return gs.includes(targetGeo); // exactly the rule the place counts use, so "India (10)" shows those 10 stories
+      });
     }
 
     const pathways = [];
@@ -584,8 +658,8 @@ export class Analytics {
     const si = this.store.getSignal(norm(name));
     return {
       row: this.labelRow(c, m), asOf: c.asOf,
-      stories: displayList.slice(0, 100).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
-      allStories: allList.slice(0, 250).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 3), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      stories: displayList.slice(0, 100).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 8), reconstructed: i.reconstructed, sentiment: i.sentiment })),
+      allStories: allList.slice(0, 250).map((i) => ({ id: i.id, title: i.title, url: i.url, summary: i.summary, outlets: i.outletCount, origins: i.originCount, primary: i.primary, wire: i.wire, verified: i.verified, fullText: i.fullText, publishedAt: i.at, contentType: i.contentType, geography: (i.geography || []).slice(0, 8), reconstructed: i.reconstructed, sentiment: i.sentiment })),
       storyTracking,
       geoBreakdown,
       eventClusters,
@@ -693,6 +767,13 @@ export class Analytics {
       items: rows.slice(0, 200).map((r) => ({ id: r.id, oppKey: r.oppKey, label: r.label, sector: r.sector, action: r.action, score: r.score, ts: r.ts, hit: r.hit, peakRatio: r.peakRatio, origins: r.peakOrigins })) };
   }
   tuning() { return tuneWeights(this.store.outcomes(), this.cfg); }
+  // The whole-table counts shown in the status bar (about 1 s together on 90k stories). The server asks its helper for them in the background,
+  // so the status that every open tab checks every few seconds never makes the web server count tables.
+  statusCounts() {
+    const s = this.store;
+    return { sentimentLabelled: s.sentimentCount(), sentimentPending: s.unsentimentedCount(), merged: s.mergedTopicCount(), headlineOnly: s.headlineOnlyCount(),
+      enrichLabelled: s.enrichmentCount(), readings: s.readingCount(), enrichPending: s.unenrichedCount(), dates: s.days(), recommendations: s.recommendationCount(), at: Date.now() };
+  }
 
   // ---------------------------------------------------------------- sources and collection health
   sourcesView({ date = null } = {}) {
@@ -746,7 +827,9 @@ export class Analytics {
   // ---------------------------------------------------------------- data quality, judged links, audit, forecasts
   aliases() { if (!this._al || Date.now() - this._al.at > 30000) this._al = { at: Date.now(), map: this.store.entityAliases() }; return this._al.map; }
 
-  quality(c = this.context(null)) {
+  // Takes the shared context, or (when asked as a page by the server's helper) a plain {date} object.
+  quality(arg = null) {
+    const c = arg?.analysis ? arg : this.context(arg?.date ?? null);
     if (!c) return { status: "green", checks: [], sources: [], flags: [] };
     if (this._q && this._q.asOf === c.asOf && Date.now() - this._q.at < 120000) return this._q.value;
     const topicRows = [...c.analysis.labels.values()].filter((m) => m.level === "topic" && this.topicOk(c, m)).map((m) => ({ key: m.key, name: this.labelName(c, m.key), count: m.storiesAll, parentShare: m.parentShare }));

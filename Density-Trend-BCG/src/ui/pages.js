@@ -126,7 +126,13 @@ async function pgMomentum(el) {
     api(`/api/series?keys=${sels.map(encodeURIComponent).join(",")}&gran=${S.gran}${S.date ? `&date=${S.date}` : ""}`),
     api(`/api/topic?${qs(`&key=${encodeURIComponent(S.sel)}`)}`),
   ]);
-  const main = ser.series[S.sel], cmps = [...S.compare].map((k) => ({ name: ser.series[k]?.name ?? k, s: ser.series[k] })).filter((c) => c.s);
+  const main = ser?.series?.[S.sel], cmps = [...S.compare].map((k) => ({ name: ser?.series?.[k]?.name ?? k, s: ser?.series?.[k] })).filter((c) => c.s);
+  // No chart data for this topic (not enough stories in the window yet): say so instead of an error screen.
+  if (!main) {
+    $("#mchart").innerHTML = `<p class="small mute" style="padding:24px 0">No chart for this topic yet: it has too few stories in the current window. Pick another topic from the board.</p>`;
+    ["#mleg", "#mtog", "#mcmp", "#mline"].forEach((s) => { const x = $(s); if (x) x.innerHTML = ""; });
+    return;
+  }
 
   // ---- Specific News & Geographical Breakdown ----
   let allStories = top.allStories || top.stories || [];
@@ -256,7 +262,7 @@ async function pgMomentum(el) {
     draw();
   }));
 
-  $("#mtog").innerHTML = [["bars", "Volume bars"], ["share", "Coverage share"], ["avg", "Rolling average"], ["forecast", "Forecast"]].map(([k, l]) => `<label class="chk"><input type="checkbox" data-sh="${k}" ${S.show[k] ? "checked" : ""}> ${l}</label>`).join("") + (main.forecast.available ? "" : `<span class="small mute">Forecast unavailable: ${esc(main.forecast.reason)}</span>`);
+  $("#mtog").innerHTML = [["bars", "Volume bars"], ["share", "Coverage share"], ["avg", "Rolling average"], ["forecast", "Forecast"]].map(([k, l]) => `<label class="chk"><input type="checkbox" data-sh="${k}" ${S.show[k] ? "checked" : ""}> ${l}</label>`).join("") + (main.forecast?.available ? "" : `<span class="small mute">Forecast unavailable: ${esc(main.forecast?.reason || "not enough data")}</span>`);
   $$("[data-sh]").forEach((c) => (c.onchange = () => { S.show[c.dataset.sh] = c.checked; draw(); }));
   $("#mcmp").innerHTML = `<span class="small mute">Compare with:</span>${(top.related ?? []).slice(0, 6).map((r) => `<label class="chk"><input type="checkbox" data-cmp="${esc(r.key)}" ${S.compare.has(r.key) ? "checked" : ""}> ${esc(r.name)}</label>`).join("") || `<span class="small mute">no overlapping topics</span>`}`;
   $$("[data-cmp]").forEach((c) => (c.onchange = () => { c.checked ? S.compare.add(c.dataset.cmp) : S.compare.delete(c.dataset.cmp); render(); }));
@@ -378,7 +384,7 @@ async function pgMomentum(el) {
 
                       <div class="mdp-card-footer">
                         <div class="mdp-outlet-hint">
-                          <b>Target Outlets:</b> ${esc(ang.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute")}
+                          <b>Target Outlets:</b> ${esc(ang.targetOutlets || "–")}
                         </div>
                         <div class="mdp-actions">
                           <button class="btn sm ghost" data-copybrief="${esc(ang.id)}">📋 Copy Advisory Brief</button>
@@ -444,7 +450,7 @@ async function pgMomentum(el) {
           targetAng.targetAudience || "CEOs, Board Risk Committees, Regulators, and Infrastructure Investors",
           ``,
           `RECOMMENDED MEDIA PLACEMENT:`,
-          targetAng.targetOutlets || "The Economic Times, Mint, BCG Henderson Institute, Financial Express",
+          targetAng.targetOutlets || "–",
           ``,
           `PITCH SUMMARY:`,
           targetAng.pitch || targetAng.thesis

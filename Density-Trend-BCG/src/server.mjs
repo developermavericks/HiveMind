@@ -144,7 +144,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       Object.assign(j, { running: false, lastExit: code, lastMessage: message, child: null });
       try { store.finishJob(j.logId, { status: code === 0 ? "ok" : "failed", summary: message, stats, error: code === 0 ? null : message }); } catch { /* database closing */ }
       log(`${kind} ${date ?? ""} finished (exit ${code}): ${message}`);
-      if (code === 0) { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } try { after?.(); } catch (e) { log(`post-run step failed: ${e.message}`); } }
+      if (code === 0) { snapshotNow(); try { after?.(); } catch (e) { log(`post-run step failed: ${e.message}`); } }
       try { onDone?.(code); } catch (e) { log(`follow-up step failed: ${e.message}`); }
     };
     child.on("error", (e) => finish(-1, e.message));
@@ -215,6 +215,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       () => { dedupeNow(trigger); return null; },
       () => (light ? null : (topicVerifyNow(trigger).finally(next), { ok: true })),
       () => (light ? null : (topicMatchNow(trigger).finally(next), { ok: true })),
+      () => (light ? null : (eventAnglesNow(trigger).finally(next), { ok: true })),
       () => (!light && Date.now() - (+store.getMeta("secondOpinion.lastAt", 0) || 0) > 7 * 864e5 ? (secondOpinionNow(trigger).finally(next), { ok: true }) : null),
       () => (cfg.fulltext?.enabled && store.fulltextCandidates({ limit: 1, maxTries: cfg.fulltext?.maxTries ?? 2, retryAfterMs: (cfg.fulltext?.retryAfterHours ?? 12) * 3600e3 }).length && fulltextAllowanceLeft() > 0 ? startFulltext(trigger, next) : null),
       () => (light ? null : (hotNow(trigger).finally(next), { ok: true })),
@@ -227,6 +228,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       while (i < steps.length) { const r = steps[i++](); if (r?.ok) return; }
       if (!light) store.setMeta("followups.lastFullAt", String(Date.now()));
       chainRunning = false;
+      setTimeout(() => { try { warm(); } catch { /* the 3-minute timer tries again */ } }, 3000).unref?.(); // new data is complete: build the pages now
     }
     next();
   }
@@ -298,6 +300,42 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     finally { matchRunning = false; }
   }
 
+  // Op-ed angles for NEW events, written by the AI (API) after each collection. Events that started before this feature was
+  // switched on keep the template angle. A daily cap bounds the cost (cfg.eventAngles.dailyMax), on top of the app's budget guard.
+  let anglesRunning = false;
+  async function eventAnglesNow(trigger = "manual") {
+    const ec = cfg.eventAngles ?? {};
+    if (ec.enabled === false) return { skipped: "switched off (eventAngles.enabled)" };
+    if (anglesRunning || closed || !llm.ok) return { skipped: "busy or model unavailable" };
+    anglesRunning = true;
+    let id = null, written = 0, badBatches = 0, lastError = "";
+    try {
+      let since = +store.getMeta("eventAngles.since", 0) || 0;
+      if (!since) { since = Date.now(); store.setMeta("eventAngles.since", String(since)); } // first run: only events from now on
+      const today = dayStart(dayOf(Date.now()));
+      const left = Math.max(0, (ec.dailyMax ?? 50) - store.eventAnglesSince(today));
+      if (!left) return { skipped: "daily limit reached" };
+      const cands = analytics.eventAngleCandidates({ company: "bcg", since, topics: ec.topics ?? 30, limit: left });
+      if (!cands.length) return { skipped: "no new events without an angle" };
+      id = store.startJob({ kind: "event-angles", trigger, summary: "" });
+      const size = Math.max(1, ec.batch ?? 5);
+      for (let i = 0; i < cands.length && !closed; i += size) {
+        const batch = cands.slice(i, i + size);
+        let res; try { res = await reader.writeEventAngles(batch); } catch (e) { badBatches++; lastError = e.message; continue; }
+        for (const r of res) {
+          const ev = batch[r.n - 1];
+          store.putEventAngle({ storyKey: ev.anchorKey, topic: ev.topicKey, kind: ev.kind, title: r.title, thesis: r.thesis, questions: r.questions, pitch: r.pitch, audience: r.audience, model: reader.label || null });
+          written++;
+        }
+      }
+      if (badBatches && !written) throw new Error(lastError);
+      store.finishJob(id, { status: "ok", summary: `Wrote op-ed angles for ${written} new event${written === 1 ? "" : "s"}${badBatches ? ` (${badBatches} batch${badBatches === 1 ? "" : "es"} skipped after errors)` : ""}`, stats: { written, skippedBatches: badBatches } });
+      if (written) analytics.cache.clear();
+      return { written };
+    } catch (e) { if (id != null) { try { store.finishJob(id, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } } return { error: e.message }; }
+    finally { anglesRunning = false; }
+  }
+
   // A stronger model double-checks the readings behind the top opportunities.
   let reviewRunning = false;
   async function secondOpinionNow(trigger = "manual") {
@@ -361,18 +399,18 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   //   return true;
   // }
   // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
-  const status = () => ({
+  const status = (n = statusCounts()) => ({
     llm, runner: runnerState(), live: liveRun(), syncConfigured: syncConfigured(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
-    sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: store.sentimentCount(), pending: store.unsentimentedCount() },
-    topicMerge: { running: jobs["topic-merge"].running, merged: store.mergedTopicCount() },
+    sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: n.sentimentLabelled, pending: n.sentimentPending },
+    topicMerge: { running: jobs["topic-merge"].running, merged: n.merged },
     activity: { topicVerify: verifyRunning, topicMatch: matchRunning, hot: hotRunning, secondOpinion: reviewRunning, followUps: chainRunning },
-    fulltext: { running: jobs.fulltext.running, headlineOnly: store.headlineOnlyCount(), allowanceLeft: fulltextAllowanceLeft() },
-    enrich: { running: jobs.enrich.running, startedAt: jobs.enrich.startedAt, lastExit: jobs.enrich.lastExit, lastMessage: jobs.enrich.lastMessage, labelled: store.enrichmentCount(), readings: store.readingCount(), pending: store.unenrichedCount() },
+    fulltext: { running: jobs.fulltext.running, headlineOnly: n.headlineOnly, allowanceLeft: fulltextAllowanceLeft() },
+    enrich: { running: jobs.enrich.running, startedAt: jobs.enrich.startedAt, lastExit: jobs.enrich.lastExit, lastMessage: jobs.enrich.lastMessage, labelled: n.enrichLabelled, readings: n.readings, pending: n.enrichPending },
     schedule: { minutes: scheduleMinutes, lastRunAt: store.latestRun("rolling")?.startedAt ?? null, nextRunAt: scheduleMinutes ? (store.latestRun("rolling")?.startedAt ?? Date.now()) + scheduleMinutes * 60e3 : null },
     searchInterest: searchInterestStatus(), serverTime: Date.now(),
     companies: companies.list().map((c) => ({ id: c.id, name: c.name, builtin: !!c.builtin, sectors: c.sectors.length, matched: Object.keys(c.matches).length })),
-    dates: store.days(), recommendations: store.recommendationCount(),
+    dates: n.dates, recommendations: n.recommendations,
     integrations: integrations.status({ ollama: { reachable: reader.chain.includes("ollama") }, journalists: { count: store.journalistCount() } }),
     // journalists: journalistStatus(), // JOURNALISTS DISABLED
     provider: reader.provider, noClaude: reader.noClaude, models: { groq: reader.groqOk ? reader.groqModel : null, openai: reader.openaiOk ? reader.openaiModel : null },
@@ -384,6 +422,22 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   let cachedStatusObj = null;
   let cachedStatusAt = 0;
   const isTestEnv = process.argv.some(a => a.includes("test")) || process.execArgv.some(a => a.includes("test")) || process.env.NODE_ENV === "test";
+  // The slow whole-table counts in the status (about 1 s together) are counted by the helper in the background, at most every COUNTS_MS
+  // or soon after the data changes. Before that, the last counts are shown. Only the very first status after a start counts them here.
+  const COUNTS_MS = 30e3;
+  let counts = null, countsBusy = false;
+  const refreshCounts = () => {
+    if (countsBusy) return;
+    countsBusy = true;
+    build("statusCounts", {}, { helperOnly: true }).then((m) => { if (!m.skipped && !m.failed) counts = JSON.parse(m.body); })
+      .catch(() => {}).finally(() => { countsBusy = false; });
+  };
+  function statusCounts() {
+    if (isTestEnv || process.env.HIVEMIND_NO_WORKER === "1") return analytics.statusCounts();
+    if (!counts) counts = analytics.statusCounts();
+    else if (Date.now() - counts.at > COUNTS_MS) refreshCounts();
+    return counts;
+  }
   const getCachedStatus = () => {
     if (isTestEnv) return status();
     const now = Date.now();
@@ -450,8 +504,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     }
   }, 2000).unref();
   // Recommendation history: re-evaluate every few minutes and log what changed and why.
-  timers.push(setInterval(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 5 * 60e3));
-  setTimeout(() => { try { analytics.snapshot(); } catch (e) { log(`snapshot error: ${e.message}`); } }, 4000).unref();
+  // It rebuilds the whole analysis, so it runs in a helper (never on the server's own thread, where it froze every page for seconds).
+  function snapshotNow() { if (!closed) build("snapshot", {}, { helperOnly: true }).catch((e) => log(`snapshot error: ${e.message}`)); }
+  timers.push(setInterval(snapshotNow, 5 * 60e3));
+  setTimeout(snapshotNow, 60000).unref(); // after the helpers have started and the first pages are ready
   // Optional scheduled collection (the document's pilot polls hourly). Off unless HIVEMIND_SCHEDULE_MINUTES / --schedule is set.
   if (scheduleMinutes && scheduleMinutes >= 15) {
     // Each scheduled run polls the time since the last run (plus an hour of overlap), up to maxCatchupHours (default 48).
@@ -471,23 +527,67 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Keep the dashboard's views ready: shortly after start and then every minute, the views the pages ask for are built (in the worker thread) whenever the data
   // has changed, so a person opening a tab reads a finished result. Unchanged data costs almost nothing: the saved answer is still current.
   // The addresses are the ones the pages request (same arguments, so they hit the same saved answers).
-  let warming = false;
+  // Every page people open first is built ahead (by a helper, so nobody is blocked): all page variations, then the top opportunity panels and the top
+  // topics/sectors on Trends. Pages whose saved version is current cost nothing. Runs shortly after start, every 3 minutes, and when the follow-up
+  // jobs after a collection finish. Pauses while a job is running (the data is still changing) - people then get the last ready versions.
+  const WARM_PANELS = Math.max(0, +(process.env.HIVEMIND_WARM_PANELS ?? 100)), WARM_TOPICS = Math.max(0, +(process.env.HIVEMIND_WARM_TOPICS ?? 50));
+  let warming = false, warmAgain = false;
+  const warmView = async (u) => {
+    const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
+    if (v.error) return null;
+    const e = await viewEntry(v.method, v.args, { wait: true });
+    return e && !e.failed ? e : null;
+  };
   const warm = async () => {
-    if (closed || warming || anyJobRunning()) return;
+    if (closed || anyJobRunning()) return;
+    if (warming) { warmAgain = true; return; }
     warming = true;
+    const t0 = Date.now(), stop = () => closed || anyJobRunning();
+    let n = 0;
     try {
-      const urls = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300", "/api/entities?", "/api/sentiment?", "/api/sources?"];
+      // Most-opened first (Overview, Opportunities, their panels, Trends); the heavy, less-opened pages last, so they never hold up the others.
+      const pages = [];
       for (const co of companies.list()) {
-        urls.push(`/api/overview?company=${co.id}`);
-        for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) urls.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
+        pages.push(`/api/overview?company=${co.id}`);
+        for (const g of ["topic", "pair"]) for (const m of ["whitespace", "validated"]) pages.push(`/api/opportunities?company=${co.id}&limit=1000&group=${g}&mode=${m}&slim=1`);
       }
-      for (const u of urls) {
-        if (closed || anyJobRunning()) break;
-        const x = new URL(u, "http://localhost"), v = ROUTES[x.pathname](x, slugify(x.searchParams.get("company") || "bcg") || "bcg");
-        try { await viewEntry(v.method, v.args); } catch { /* one view failing must not stop the others */ }
+      pages.push("/api/labels?level=bracket&limit=300", "/api/labels?level=topic&limit=300");
+      const later = ["/api/leadership?mode=whitespace", "/api/leadership?mode=validated", "/api/sources?", "/api/origins?key=all", "/api/sentiment?", "/api/entities?"];
+      for (const co of companies.list()) for (const m of ["whitespace", "validated"]) later.unshift(`/api/opportunities?company=${co.id}&limit=300&group=pair&mode=${m}&slim=1`); // a shared opportunity link
+      const got = new Map();
+      for (const u of pages) { if (stop()) break; try { got.set(u, await warmView(u)); n++; } catch { /* one view failing must not stop the others */ } }
+      // The opportunity panels people open first: the top of the default list (Topics, white space, by score) for each company.
+      // A panel loads the opportunity, its topic and the topic's hourly chart.
+      const labelKeys = [];
+      for (const co of companies.list()) {
+        const list = got.get(`/api/opportunities?company=${co.id}&limit=1000&group=topic&mode=whitespace&slim=1`);
+        const items = list ? (JSON.parse(list.body).items || []).slice(0, WARM_PANELS) : [];
+        for (const o of items) {
+          if (stop()) break;
+          const lk = o.label?.key;
+          try {
+            await warmView(`/api/opportunity?company=${co.id}&key=${encodeURIComponent(o.key)}&mode=whitespace&group=topic`);
+            if (lk) { await warmView(`/api/topic?company=${co.id}&key=${encodeURIComponent(lk)}`); await warmView(`/api/series?keys=${encodeURIComponent(lk)}&gran=hour`); }
+            n += lk ? 3 : 1;
+          } catch { /* next */ }
+          if (lk && co.id === "bcg") labelKeys.push(lk);
+        }
       }
+      // Trends: the top sectors and topics (their chart and detail), in the order the page lists them.
+      for (const lv of ["bracket", "topic"]) {
+        const lab = got.get(`/api/labels?level=${lv}&limit=300`);
+        const rows = lab ? (JSON.parse(lab.body).rows || JSON.parse(lab.body).items || []) : [];
+        for (const r of rows.slice(0, lv === "topic" ? WARM_TOPICS : 20)) {
+          if (stop()) break;
+          if (!r.key || labelKeys.includes(r.key)) continue;
+          try { await warmView(`/api/topic?company=bcg&key=${encodeURIComponent(r.key)}`); await warmView(`/api/series?keys=${encodeURIComponent(r.key)}&gran=hour`); n += 2; } catch { /* next */ }
+        }
+      }
+      for (const u of later) { if (stop()) break; try { await warmView(u); n++; } catch { /* next */ } }
+      if (Date.now() - t0 > 20e3) log(`pages ready: ${n} checked or built in ${Math.round((Date.now() - t0) / 1000)} s`);
     } catch (e) { log(`warm-up skipped: ${e.message}`); }
     warming = false;
+    if (warmAgain && !closed) { warmAgain = false; setTimeout(warm, 1000).unref?.(); }
   };
   try { store.pruneViews(); } catch { /* derived data; nothing depends on it */ }
   setTimeout(warm, 10000).unref(); timers.push(setInterval(warm, 180e3));
@@ -520,13 +620,13 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       } catch (e) { log(`start-up clean-up failed: ${e.message}`); }
     }, 8000).unref();
     // Judge recommendations once their 72 hours are up (a live hit rate), every half hour.
-    const judge = () => { if (closed) return; try { analytics.judgeForecasts(); } catch (e) { log(`forecast check failed: ${e.message}`); } try { const r = analytics.judgeOutcomes(); if (r.evaluated) { const id = store.startJob({ kind: "outcomes", trigger: "auto" }); store.finishJob(id, { status: "ok", summary: `Judged ${r.evaluated} recommendations: ${r.hits} hit, ${r.misses} did not`, stats: r }); } } catch (e) { log(`outcome check failed: ${e.message}`); } };
+    const judge = async () => { if (closed) return; try { await build("judgeForecasts", {}, { helperOnly: true }); } catch (e) { log(`forecast check failed: ${e.message}`); } try { const m = await build("judgeOutcomes", {}, { helperOnly: true }); const r = m.skipped ? {} : JSON.parse(m.body); if (r.evaluated) { const id = store.startJob({ kind: "outcomes", trigger: "auto" }); store.finishJob(id, { status: "ok", summary: `Judged ${r.evaluated} recommendations: ${r.hits} hit, ${r.misses} did not`, stats: r }); } } catch (e) { log(`outcome check failed: ${e.message}`); } };
     timers.push(setInterval(judge, 30 * 60e3)); setTimeout(judge, 30000).unref();
   }
   timers.forEach((t) => t.unref());
 
   // What the bell shows: recent finished jobs and any service that needs attention. Derived, never stored separately.
-  function notifications() {
+  async function notifications() {
     const items = [];
     const LABEL = { run: "Collection", enrich: "Topic labelling", sentiment: "Sentiment labelling", "topic-merge": "Topic merge", fulltext: "Full-text retry", ocr: "Print editions", online: "Online opinion pieces", "hot-topics": "Hot-topic check", journalists: "Journalist sync", outcomes: "Recommendation check", "topic-match": "Topic-sector judgement", "topic-verify": "Topic fit check", "second-opinion": "Second opinion", "entities-merge": "Entity merge", dedupe: "Duplicate check", xtrends: "Twitter / X trends poll" };
     for (const e of store.jobLog({ limit: 40 })) {
@@ -540,7 +640,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       else if (i.health === "error" && i.state.lastErrorAt && Date.now() - i.state.lastErrorAt < 6 * 3600e3) items.push({ id: `int-${i.name}-err-${i.state.lastErrorAt}`, ts: i.state.lastErrorAt, level: "warn", kind: "service", title: `${i.label}: recent errors`, text: String(i.state.lastError ?? "").slice(0, 160) });
     }
     try {
-      const q = analytics.quality();
+      const qe = await viewEntry("quality", {}); // built by the helper (last ready version at once), never on the server's own thread
+      const q = qe.failed ? null : JSON.parse(qe.body);
+      if (!q) throw new Error("quality not ready");
       for (const s of q.sources.filter((x) => x.silent)) items.push({ id: `src-${s.name}-${s.lastSeen ?? 0}`, ts: s.lastSeen ?? Date.now(), level: s.severe ? "bad" : "warn", kind: "source", title: `Source quiet: ${s.name}`, text: s.hoursSilent == null ? "No stories seen in the last 7 days." : `No new stories for ${s.hoursSilent} hours (usual gap ${s.typicalGapHours} h).` });
       if (q.status === "red") items.push({ id: `quality-red-${q.generatedAt}`, ts: q.generatedAt, level: "bad", kind: "quality", title: "Data quality is below the safe threshold", text: `Write now is held back. ${q.flags.join("; ")}.` });
     } catch { /* no data yet */ }
@@ -583,18 +685,25 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // DDoS & Rate Limiting Protection (Sliding Window per IP)
   const rateLimitMap = new Map();
   const RATE_WINDOW_MS = 60000;
-  const MAX_REQUESTS_PER_MINUTE = 200;
+  const MAX_REQUESTS_PER_MINUTE = Math.max(50, +process.env.HIVEMIND_RATE_PER_PERSON || 300);   // one person (one sign-in session, or one address without one)
+  const MAX_PER_ADDRESS_PER_MINUTE = Math.max(MAX_REQUESTS_PER_MINUTE, +process.env.HIVEMIND_RATE_PER_ADDRESS || 6000); // a whole office behind one internet address
 
+  // Counted per person, not only per address: a client's whole team usually shares one office address, and a per-address limit of a few hundred
+  // would block them all. The address keeps a much higher ceiling of its own, so one machine still cannot flood the server.
+  const overLimit = (key, max, now) => {
+    let hits = rateLimitMap.get(key);
+    if (!hits) { hits = []; rateLimitMap.set(key, hits); }
+    while (hits.length && hits[0] <= now - RATE_WINDOW_MS) hits.shift();
+    if (hits.length >= max) return Math.max(1, Math.ceil((hits[0] + RATE_WINDOW_MS - now) / 1000));
+    hits.push(now);
+    return 0;
+  };
   function checkDdosRateLimit(req) {
     const ip = clientIp(req);
     const now = Date.now();
-    let hits = rateLimitMap.get(ip);
-    if (!hits) { hits = []; rateLimitMap.set(ip, hits); }
-    while (hits.length && hits[0] <= now - RATE_WINDOW_MS) hits.shift();
-    if (hits.length >= MAX_REQUESTS_PER_MINUTE) {
-      return Math.max(1, Math.ceil((hits[0] + RATE_WINDOW_MS - now) / 1000));
-    }
-    hits.push(now);
+    const sid = /(?:^|;\s*)hm_session=([^;]{16,200})/.exec(String(req.headers.cookie || ""))?.[1];
+    const wait = overLimit("a|" + ip, MAX_PER_ADDRESS_PER_MINUTE, now) || overLimit(sid ? "s|" + ip + "|" + sid : "p|" + ip, sid ? MAX_REQUESTS_PER_MINUTE : 2 * MAX_REQUESTS_PER_MINUTE, now); // not signed in yet: the sign-in page, shared by everyone at that address
+    if (wait) return wait;
     if (rateLimitMap.size > 2000) {
       for (const [k, v] of rateLimitMap.entries()) {
         if (!v.length || v[v.length - 1] <= now - RATE_WINDOW_MS) rateLimitMap.delete(k);
@@ -625,6 +734,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Multi-worker pool for view calculations across CPU cores (prevents queueing under 100 concurrent users)
   const workers = [];
   const wait = new Map();
+  const VIEW_WAIT_MS = Math.max(5e3, +process.env.HIVEMIND_VIEW_WAIT_MS || 300e3); // how long a helper may take on one view
   let wseq = 0;
 
   const dropWorker = (w, why) => {
@@ -675,11 +785,14 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       for (const w of workers) {
         try { w.postMessage({ type: "clear" }); } catch {}
       }
+      if (counts) counts.at = 0; // the data changed: the next status asks the helper for fresh counts
     };
   }
 
-  const build = async (method, args) => {
+  // helperOnly: background work (snapshot, checks) that must never run on the server's own thread; without a ready helper it is skipped this time.
+  const build = async (method, args, { helperOnly = false } = {}) => {
     const readyWorkers = workers.filter((w) => w.ready);
+    if (helperOnly && !readyWorkers.length) return process.env.HIVEMIND_NO_WORKER === "1" ? { body: JSON.stringify(analytics[method](args)), failed: false } : { skipped: true, body: "null", failed: true };
     if (readyWorkers.length > 0) {
       readyWorkers.sort((a, b) => a.active - b.active);
       const chosen = readyWorkers[0];
@@ -691,12 +804,19 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
             wait.delete(id);
             chosen.active = Math.max(0, chosen.active - 1);
             reject(new Error("worker timed out"));
-          }, 90e3);
+          }, VIEW_WAIT_MS);
           wait.set(id, { resolve, reject, t, workerId: chosen.id });
           chosen.postMessage({ id, method, args });
         });
         return { body: m.body, failed: m.failed };
       } catch (e) {
+        // A slow helper must never make the server build the view itself: that blocks every other person until it finishes.
+        // The person gets "still preparing" (not saved anywhere), and the next ask finds the view ready or joins a new build.
+        if (/timed out/.test(e.message)) {
+          log(`view worker still busy with ${method} after ${Math.round(VIEW_WAIT_MS / 1000)} s; asking the person to retry`);
+          return { body: JSON.stringify({ error: "This page is still being prepared. Please try again in a minute.", retry: true }), failed: true, transient: true };
+        }
+        if (helperOnly) throw e;
         log(`view worker failed for ${method} (${e.message}); building it in the server`);
       }
     }
@@ -704,40 +824,78 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     return { body: JSON.stringify(v), failed: !!(v && v.error) };
   };
 
-  // Pre-warm the most critical views in the background so the first page load is instant
-  if (process.env.NODE_ENV !== "test") {
-    setTimeout(() => {
-      Promise.allSettled([
-        viewEntry("overview", { company: "bcg", date: null }),
-        viewEntry("opportunities", { company: "bcg", date: null, limit: 60, group: false, slim: true })
-      ]).catch(() => {});
-    }, 200).unref?.();
+  // Instant pages. Every page answer is kept (memory + response_cache table, which survives restarts) with the data version it was built from.
+  // When the data has moved on (a job finished, new stories, an edit), people are NOT made to wait: they get the last ready version at once and the
+  // new one is built in the background by a helper; the next click shows it. Only a page that was never built before makes the person wait.
+  // Right after someone edits something (a POST), THAT person's answers wait up to EDIT_WAIT_MS for the new version, so they see their own change.
+  // Everyone else keeps getting the last ready version at once while the new one is built in the background (an edit never slows other people).
+  const mem = new Map(), inflight = new Map(), refreshing = new Map();
+  const editedAt = new Map(); // login session -> time of its last edit
+  const editorKey = (req) => req?.user?._sid ?? (req?.user ? "user:" + req.user.id : "local"); // "local": a copy without sign-in (one person)
+  const markEdit = (req) => {
+    const now = Date.now();
+    editedAt.set(editorKey(req), now);
+    if (editedAt.size > 200) for (const [k, t] of editedAt) if (now - t >= EDIT_WAIT_MS) editedAt.delete(k);
+  };
+  const editedRecently = (req) => { const t = req ? editedAt.get(editorKey(req)) : undefined; return t !== undefined && Date.now() - t < EDIT_WAIT_MS; };
+  const FRESH_WAIT_MS = Math.max(0, +(process.env.HIVEMIND_FRESH_WAIT_MS ?? 0)); // how long a click waits for the new version before getting the last one
+  const EDIT_WAIT_MS = 20e3;
+  const NO_DATA_POST = new Set(["/api/tickets", "/api/tickets/update", "/api/usage/refresh", "/api/integrations/test"]);
+  const MEM_MAX = Math.max(50, +process.env.HIVEMIND_VIEW_MEM || 800);
+  const remember = (k, e) => { mem.delete(k); mem.set(k, e); if (mem.size > MEM_MAX) mem.delete(mem.keys().next().value); return e; }; // least recently used goes first
+  const entryOf = (sig, body, failed) => ({ sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` });
+  // Builds (once, however many people ask) the version for this data signature, saves and remembers it.
+  function fresh(method, args, k, sig) {
+    const ik = k + "@" + sig;
+    let p = inflight.get(ik);
+    if (!p) {
+      p = build(method, args).then((r) => {
+        if (r.transient) return { sig, body: r.body, failed: true, transient: true, etag: null };
+        if (!r.failed && r.body.length < 4e6) { try { store.putView(k, sig, r.body); } catch { /* a saved copy is only a convenience */ } }
+        return remember(k, entryOf(sig, r.body, r.failed));
+      }).finally(() => inflight.delete(ik));
+      inflight.set(ik, p);
+    }
+    return p;
   }
-  const mem = new Map(), inflight = new Map();
-  // The answer for (method, args): from memory, else the database, else built once (concurrent askers share the build).
-  async function viewEntry(method, args) {
+  // The answer for (method, args). wait: true (the warm-up) always waits for the current version.
+  async function viewEntry(method, args, { wait = false, req = null } = {}) {
     const k = method + "|" + JSON.stringify(args), sig = analytics.signature(args.date ?? null);
     if (sig == null) { const v = analytics[method](args); return { body: JSON.stringify(v), failed: !!(v && v.error), etag: null }; }
     let e = mem.get(k);
-    if (e && e.sig === sig) return e;
-    let body = store.getView(k, sig), failed = false;
-    if (body == null) {
-      const ik = k + "@" + sig;
-      let p = inflight.get(ik);
-      if (!p) { p = build(method, args).finally(() => inflight.delete(ik)); inflight.set(ik, p); }
-      ({ body, failed } = await p);
-      if (!failed && body.length < 4e6) { try { store.putView(k, sig, body); } catch { /* a saved copy is only a convenience */ } }
-    }
-    e = { sig, body, failed, etag: `"${createHash("sha1").update(body).digest("base64url").slice(0, 22)}"` };
-    if (mem.size > 300) mem.clear();
-    mem.set(k, e);
-    return e;
+    if (e && e.sig === sig) return remember(k, e);
+    const body = store.getView(k, sig);
+    if (body != null) return remember(k, entryOf(sig, body, false));
+    if (!e || e.failed) { const s = store.latestView(k); if (s) e = remember(k, entryOf(s.sig, s.body, false)); } // last version saved (also before a restart)
+    if (!e || e.failed || wait) return fresh(method, args, k, sig); // nothing to show yet: this one waits (the helper builds it; the server never blocks)
+    // A last version exists: start (one) background refresh for this page and give the new version a moment; otherwise answer with the last one.
+    let p = refreshing.get(k);
+    if (!p) { p = fresh(method, args, k, sig).catch(() => null).finally(() => refreshing.delete(k)); refreshing.set(k, p); }
+    const waitMs = editedRecently(req) ? EDIT_WAIT_MS : FRESH_WAIT_MS;
+    if (!waitMs) return e;
+    let timer;
+    const r = await Promise.race([p, new Promise((res) => { timer = setTimeout(res, waitMs, null); timer.unref?.(); })]);
+    clearTimeout(timer);
+    return r && !r.transient && !r.failed ? r : e;
   }
+  // Client logins never receive how the score is weighted: each score part keeps its own 0-100 score and note, but its weight and points are taken
+  // out of the data (not only hidden on screen). Done once per page version and kept with it.
+  const isClient = (req) => !!req?.user && req.user.role !== "admin";
+  const hideScoreParts = (body) => !body.includes('"points"') ? body : JSON.stringify(JSON.parse(body, (k, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v) && "weight" in v && "points" in v && "score" in v) { const { weight, points, ...rest } = v; return rest; }
+    return v;
+  }));
+  const clientEntry = (e) => {
+    if (e.failed || !e.body.includes('"points"')) return e;
+    if (!e.client) { const body = hideScoreParts(e.body); e.client = { ...entryOf(e.sig, body, false), transient: e.transient }; }
+    return e.client;
+  };
   async function view(req, res, method, args) {
-    const e = await viewEntry(method, args);
+    let e = await viewEntry(method, args, { req });
+    if (isClient(req)) e = clientEntry(e);
     const head = { "content-type": "application/json", "cache-control": e.etag ? "private, no-cache" : "no-store", vary: "accept-encoding", ...(e.etag ? { etag: e.etag } : {}) };
     if (e.etag && !e.failed && req.headers["if-none-match"] === e.etag) { res.writeHead(304, head); return res.end(); }
-    const code = e.failed ? 404 : 200;
+    const code = e.transient ? 503 : e.failed ? 404 : 200;
     if (e.body.length > 2048 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) { e.gz ??= gzipSync(e.body, { level: 5 }); res.writeHead(code, { ...head, "content-encoding": "gzip" }); return res.end(e.gz); }
     res.writeHead(code, head); res.end(e.body);
   }
@@ -815,7 +973,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     });
 
     // Anything that changes data (matching, briefs, edits, tuning) drops the cached views once it is done; logging in or out does not.
-    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth")) res.on("finish", () => { if (res.statusCode < 400) analytics.cache.clear(); });
+    // Requests that never change the news data (issue reports, the usage refresh, testing a key) do not drop anything.
+    if (req.method !== "GET" && req.method !== "HEAD" && !p.startsWith("/api/auth") && !NO_DATA_POST.has(p)) res.on("finish", () => { if (res.statusCode < 400) { analytics.cache.clear(); markEdit(req); } });
     // Liveness and readiness for containers and load balancers. It answers before the host check and the login, and says nothing but ok / not ok.
     if (p === "/healthz" && (req.method === "GET" || req.method === "HEAD")) {
       try { store.db.prepare("SELECT 1").get(); res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(req.method === "HEAD" ? undefined : '{"ok":true}'); }
@@ -921,17 +1080,19 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         return json(res, 200, st);
       }
       if (req.method === "GET" && ROUTES[p]) { const v = ROUTES[p](url, company); return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args); }
-      if (req.method === "GET" && p === "/api/leadership/pieces") return json(res, 200, analytics.pieces({ company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) }));
-      if (req.method === "GET" && p === "/api/config") return json(res, 200, { weights: cfg.weights, stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
+      if (req.method === "GET" && p === "/api/leadership/pieces") return view(req, res, "pieces", { company, key: (url.searchParams.get("key") || "").slice(0, 200), date: dayParam(url) });
+      if (req.method === "GET" && p === "/api/config") return json(res, 200, { ...(isClient(req) ? {} : { weights: cfg.weights }), stage: cfg.stage, action: cfg.action, evidence: cfg.evidence, windows: cfg.windows, success: cfg.success, intervals: cfg.intervals, forecast: cfg.forecast });
       if (req.method === "GET" && p === "/api/recommendations") {
         const key = url.searchParams.get("key");
-        return json(res, 200, { history: key ? store.recommendationHistory(company, key) : [], total: store.recommendationCount() });
+        let history = key ? store.recommendationHistory(company, key) : [];
+        if (isClient(req)) history = history.map(({ components, ...h }) => ({ ...h, reason: typeof h.reason === "string" ? h.reason.replace(/ \(driven by [^)]*\)/, "") : h.reason })); // no points per score part for clients
+        return json(res, 200, { history, total: store.recommendationCount() });
       }
       if (req.method === "GET" && p === "/api/xtrends") {
         const regionParam = (url.searchParams.get("region") || "all").toLowerCase();
         const t = await getTrends({ store, maxAgeMs: XTRENDS_SCHEDULE_MS, region: regionParam });
-        const opps = analytics.opportunities({ company, limit: 100, group: true });
-        const items = opps?.items || [];
+        const oe = await viewEntry("opportunities", { company, limit: 100, group: true }); // from the helper, like the Opportunities page
+        const items = oe.failed ? [] : (JSON.parse(oe.body)?.items || []);
         const trends = (t.trends || []).map((tr) => {
           let matchedOpp = null;
           for (const o of items) {
@@ -1007,11 +1168,10 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (req.method === "GET" && p === "/api/entity") {
         const id = entityId(url.searchParams.get("id") ?? "");
         if (!id) return json(res, 400, { error: "Bad entity" });
-        const r = analytics.entity({ id, date: dayParam(url) });
-        return json(res, r.error ? 404 : 200, r);
+        return view(req, res, "entity", { id, date: dayParam(url) });
       }
-      if (req.method === "GET" && p === "/api/outcomes") return json(res, 200, analytics.outcomes());
-      if (req.method === "GET" && p === "/api/tuning") return json(res, 200, analytics.tuning());
+      if (req.method === "GET" && p === "/api/outcomes") return view(req, res, "outcomes", {});
+      if (req.method === "GET" && p === "/api/tuning") return view(req, res, "tuning", {});
       if (req.method === "POST" && p === "/api/tuning/apply") {
         if (!needJson(req, res)) return;
         const body = JSON.parse(await readBody(req) || "{}");
@@ -1026,16 +1186,16 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
 
       // ---- data quality, audit, forecast accuracy ----
-      if (req.method === "GET" && p === "/api/quality") return json(res, 200, analytics.quality());
-      if (req.method === "GET" && p === "/api/audit/queue") return json(res, 200, analytics.auditQueue({ limit: Math.min(100, +url.searchParams.get("limit") || 50), company }));
+      if (req.method === "GET" && p === "/api/quality") return view(req, res, "quality", {});
+      if (req.method === "GET" && p === "/api/audit/queue") return view(req, res, "auditQueue", { limit: Math.min(100, +url.searchParams.get("limit") || 50), company });
       if (req.method === "POST" && p === "/api/audit/review") {
         if (!needJson(req, res)) return;
         const body = JSON.parse(await readBody(req) || "{}");
         try { return json(res, 200, analytics.reviewAudit({ key: String(body.key || ""), verdict: body.verdict, note: String(body.note || ""), reviewer: req.user?.email ?? "" })); }
         catch (e) { return json(res, 400, { error: e.message }); }
       }
-      if (req.method === "GET" && p === "/api/audit/second-opinion") return json(res, 200, analytics.secondOpinion());
-      if (req.method === "GET" && p === "/api/forecast-accuracy") return json(res, 200, analytics.forecastAccuracy());
+      if (req.method === "GET" && p === "/api/audit/second-opinion") return view(req, res, "secondOpinion", {});
+      if (req.method === "GET" && p === "/api/forecast-accuracy") return view(req, res, "forecastAccuracy", {});
 
       // ---- logs, usage, notifications ----
       if (req.method === "GET" && p === "/api/logs") {
@@ -1047,7 +1207,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       }
       if (req.method === "GET" && p === "/api/usage") return json(res, 200, await usageReport({ store, integrations, cfg }));
       if (req.method === "POST" && p === "/api/usage/refresh") { if (!needJson(req, res)) return; return json(res, 200, await usageReport({ store, integrations, cfg, refresh: true })); }
-      if (req.method === "GET" && p === "/api/notifications") return json(res, 200, { items: notifications() });
+      if (req.method === "GET" && p === "/api/notifications") return json(res, 200, { items: await notifications() });
       // Manual starts of the background jobs (each is logged as a manual run).
       if (req.method === "POST" && p === "/api/job") {
         if (!needJson(req, res)) return;
@@ -1058,6 +1218,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (k === "topic-verify") { topicVerifyNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "topic-match") { topicMatchNow("manual", { force: true }); return json(res, 200, { ok: true }); }
         if (k === "second-opinion") { secondOpinionNow("manual"); return json(res, 200, { ok: true }); }
+        if (k === "event-angles") { eventAnglesNow("manual"); return json(res, 200, { ok: true }); }
         if (k === "dedupe") return json(res, 200, { ok: true, ...dedupeNow("manual") });
         const starter = { "entities-merge": () => startEntityMerge("manual"), sentiment: () => startSentiment(0, "manual"), "topic-merge": () => startMerge("manual"), fulltext: () => startFulltext("manual"), ocr: () => startOcr("manual"), online: () => startOnline("manual"), enrich: () => startEnrich(+body.limit || 0, "manual"), sync: () => startSync(Boolean(body.full), "manual", () => matchNow()) }[k];
         if (!starter) return json(res, 400, { error: "Unknown job. Use sentiment, topic-merge, fulltext, ocr, enrich, sync or hot-topics." });
@@ -1174,7 +1335,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         };
         return json(res, 200, { job: jobs.sync, meta });
       }
-      if (req.method === "GET" && p === "/api/dates") return json(res, 200, store.days());
+      if (req.method === "GET" && p === "/api/dates") return json(res, 200, statusCounts().dates);
 
       // ---- first dashboard's state payload (kept for compatibility) ----
       if (req.method === "GET" && p === "/api/state") {
@@ -1182,7 +1343,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         const { data, hours } = dataFor(date, Math.min(168, Math.max(6, +url.searchParams.get("window") || 48)));
         return json(res, 200, buildState({
           data, registry: registry(), companies: companies.list(), companyId: url.searchParams.get("company") || "bcg", bcg, hours, llm,
-          dates: store.days(), view: { date }, runner: runnerState(), live: liveRun(),
+          dates: statusCounts().dates, view: { date }, runner: runnerState(), live: liveRun(),
         }));
       }
 

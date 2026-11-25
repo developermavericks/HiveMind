@@ -28,7 +28,7 @@ const seedStore = (n = 6) => {
 };
 
 // ---------- database ----------
-test("db: every table the dashboard queries has an index, and migrations are idempotent", () => {
+test("db: every table the dashboard queries has an index, and migrations are idempotent", { skip: process.env.DATABASE_URL ? "SQLite-only: inspects or builds SQLite files" : false }, () => {
   const { s } = seedStore(1);
   const idx = new Set(s.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((r) => r.name));
   for (const want of ["stories_published", "articles_pub", "enrich_at", "enrich_sentiment", "topics_merged", "reclog_ts", "signals_source", "journalists_beat", "joblog_started", "runs_target", "readings_basis"]) assert.ok(idx.has(want), `missing index ${want}`);
@@ -105,7 +105,7 @@ test("db: a full-text upgrade keeps the earlier reading and the read time; tries
   s.close();
 });
 
-test("db: a database from before v2 gains the new columns without losing rows", () => {
+test("db: a database from before v2 gains the new columns without losing rows", { skip: process.env.DATABASE_URL ? "SQLite-only: inspects or builds SQLite files" : false }, () => {
   const path = join(mkdtempSync(join(tmpdir(), "v1-")), "old.db");
   const raw = new DatabaseSync(path);
   raw.exec("CREATE TABLE enrichments (key TEXT PRIMARY KEY, wire TEXT, content_type TEXT, entities TEXT, topics TEXT, pathways TEXT, source TEXT, enriched_at INTEGER NOT NULL)");
@@ -265,7 +265,7 @@ test("server: logs, usage, notifications, origins, entities, sentiment, outcomes
     assert.equal((await fetch(`${base}/api/job`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "nope" }) })).status, 400);
     const opps = await get("/api/opportunities?limit=1000&group=topic");
     assert.ok(Array.isArray(opps.items));
-    assert.ok(existsSync(join(root, "data", "hivemind.db")));
+    if (!process.env.DATABASE_URL) assert.ok(existsSync(join(root, "data", "hivemind.db"))); // the SQLite file (no file in PostgreSQL mode)
   } finally { server.close(); }
 });
 

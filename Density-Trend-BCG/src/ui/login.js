@@ -16,6 +16,14 @@
   }
   if (resetToken) {
     mode = "reset";
+    // Opened from the email link: no intro video, and the browser must not fill in the saved (old) password.
+    document.body.classList.remove("intro");
+    const pwIn = document.getElementById("password");
+    pwIn.autocomplete = "new-password";
+    pwIn.value = "";
+    let typed = false;
+    pwIn.addEventListener("input", () => { typed = true; }, { once: true });
+    for (const ms of [100, 500, 1500]) setTimeout(() => { if (!typed) pwIn.value = ""; }, ms);
   }
 
   // The intro video plays once with the card hidden, then the card fades in over its last frame. A reload plays it again. The card appears at once for reduced
@@ -23,7 +31,7 @@
   const bg = $("bg"), START = 0.6;
   let shown = false;
   const reveal = () => { if (shown) return; shown = true; document.body.classList.remove("intro"); document.body.classList.add("after"); };
-  if (!bg) reveal();
+  if (!bg || resetToken) { if (bg) { bg.pause?.(); bg.classList.add("off"); } reveal(); }
   else {
     const calm = matchMedia("(prefers-reduced-motion: reduce)").matches || navigator.connection?.saveData;
     const off = () => { bg.pause?.(); bg.classList.add("off"); reveal(); };
@@ -57,6 +65,8 @@
     const isReset = mode === "reset";
 
     fName.hidden = !up;
+    const fClient = $("f-client");
+    if (fClient) fClient.hidden = !up || setup; // the administrator's own first account has no client
     fEmail.hidden = isReset;
     fPassword.hidden = isForgot;
     fConfirm.hidden = !isReset;
@@ -65,6 +75,8 @@
     if (altAction) altAction.hidden = !(isForgot || isReset);
 
     pw.autocomplete = (up || isReset) ? "new-password" : "current-password";
+    const pwLabel = fPassword.querySelector(".field-header span");
+    if (pwLabel) pwLabel.textContent = isReset ? "New password" : "Password";
     pw.placeholder = (up || isReset) ? "At least 10 characters" : "Your password";
     
     $("tab-in").setAttribute("aria-selected", String(mode === "signin"));
@@ -170,6 +182,7 @@
     const email = $("email").value.trim();
     const password = pw.value;
     const name = $("name").value.trim();
+    const client = $("client") ? $("client").value.trim() : "";
     const confirm = confirmPw ? confirmPw.value : "";
 
     if (mode === "forgot") {
@@ -179,11 +192,7 @@
       try {
         const r = await post("/api/auth/forgot-password", { email });
         if (r.ok) {
-          if (r.data.resetUrl) {
-            say(`Instructions ready! <a href="${r.data.resetUrl}" style="color:var(--accent);font-weight:bold;text-decoration:underline">Click here to set your new password</a>`, true, true);
-          } else {
-            say(r.data.message || "Password reset instructions sent. Please check your email inbox.", true);
-          }
+          say(r.data.message || "If that email is registered, a reset link has been sent to it. Check your inbox.", true);
         } else {
           say(r.data.error || "Could not request password reset. Please try again.");
         }
@@ -203,14 +212,8 @@
       try {
         const r = await post("/api/auth/reset-password", { token: resetToken, password });
         if (r.ok) {
-          say("Password reset successfully! Redirecting to sign in…", true);
-          setTimeout(() => {
-            window.location.search = "";
-            window.location.hash = "";
-            mode = "signin";
-            render();
-            say("Password updated successfully. Please sign in with your new password.", true);
-          }, 1500);
+          say("Password changed. Taking you to sign in…", true);
+          setTimeout(() => location.replace("/login?reset=done"), 1500); // drops the used link from the address bar
         } else {
           say(r.data.error || "Reset link expired or invalid. Please request a new link.");
         }
@@ -225,12 +228,13 @@
     const up = mode === "signup" || setup;
     if (!email || !password) return say("Enter your email and password.");
     if (up && !name) return say("Enter your full name.");
+    if (up && !setup && client.replace(/[^a-z0-9]/gi, "").length < 2) return say("Enter the client you belong to (for example BCG).");
 
     busy = true; submit.disabled = true; say("");
     const label = submit.textContent; submit.textContent = "Please wait…";
     try {
       if (up) {
-        const r = await post("/api/auth/signup", { name, email, password });
+        const r = await post("/api/auth/signup", { name, email, password, client });
         if (!r.ok) {
           say(r.data.error || "Could not create the account.");
         } else if (r.data.first) {
@@ -259,6 +263,7 @@
     } catch { /* assume normal sign-in */ }
     if (setup) mode = "signup";
     render();
+    if (urlParams.get("reset") === "done") { say("Password updated. Sign in with your new password.", true); history.replaceState(null, "", "/login"); }
     if (mode === "reset") pw.focus();
     else $("email").focus();
   })();

@@ -83,8 +83,14 @@ async function api(path, opts) {
       return hit.data;
     }
   }
-  const r = await fetch(path, opts);
-  const j = await r.json().catch(() => ({}));
+  let r, j;
+  // 503 + retry: a helper is still preparing this page (it never blocks the server); ask again a few times while the loader stays up.
+  for (let tries = 0; ; tries++) {
+    r = await fetch(path, opts);
+    j = await r.json().catch(() => ({}));
+    if (!(isGet && r.status === 503 && j.retry && tries < 12)) break;
+    await new Promise((res) => setTimeout(res, 5000));
+  }
   if (r.status === 401 && j.login) { location.href = j.login; throw new Error("Please sign in."); }
   if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
   if (isGet) {
@@ -138,7 +144,7 @@ function startLoadTimer() {
   }, 1000);
 }
 const banner = (kind, html) => `<div class="banner ${kind}"><span>${kind === "bad" ? "⚠" : kind === "warn" ? "⚠" : "ⓘ"}</span><div>${html}</div></div>`;
-const stack = (comp) => `<div class="stack">${Object.entries(comp).map(([k, c]) => `<i class="c-${k}" style="width:${c.points}%" title="${COMP[k]}: ${c.points.toFixed(1)} pts"></i>`).join("")}</div>`;
+const stack = (comp) => !isAdmin() ? "" : `<div class="stack">${Object.entries(comp).map(([k, c]) => `<i class="c-${k}" style="width:${c.points}%" title="${COMP[k]}${isAdmin() ? `: ${c.points.toFixed(1)} pts` : ""}"></i>`).join("")}</div>`;
 const stackLegend = () => `<div class="legend">${Object.keys(COMP).map((k) => `<span><i class="c-${k}"></i>${COMP[k]}${typeof info === "function" ? info("c_" + k) : ""}</span>`).join("")}</div>`;
 
 // ---------------------------------------------------------------- shell
@@ -246,7 +252,7 @@ function renderTop() {
       badge.style.letterSpacing = "0.03em";
       $("#csel").parentNode.insertBefore(badge, $("#csel"));
     }
-    badge.textContent = `${assignedCo} (Client Scoped)`;
+    badge.textContent = assignedCo;
     badge.title = `Your account is scoped strictly to ${assignedCo}. Client switching is restricted to administrators.`;
   } else {
     $("#csel").style.display = "";
@@ -528,7 +534,7 @@ async function openOpp(key) {
         <div style="text-align:center">${HC.radar ? HC.radar(o.components, 250) : ""}</div>
         <div>
           ${stack(o.components)}${stackLegend()}
-          <div style="margin-top:10px">${Object.entries(o.components).map(([k2, c]) => `<div class="compo"><span title="${esc(c.note)}">${COMP[k2]}${info("c_" + k2)} <span class="mute tiny">${c.weight}%</span></span><div class="bar"><i style="width:${c.score}%"></i></div><span class="num small" style="text-align:right">${c.score.toFixed(0)} → ${c.points.toFixed(1)}</span></div><div class="tiny mute" style="margin:-3px 0 4px 140px">${esc(c.note)}</div>`).join("")}</div>
+          <div style="margin-top:10px">${Object.entries(o.components).map(([k2, c]) => `<div class="compo"><span title="${esc(c.note)}">${COMP[k2]}${info("c_" + k2)} ${isAdmin() ? `<span class="mute tiny">${c.weight}%</span>` : ""}</span><div class="bar"><i style="width:${c.score}%"></i></div><span class="num small" style="text-align:right">${isAdmin() ? `${c.score.toFixed(0)} → ${c.points.toFixed(1)}` : ""}</span></div><div class="tiny mute" style="margin:-3px 0 4px 140px">${esc(c.note)}</div>`).join("")}</div>
         </div>
       </div>
     </div>
@@ -541,7 +547,7 @@ async function openOpp(key) {
       <div class="cl" id="dcleg"><span><i style="background:var(--bars-strong);opacity:.7"></i>stories (left axis)</span><span><i class="ln" style="background:var(--line-share)"></i>coverage share</span><span><i class="ln" style="background:var(--line-avg)"></i>rolling average</span><span><i class="dash"></i>forecast</span><span><i style="background:repeating-linear-gradient(45deg,var(--line2) 0 2px,var(--surface2) 2px 5px)"></i>collection gap</span></div>
       <div class="chart" id="dchart"></div><div id="dline"></div><div id="dextra" style="margin-top:8px"></div></div>
 
-    <div class="grid g4">${[["Coverage share", pct(m.share), `baseline ${pct(m.baseShare)}`], ["Momentum", x2(m.ratio), `previous step ${x2(m.ratioPrev)}`], ["Acceleration", m.accel == null ? "–" : (m.accel >= 0 ? "+" : "") + m.accel.toFixed(2), "Δ log₂ momentum"], ["Independent origins", m.originsRecent, `${m.count} stories, last ${m.windowHours}h`], ["Impact breadth", m.areaCount, (m.areas || []).slice(0, 3).join(", ") || "areas"], ["Article text read", `${m.fullTextCount}/${m.count}`, "stories also read beyond the headline"], ["Verified stories", m.verifiedCount, `≥ ${S.cfg?.evidence.verifiedTriggerOrigins ?? 3} origins or primary`], ["Baseline", `${m.baselineHours}h`, `of ${S.cfg?.intervals.baselineHours ?? 168}h target`]].map(([l, v, s]) => `<div class="kpi" style="padding:10px 12px"><div class="v num" style="font-size:19px">${l === "Independent origins" ? originsLink(v, lk, o.label.name) : v}</div><div class="l">${lbl(l, DRAWER_TIP[l])}</div><div class="s">${esc(s)}</div></div>`).join("")}</div>
+    <div class="grid g4">${[["Coverage share", pct(m.share), `baseline ${pct(m.baseShare)}`], ["Momentum", x2(m.ratio), `previous step ${x2(m.ratioPrev)}`], ["Acceleration", m.accel == null ? "–" : (m.accel >= 0 ? "+" : "") + m.accel.toFixed(2), "Δ log₂ momentum"], ["Independent origins", m.originsRecent, `${m.count} stories, last ${m.windowHours}h`], ["Impact breadth", m.areaCount, (m.areas || []).slice(0, 3).join(", ") || "areas"], ["Article text read", `${m.fullTextCount}/${m.count}`, "stories also read beyond the headline"], ["Verified stories", m.verifiedCount, `≥ ${S.cfg?.evidence.verifiedTriggerOrigins ?? 3} origins or primary`], ["Baseline", `${m.baselineHours}h`, `of ${S.cfg?.intervals.baselineHours ?? 168}h target`]].filter(([l]) => isAdmin() || l !== "Article text read").map(([l, v, s]) => `<div class="kpi" style="padding:10px 12px"><div class="v num" style="font-size:19px">${l === "Independent origins" ? originsLink(v, lk, o.label.name) : v}</div><div class="l">${lbl(l, DRAWER_TIP[l])}</div><div class="s">${esc(s)}</div></div>`).join("")}</div>
 
     ${o.geoBreakdown?.length ? `
       <div class="card" id="dgeocard">
@@ -934,7 +940,7 @@ function showSyncBox() { const b = document.getElementById("rsyncbox"); if (b) b
 function init() {
   buildShell();
   xInitNotifs();
-  loadMe();
+  const meReady = loadMe(); // who is signed in decides what a page shows (client logins see less), so the first page waits for it
   $("#csel").onchange = (e) => { apiCache.clear(); S.company = e.target.value; ls.set("company", S.company); S.oppByKey.clear(); render(); };
   $("#dsel").onchange = (e) => {
     apiCache.clear();
@@ -949,6 +955,6 @@ function init() {
   const th = ls.get("theme"); if (th) document.documentElement.dataset.theme = th;
   bindRunPanel();
   addEventListener("hashchange", route);
-  loadStatus().then(route);
+  Promise.all([loadStatus(), meReady.catch(() => {})]).then(route);
 }
 init();

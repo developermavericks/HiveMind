@@ -43,6 +43,7 @@ export const DATASETS = {
   online_pieces:      { table: "online_pieces",      key: ["story_key"],                 changed: "checked_at",                                         about: "Online opinion / analysis pieces" },
   section_pieces:     { table: "section_pieces",     key: ["url"],                       changed: "seen_at",                                            about: "Entries seen on opinion-section pages" },
   online_matches:     { table: "online_matches",     key: ["story_key", "opp_key"],      changed: "matched_at",                                         about: "Online pieces matched to opportunities" },
+  event_angles:       { table: "event_angles",       key: ["story_key"],                 changed: "created_at",                                         about: "Op-ed angles written by the AI for new events (saved under the event's first story)" },
   runs:               { table: "runs",               key: ["id"],                        changed: "COALESCE(finished_at, updated_at, started_at)",      about: "Collection runs: when, headlines, publications" },
 };
 

@@ -48,6 +48,15 @@ const INFO = {
   logs: { t: "Run log", d: "Every automated and manual run: when it ran, what it collected and whether it succeeded." },
   usage: { t: "API usage", d: "How much of each paid service has been used today and this month, and what is left where the provider reports it." },
 };
+// Client logins see the six score parts without their points (the weights stay private).
+const INFO_MEMBER = {
+  c_momentum: { t: "Momentum", d: "How much bigger the topic's share of coverage is than its normal share." },
+  c_acceleration: { t: "Acceleration", d: "Whether the attention is still speeding up or slowing down." },
+  c_sourceBreadth: { t: "Independent sources", d: "How many separate origins report the topic. Outlets under one owner, and copies of a wire report, count once." },
+  c_sectorEvidence: { t: "Sector evidence", d: "How much the topic really matters to this client sector, judged from the topic's own stories." },
+  c_triggerTiming: { t: "Trigger timing", d: "How fresh the event that gives a reason to act is. A trigger is a story confirmed by an official source or several independent origins." },
+  c_headroom: { t: "Editorial headroom", d: "How much room is left for a fresh angle, from the opinion and analysis pieces already written on it." },
+};
 const info = (k) => (INFO[k] ? `<button type="button" class="ib" data-info="${k}" aria-label="What is ${esc(INFO[k].t)}?">i</button>` : "");
 const lbl = (text, k) => `${esc(text)}${info(k)}`;
 
@@ -55,7 +64,7 @@ const lbl = (text, k) => `${esc(text)}${info(k)}`;
   let pinned = null;
   const pop = () => document.getElementById("infopop");
   const show = (b) => {
-    const d = INFO[b.dataset.info], p = pop();
+    const d = (!isAdmin() && INFO_MEMBER[b.dataset.info]) || INFO[b.dataset.info], p = pop();
     if (!d || !p) return;
     p.innerHTML = `<b>${esc(d.t)}</b>${esc(d.d)}${d.ex ? `<div class="ex">e.g. ${esc(d.ex)}</div>` : ""}`;
     p.classList.add("on");

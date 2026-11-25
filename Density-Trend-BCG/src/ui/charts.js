@@ -275,13 +275,13 @@ const HC = (() => {
         <div class="candle-ticker-left">
           <span class="candle-ticker-badge">📈 COVERAGE MOMENTUM</span>
           <span class="candle-ticker-pill">${S.granularity === "day" ? "1D" : "1H"}</span>
-          <span class="candle-ticker-metric">O <b class="ct-o">--</b></span>
-          <span class="candle-ticker-metric">H <b class="ct-h">--</b></span>
-          <span class="candle-ticker-metric">L <b class="ct-l">--</b></span>
-          <span class="candle-ticker-metric">C <b class="ct-c">--</b></span>
-          <span class="candle-ticker-chg ct-chg">--</span>
-          <span class="candle-ticker-metric">Vol <b class="ct-v">--</b></span>
-          <span class="candle-ticker-metric ma">MA(7) <b class="ct-ma">--</b></span>
+          <span class="candle-ticker-metric"${isAdmin() ? "" : ' style="display:none"'}>O <b class="ct-o">--</b></span>
+          <span class="candle-ticker-metric"${isAdmin() ? "" : ' style="display:none"'}>H <b class="ct-h">--</b></span>
+          <span class="candle-ticker-metric"${isAdmin() ? "" : ' style="display:none"'}>L <b class="ct-l">--</b></span>
+          <span class="candle-ticker-metric"${isAdmin() ? "" : ' style="display:none"'}>C <b class="ct-c">--</b></span>
+          <span class="candle-ticker-chg ct-chg"${isAdmin() ? "" : ' style="display:none"'}>--</span>
+          <span class="candle-ticker-metric"${isAdmin() ? "" : ' style="display:none"'}>Vol <b class="ct-v">--</b></span>
+          <span class="candle-ticker-metric ma"${isAdmin() ? "" : ' style="display:none"'}>MA(7) <b class="ct-ma">--</b></span>
         </div>
         <div class="candle-ticker-right">
           <span class="candle-ticker-time ct-t">--</span>

@@ -377,7 +377,7 @@ test("past-day runs: Google's whole-day query, and backfills don't hijack the 'l
   s.close();
 });
 
-test("a database from before backfill support gains the target_date column", () => {
+test("a database from before backfill support gains the target_date column", { skip: process.env.DATABASE_URL ? "SQLite-only: inspects or builds SQLite files" : false }, () => {
   const path = join(mkdtempSync(join(tmpdir(), "mig-")), "old.db");
   const raw = new DatabaseSync(path);
   raw.exec("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, model TEXT, headlines INTEGER, publications INTEGER, per_publication TEXT, total INTEGER, done INTEGER NOT NULL DEFAULT 0)");
