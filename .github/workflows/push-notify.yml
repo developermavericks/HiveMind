@@ -58,3 +58,62 @@ jobs:
           pusher = (ev.get("pusher") or {}).get("name") or (ev.get("sender") or {}).get("login") or "someone"
           pushed_at = datetime.now(ist).strftime("%d %b %Y, %I:%M %p IST")
           link = ev.get("compare") or ev["repository"]["html_url"]
+          
+          # Every commit with its files and line counts. The push event lists at most 20 commits and no line counts,
+          # so each commit is read from GitHub; if that fails, the event's own lists are used.
+          commits = []
+          for c in (ev.get("commits") or [])[:30]:
+              item = {"sha": c.get("id", ""), "author": (c.get("author") or {}).get("name", ""), "time": when(c.get("timestamp", "")), "msg": c.get("message", "").strip(), "url": c.get("url", ""), "files": [], "add": 0, "del": 0}
+              try:
+                  d = api("/commits/" + item["sha"])
+                  for f in d.get("files", []):
+                      item["files"].append((f.get("status", "changed"), f.get("filename", ""), f.get("additions", 0), f.get("deletions", 0)))
+                  item["add"], item["del"] = d.get("stats", {}).get("additions", 0), d.get("stats", {}).get("deletions", 0)
+              except Exception as e:
+                  print("could not read commit", item["sha"], e)
+                  item["files"] = [("added", f, None, None) for f in c.get("added", [])] + [("modified", f, None, None) for f in c.get("modified", [])] + [("removed", f, None, None) for f in c.get("removed", [])]
+              commits.append(item)
+          more = len(ev.get("commits") or []) - len(commits)
+
+          if ev.get("deleted"):
+              what = f"deleted the {kind} {name}"
+          elif ev.get("created") and not commits:
+              what = f"created the {kind} {name}"
+          else:
+              n = len(ev.get("commits") or [])
+              what = f"pushed {n} commit{'s' if n != 1 else ''} to {name}" + (" (new branch)" if ev.get("created") else "") + (" (force push)" if ev.get("forced") else "")
+          first = commits[-1]["msg"].splitlines()[0] if commits else ""
+          subject = f"[{repo}] {pusher} {what}" + (f": {first[:80]}" if first else "")
+          files_total = len({f[1] for c in commits for f in c["files"]})
+          add_total, del_total = sum(c["add"] for c in commits), sum(c["del"] for c in commits)
+
+          def lines_of(f):
+              return "" if f[2] is None else f" (+{f[2]} -{f[3]})"
+
+          text = [f"{pusher} {what}", "", f"Repository: {repo}", f"{kind.title()}: {name}", f"Pushed by: {pusher}", f"Pushed at: {pushed_at}",
+                  f"Push: {before} -> {after}", f"Total: {len(commits)} commit(s), {files_total} file(s), +{add_total} -{del_total} lines", f"See the change: {link}", ""]
+          h = [f"<p><b>{html.escape(pusher)}</b> {html.escape(what)}</p><table style=\"border-collapse:collapse\">"
+               + "".join(f"<tr><td style=\"padding:2px 12px 2px 0;color:#555\">{k}</td><td>{v}</td></tr>" for k, v in [
+                   ("Repository", html.escape(repo)), (kind.title(), f"<b>{html.escape(name)}</b>"), ("Pushed by", html.escape(pusher)), ("Pushed at", pushed_at),
+                   ("Push", f"<code>{before}</code> &rarr; <code>{after}</code>"), ("Total", f"{len(commits)} commit(s), {files_total} file(s), +{add_total} &minus;{del_total} lines")])
+               + f"</table><p><a href=\"{html.escape(link)}\">See the full change on GitHub</a></p>"]
+          for c in commits:
+              text += [f"Commit {c['sha']}", f"Author: {c['author']}  |  {c['time']}", "", c["msg"], "", f"Files ({len(c['files'])}):"]
+              text += [f"  {s}: {fn}{lines_of((s, fn, a, d))}" for s, fn, a, d in c["files"][:100]] + ([f"  ... and {len(c['files']) - 100} more"] if len(c["files"]) > 100 else []) + [c["url"], ""]
+              h.append(f"<hr><p><a href=\"{html.escape(c['url'])}\"><code>{c['sha']}</code></a><br>{html.escape(c['author'])} &middot; {c['time']}</p>"
+                       f"<pre style=\"white-space:pre-wrap;font-family:inherit;background:#f6f8fa;padding:8px\">{html.escape(c['msg'])}</pre>"
+                       f"<p>Files ({len(c['files'])}):<br>" + "<br>".join(f"{html.escape(s)}: <code>{html.escape(fn)}</code>{lines_of((s, fn, a, d))}" for s, fn, a, d in c["files"][:100])
+                       + (f"<br>... and {len(c['files']) - 100} more" if len(c["files"]) > 100 else "") + "</p>")
+          if more > 0:
+              text.append(f"... and {more} more commit(s): see the link above.")
+              h.append(f"<p>... and {more} more commit(s): see the link above.</p>")
+
+          m = EmailMessage()
+          m["Subject"], m["From"], m["To"] = subject, f"HiveMind GitHub <{user}>", ", ".join(x.strip() for x in to.split(",") if x.strip())
+          m.set_content("\n".join(text))
+          m.add_alternative("<div style=\"font-family:Arial,sans-serif;font-size:14px\">" + "".join(h) + "</div>", subtype="html")
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=30) as s:
+              s.login(user, pw)
+              s.send_message(m)
+          print("Sent:", subject)
+          PY
