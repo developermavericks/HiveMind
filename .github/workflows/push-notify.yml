@@ -1,0 +1,60 @@
+# Emails the team on every push to any branch: who pushed, when, which branch, the push ids (before -> after),
+# every commit (id, author, time, full message) and every changed file with lines added/removed, plus a link.
+# Sent from the team's own Gmail sender, so company mail does not block it.
+# Needs 3 repository secrets (Settings -> Secrets and variables -> Actions):
+#   NOTIFY_SMTP_USER  the Gmail address that sends
+#   NOTIFY_SMTP_PASS  its Gmail app password
+#   NOTIFY_TO         who gets it, separated by commas (kept secret because this repository is public)
+# Nothing here touches the app or its code; it only reads the push details from GitHub.
+name: Push email
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send email
+        env:
+          SMTP_USER: ${{ secrets.NOTIFY_SMTP_USER }}
+          SMTP_PASS: ${{ secrets.NOTIFY_SMTP_PASS }}
+          TO: ${{ secrets.NOTIFY_TO }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ toJSON(github.event) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, smtplib, ssl, html, urllib.request
+          from email.message import EmailMessage
+          from datetime import datetime, timezone, timedelta
+
+          user, pw, to = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", ""), os.environ.get("TO", "")
+          if not (user and pw and to):
+              print("Email secrets are not set; skipping."); raise SystemExit(0)
+          ev = json.loads(os.environ["EVENT"])
+          repo = ev["repository"]["full_name"]
+          ist = timezone(timedelta(hours=5, minutes=30))
+          ZERO = "0" * 40
+
+          def api(path):
+              req = urllib.request.Request("https://api.github.com/repos/" + repo + path, headers={"Accept": "application/vnd.github+json", "Authorization": "Bearer " + os.environ.get("GH_TOKEN", "")})
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  return json.load(r)
+
+          def when(iso):
+              try: return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(ist).strftime("%d %b %Y, %I:%M %p IST")
+              except Exception: return iso or ""
+
+          ref = ev.get("ref", "")
+          kind = "tag" if ref.startswith("refs/tags/") else "branch"
+          name = ref.split("/", 2)[-1]
+          before, after = ev.get("before") or ZERO, ev.get("after") or ZERO
+          pusher = (ev.get("pusher") or {}).get("name") or (ev.get("sender") or {}).get("login") or "someone"
+          pushed_at = datetime.now(ist).strftime("%d %b %Y, %I:%M %p IST")
+          link = ev.get("compare") or ev["repository"]["html_url"]
