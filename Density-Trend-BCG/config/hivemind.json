@@ -191,7 +191,9 @@
     "batch": 6,
     "minRelevance": 0.3,
     "supportedRelevance": 0.5,
-    "minStories": 3
+    "minStories": 3,
+    "rematchBefore": "2026-11-18T12:56:00+05:30",
+    "rematchPerRun": 5
   },
   "audit": {
     "sampleSize": 25,

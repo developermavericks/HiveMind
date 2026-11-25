@@ -13,7 +13,10 @@ import { runBacktest } from "./backtest.mjs";
 import { norm } from "./brackets.mjs";
 import { TopicRegistry } from "./topics.mjs";
 import { getCachedIndiaTrends, matchOpportunityTrend } from "./xtrends.mjs";
+import { loadBcgMdps, matchMdpsToOpportunities } from "./pitch.mjs";
 
+// Matches judged before this moment (18 Nov 2026, 12:56 PM IST) used the older, looser matching rule; see topicMatchCandidates and cfg.topicMatch.rematchBefore.
+const REMATCH_BEFORE = "2026-11-18T12:56:00+05:30";
 const LOAD_DAYS = 15; // enough for the 7-day baseline plus the 14-day daily chart
 // The shared context takes ~2 s to build, so it is kept for minutes, not seconds. It is still rebuilt as soon as its signature changes (new stories, readings,
 // labels, a finished job) and dropped by cache.clear() (jobs, edits), so a longer life only saves work, it never shows older data.
@@ -21,7 +24,7 @@ const TTL_MS = 300000;
 // Part of every signature: when any source file changes (a new version is deployed) the saved views from the old code are not reused.
 const CODE_STAMP = (() => { try { const d = new URL(".", import.meta.url); return String(Math.max(...readdirSync(d).filter((f) => f.endsWith(".mjs")).map((f) => statSync(new URL(f, d)).mtimeMs))); } catch { return "0"; } })();
 // The heavy read-only views, remembered per (view, arguments) against the context they were computed from.
-const MEMO = ["overview", "opportunities", "opportunity", "series", "entities", "sentiment", "sourcesView", "labels", "backtest", "topic", "origins"];
+const MEMO = ["overview", "opportunities", "opportunity", "series", "entities", "sentiment", "sourcesView", "labels", "backtest", "topic", "origins", "pitch"];
 const SENT = ["positive", "negative", "neutral", "mixed"];
 const tallySentiment = (list) => {
   const t = { pos: 0, neg: 0, neu: 0, mixed: 0 };
@@ -369,6 +372,14 @@ export class Analytics {
       for (const o of items) o.xTrending = matchOpportunityTrend(o, cachedTrends);
     }
     return { ...res, items, asOf: c.asOf, company: { id: company.id, name: company.name, matched: Object.keys(company.matches).length } };
+  }
+
+  // BCG Managing Directors & Partners (MDPs) matched to live topic opportunities for op-ed editorial pitching.
+  pitch({ company: companyId = "bcg", date = null, limit = 100 } = {}) {
+    const opps = this.opportunities({ company: companyId, date, limit: Math.max(limit, 60), group: true });
+    const mdps = loadBcgMdps();
+    const matched = matchMdpsToOpportunities(mdps, opps.items || []);
+    return { ...matched, asOf: opps.asOf, company: opps.company };
   }
 
   // Every print and online piece counted on one angle (the opportunity's list is cut at 12; this is the whole set the count came from).
@@ -773,15 +784,35 @@ export class Analytics {
     const rows = [...c.analysis.labels.values()].filter((m) => m.level === "topic" && this.topicOk(c, m) && m.ratio != null && m.stage !== "declining")
       .map((m) => ({ m, rank: Math.log2(Math.max(1, m.ratio)) * Math.log1p(m.count) * (1 + Math.min(1, m.originsRecent / 8)) })).sort((a, b) => b.rank - a.rank);
     const out = [];
+    const build = (m) => {
+      const list = (c.byLabel.get(m.key) ?? []).filter((i) => c.asOf - i.at <= 72 * HOUR).sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount).slice(0, 6);
+      if (list.length < (tm.minStories ?? 2)) return null;
+      const parent = m.parent ? c.ctx.registry.get(m.parent)?.name : null;
+      return { id: m.id, key: m.key, name: this.labelName(c, m.key), description: `A specific recurring news topic${parent ? ` (mostly filed under ${parent})` : ""}. Judge relevance to the company's sectors from the stories shown, not from the broader area.`, storyCount: m.storiesAll,
+        stories: list.map((i) => ({ title: i.title, summary: i.summary, outlets: i.outletCount })) };
+    };
     for (const { m } of rows) {
       const prev = have.get(m.id), stale = !prev || now - prev.judgedAt > (tm.refreshHours ?? 24) * 3600e3 || m.storiesAll > prev.storyCount * 1.5 + 2;
       if (!force && !stale) continue;
-      const list = (c.byLabel.get(m.key) ?? []).filter((i) => c.asOf - i.at <= 72 * HOUR).sort((a, b) => b.maxSev * b.outletCount - a.maxSev * a.outletCount).slice(0, 6);
-      if (list.length < (tm.minStories ?? 2)) continue;
-      const parent = m.parent ? c.ctx.registry.get(m.parent)?.name : null;
-      out.push({ id: m.id, key: m.key, name: this.labelName(c, m.key), description: `A specific recurring news topic${parent ? ` (mostly filed under ${parent})` : ""}. Judge relevance to the company's sectors from the stories shown, not from the broader area.`, storyCount: m.storiesAll,
-        stories: list.map((i) => ({ title: i.title, summary: i.summary, outlets: i.outletCount })) });
+      const cand = build(m);
+      if (!cand) continue;
+      out.push(cand);
       if (out.length >= (tm.maxTopics ?? 30)) break;
+    }
+    // A few topics behind a CURRENT opportunity whose match was judged before the stricter matching rule went live are judged again, whatever their stage or rank
+    // (the list above only reaches rising topics near the top). Once judged again, a topic's time is past the cutoff, so each is picked up only once.
+    const cutoff = Date.parse(tm.rematchBefore ?? REMATCH_BEFORE), perRun = tm.rematchPerRun ?? 5;
+    if (Number.isFinite(cutoff) && perRun > 0) {
+      const taken = new Set(out.map((o) => o.key)), byKey = new Map([...c.analysis.labels.values()].filter((m) => m.level === "topic").map((m) => [m.key, m]));
+      let extra = 0;
+      for (const o of this.opportunities({ company: companyId, limit: 400, group: true }).items) {
+        if (extra >= perRun) break;
+        const key = o.label.key, m = byKey.get(key), prev = m && have.get(m.id);
+        if (o.label.level !== "topic" || !m || !prev || taken.has(key) || prev.judgedAt >= cutoff || !this.topicOk(c, m)) continue;
+        taken.add(key);
+        const cand = build(m);
+        if (cand) { out.push(cand); extra++; }
+      }
     }
     return out;
   }

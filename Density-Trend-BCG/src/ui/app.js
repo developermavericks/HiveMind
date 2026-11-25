@@ -15,6 +15,10 @@ const PAGES = {
   overview: { name: "Overview", title: "Executive overview", sub: "What the news is doing, which topics are gaining attention, and what to write now", fn: (el) => pgOverview(el) },
   leadership: { name: "Leadership", title: "Leadership view", sub: "What is trending and why, what people are writing about it, and what nobody has written yet", fn: (el) => pgLeadership(el) },
   opportunities: { name: "Opportunities", title: "Opportunities", sub: "Ranked topic opportunities with score, evidence and suggested action", fn: (el) => pgOpportunities(el) },
+  pitch: { name: "Pitch", title: "Pitch & Op-Ed Matching", sub: "Match BCG Managing Directors & Partners to live editorial opportunities and boardroom angles", fn: (el) => pgPitch(el), tabs: [
+    { k: "by-mdp", t: "By BCG Leader", sub: "Browse BCG Managing Directors and see their mapped opportunities and op-ed angles", fn: (el) => pgPitch(el) },
+    { k: "by-opp", t: "By Opportunity", sub: "Live editorial opportunities with recommended BCG authors and boardroom angles", fn: (el) => pgPitch(el) },
+  ] },
   trends: { name: "Trends", title: "Trends", sub: "Coverage volume, share and forecast over time", tabs: [
     { k: "topics", t: "Topics", sub: "Specific recurring topics: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
     { k: "sectors", t: "Sectors", sub: "Broad news areas: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
@@ -51,11 +55,12 @@ const PAGES = {
 };
 const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "sources/authored", validation: "accuracy/validation", method: "accuracy/method" };
 const MEMBER_HIDDEN = new Set(["leadership", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
-const NAV_TOP = ["overview", "leadership", "opportunities", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
+const NAV_TOP = ["overview", "leadership", "opportunities", "pitch", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
 const NAV_ICON = {
   overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   leadership: '<path d="M4 20V9M10 20V4M16 20v-8M22 20H2"/>',
   opportunities: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+  pitch: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
   trends: '<path d="M3 17l6-6 4 4 8-9"/><path d="M15 6h6v6"/>',
   clients: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M10 21v-4h4v4"/>',
   sources: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/>',
@@ -446,8 +451,25 @@ async function pgOpportunities(el) {
 const DRAWER_TIP = { "Coverage share": "share", Momentum: "momentum", Acceleration: "accel", "Independent origins": "origins", "Impact breadth": "breadth", "Article text read": "fulltext", "Verified stories": "verified", Baseline: "baseline" };
 function closeDrawer() { $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); xCloseNotifs?.(); tip.hide(); }
 async function openOpp(key) {
+  if (!key) return;
   let o = S.oppByKey.get(key);
-  if (!o) return;
+  if (!o) {
+    try {
+      const full = await api(`/api/opportunity?${qs(`&key=${encodeURIComponent(key)}`)}`);
+      if (full && !full.error && full.key) {
+        o = full;
+        S.oppByKey.set(key, o);
+      }
+    } catch {}
+  }
+  if (!o) {
+    try {
+      const r = await api(`/api/opportunities?${qs("&limit=300&group=pair&slim=1")}`);
+      r.items?.forEach((item) => S.oppByKey.set(item.key, item));
+      o = S.oppByKey.get(key);
+    } catch {}
+  }
+  if (!o) { toast("Could not load that opportunity. Please refresh and try again."); return; }
   $("#drawer").classList.add("on"); $("#scrim").classList.add("on");
   const d = $("#drawer");
   d.innerHTML = `<div class="drawer-h"><div>${ring(o.score, 64)}</div><div style="min-width:0"><div class="tiny mute b" style="letter-spacing:.06em;text-transform:uppercase">Opportunity</div><h2 style="font-size:18px">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}</h2><div style="margin-top:6px">${actionPill(o.action)} ${stagePill(o.stage)} ${evPill(o.evidence)} <span class="pill p-muted">${o.kind === "forecast" ? "attention forecast" : "editorial suggestion · too little data to forecast"}</span></div></div><button class="x" id="dx" aria-label="Close">✕</button></div><div class="drawer-b">${loading()}</div>`;

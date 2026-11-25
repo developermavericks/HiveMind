@@ -208,6 +208,7 @@ export function inferAction(p, method, url) {
   if (p === "/api/topic") return `Inspected Topic: ${url?.searchParams?.get("key") || ""}`;
   if (p === "/api/series") return `Viewed Trend Chart: ${url?.searchParams?.get("keys") || ""}`;
   if (p === "/api/leadership") return "Viewed Leadership View";
+  if (p === "/api/pitch") return "Viewed BCG Pitch & Op-Ed Matching";
   if (p === "/api/brief" && method === "POST") return "Generated Strategic Brief";
   if (p === "/api/brief/decide") return "Made Editor Decision on Brief";
   if (p === "/api/clip") return "Clipped Article from Web Extension";

@@ -378,19 +378,21 @@ const HC = (() => {
         const wickBottom = Math.max(bodyBottom, yL);
 
         // Long lower shadow / wick extending downwards
-        s += `<line x1="${x}" x2="${x}" y1="${bodyBottom}" y2="${wickBottom}" stroke="${col}" stroke-width="1.4" shape-rendering="crispEdges"/>`;
+        // WICKS DISABLED (commented out): lower and upper wicks are not drawn.
+        // s += `<line x1="${x}" x2="${x}" y1="${bodyBottom}" y2="${wickBottom}" stroke="${col}" stroke-width="1.4" shape-rendering="crispEdges"/>`;
 
         // Tiny upper wick if high extends above hammer body
-        if (yH < bodyTop) {
-          s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${bodyTop}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges"/>`;
-        }
+        // if (yH < bodyTop) {
+        //   s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${bodyTop}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges"/>`;
+        // }
 
         // Hammer head (compact body at top of the range)
         s += `<rect x="${x - cw / 2}" y="${bodyTop}" width="${cw}" height="${hammerH}" rx="1" fill="${fillCol}" stroke="${col}" stroke-width="1.2" shape-rendering="crispEdges"/>`;
       } else {
         // Standard Rising / Forecast Candle:
         // 1. High-Low Wick line
-        s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${yL}" stroke="${col}" stroke-width="${d.isForecast ? "1" : "1.2"}" shape-rendering="crispEdges" ${d.isForecast ? 'stroke-dasharray="2 2"' : ""}/>`;
+        // WICKS DISABLED (commented out):
+        // s += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${yL}" stroke="${col}" stroke-width="${d.isForecast ? "1" : "1.2"}" shape-rendering="crispEdges" ${d.isForecast ? 'stroke-dasharray="2 2"' : ""}/>`;
 
         // 2. Candle body
         const bTop = Math.min(yO, yC);

@@ -1694,3 +1694,486 @@ async function pgXTrends(el) {
     el.innerHTML = `<div class="card"><div class="banner bad">Could not load Twitter trends: ${esc(err.message)}</div><button class="btn sm" onclick="location.reload()" style="margin-top:8px">Retry</button></div>`;
   }
 }
+
+// ---------------------------------------------------------------- PITCH & OP-ED MATCHING
+// Matches BCG Managing Directors & Partners (MDPs) from BCG_Hivemind.xlsx to live editorial opportunities.
+async function pgPitch(el) {
+  el.innerHTML = `<div class="card" style="padding:40px 20px;text-align:center"><div class="spin" style="margin:0 auto 14px"></div><p style="margin:0;color:var(--mute);font-size:14px">Mapping BCG Managing Directors &amp; Partners to live editorial opportunities…</p></div>`;
+
+  try {
+    const data = await api(`/api/pitch?${qs()}`);
+    if (!data || !data.mdps) {
+      el.innerHTML = `<div class="card"><div class="banner bad">No MDP pitch data available.</div></div>`;
+      return;
+    }
+
+    const { mdps, opportunities, stats, asOf } = data;
+
+    // Pre-populate S.oppByKey with all opportunities so openOpp() always opens the side drawer instantly
+    (opportunities || []).forEach((o) => {
+      if (o.oppKey && !S.oppByKey.has(o.oppKey)) {
+        S.oppByKey.set(o.oppKey, {
+          key: o.oppKey,
+          sector: o.sector,
+          label: { name: o.topic, key: o.oppKey.split("|")[2] || o.topic },
+          score: o.score || 70,
+          action: o.action || "investigate",
+          stage: o.stage || "emerging",
+          slim: true,
+          kind: "editorial",
+          evidence: "moderate",
+          metrics: { count: 0, originsRecent: 1 },
+          stories: []
+        });
+      }
+    });
+
+    const currentTab = S.tab === "by-opp" ? "by-opp" : "by-mdp"; // the page tabs at the top switch the view
+    let searchQ = "";
+    let selectedSector = "all";
+    let onlyPitches = stats.mdpsWithPitches > 0;
+    const expandedMdpIds = new Set(); // Cards start collapsed by default
+    const activePitchIdx = new Map(); // mdpId -> selected pitch index (0 by default)
+
+    const allSectors = Array.from(new Set(mdps.map((m) => m.primarySector).filter(Boolean))).sort();
+
+    const render = () => {
+      const q = searchQ.trim().toLowerCase();
+
+      // Filter MDPs
+      const filteredMdps = mdps.filter((m) => {
+        if (onlyPitches && m.opportunityCount === 0) return false;
+        if (selectedSector !== "all" && m.primarySector !== selectedSector) return false;
+        if (q) {
+          const inName = (m.name || "").toLowerCase().includes(q);
+          const inDesig = (m.designation || "").toLowerCase().includes(q);
+          const inSector = (m.primarySector || "").toLowerCase().includes(q);
+          const inThemes = (m.themes || []).some((t) => t.toLowerCase().includes(q));
+          const inOpps = (m.opportunities || []).some((o) => (o.topic || "").toLowerCase().includes(q) || (o.headline || "").toLowerCase().includes(q));
+          if (!inName && !inDesig && !inSector && !inThemes && !inOpps) return false;
+        }
+        return true;
+      });
+
+      // Filter Opportunities for by-opp view
+      const filteredOpps = opportunities.filter((o) => {
+        if (selectedSector !== "all" && o.sector !== selectedSector) return false;
+        if (q) {
+          const inTopic = (o.topic || "").toLowerCase().includes(q);
+          const inSector = (o.sector || "").toLowerCase().includes(q);
+          const inAuthor = (o.topMdp?.mdpName || "").toLowerCase().includes(q);
+          const inHeadline = (o.topMdp?.headline || "").toLowerCase().includes(q);
+          if (!inTopic && !inSector && !inAuthor && !inHeadline) return false;
+        }
+        return true;
+      });
+
+      el.innerHTML = `
+        <div class="pitch-container">
+          <!-- Executive Summary KPI Strip (Clean & Minimal) -->
+          <div class="pitch-kpi-bar">
+            <div class="pitch-kpi-item">
+              <span class="pitch-kpi-num">${stats.totalMdps}</span>
+              <span class="pitch-kpi-text">BCG Leaders</span>
+            </div>
+            <div class="pitch-kpi-item is-brand">
+              <span class="pitch-kpi-num">${stats.totalPitchesReady}</span>
+              <span class="pitch-kpi-text">Op-Ed Angles Ready</span>
+            </div>
+            <div class="pitch-kpi-item is-star">
+              <span class="pitch-kpi-num">${stats.highFitPitches}</span>
+              <span class="pitch-kpi-text">High-Priority Matches (≥75%)</span>
+            </div>
+            <div class="pitch-kpi-item">
+              <span class="pitch-kpi-num">${stats.sectorsCovered}</span>
+              <span class="pitch-kpi-text">Practice Areas Covered</span>
+            </div>
+          </div>
+
+          <!-- Clean Toolbar -->
+          <div class="pitch-toolbar-clean">
+            <div class="pitch-search-clean">
+              <span class="pitch-search-ico">🔍</span>
+              <input type="text" id="pitch-search" autocomplete="off" placeholder="Filter by partner, practice, theme or topic…" value="${esc(searchQ)}">
+            </div>
+
+            <div class="pitch-filter-actions">
+              <select id="pitch-sector-sel" class="pitch-select-clean">
+                <option value="all">All Practice Areas (${allSectors.length})</option>
+                ${allSectors.map((s) => `<option value="${esc(s)}"${s === selectedSector ? " selected" : ""}>${esc(s)}</option>`).join("")}
+              </select>
+
+              <button class="btn sm ${onlyPitches ? "" : "ghost"}" id="pitch-toggle-only" title="Toggle between leaders with live pitches vs all 34 leaders">
+                ${onlyPitches ? `✓ Ready Pitches (${stats.mdpsWithPitches})` : `All Leaders (${stats.totalMdps})`}
+              </button>
+            </div>
+          </div>
+
+          <!-- List Content (Collapsed by default for clean executive viewing) -->
+          ${currentTab === "by-mdp" ? renderByMdpCollapsed(filteredMdps) : renderByOppClean(filteredOpps)}
+        </div>
+      `;
+
+      bindEvents();
+    };
+
+    function renderByMdpCollapsed(list) {
+      if (!list.length) {
+        return `
+          <div class="card" style="text-align:center;padding:40px 20px">
+            <h3 style="margin:0 0 6px">No leaders match current filter</h3>
+            <p class="mute" style="margin:0 0 14px;font-size:13px">Try clearing search or showing all leaders.</p>
+            <button class="btn sm" id="pitch-reset-filters">Reset Filters</button>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="pitch-leader-list">
+          ${list.map((m) => {
+            const hasPitches = m.opportunityCount > 0;
+            const isExpanded = expandedMdpIds.has(m.id);
+            const currentIdx = activePitchIdx.get(m.id) || 0;
+            const pitch = (m.opportunities && m.opportunities[currentIdx]) || m.topOpportunity;
+            const initials = m.name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+
+            return `
+              <div class="pitch-leader-row ${hasPitches ? "has-pitches" : ""} ${isExpanded ? "expanded" : ""}" data-mdpid="${esc(m.id)}">
+                <!-- Collapsed Row Header (Clicking expands/collapses) -->
+                <div class="pitch-row-header" data-toggle-card="${esc(m.id)}">
+                  <div class="pitch-row-left">
+                    <div class="pitch-avatar-circle">${esc(initials)}</div>
+                    <div class="pitch-row-identity">
+                      <div class="pitch-row-name-line">
+                        <span class="pitch-row-name">${esc(m.name)}</span>
+                        ${m.group === "BCG Leaders" ? `<span class="pitch-tag-leader">Leadership</span>` : ""}
+                        <span class="pitch-tag-practice">🏢 ${esc(m.primarySector)}</span>
+                      </div>
+                      <div class="pitch-row-desig">${esc(m.designation)}</div>
+                    </div>
+                  </div>
+
+                  <div class="pitch-row-middle">
+                    <div class="pitch-mini-themes">
+                      ${(m.themes || []).slice(0, 3).map((t) => `<span class="pitch-theme-chip" title="${esc(t)}">${esc(t)}</span>`).join("")}
+                      ${(m.themes || []).length > 3 ? `<span class="pitch-theme-chip mute">+${m.themes.length - 3}</span>` : ""}
+                    </div>
+                  </div>
+
+                  <div class="pitch-row-right">
+                    ${hasPitches ? `
+                      <span class="pitch-match-pill ${m.highPriorityCount > 0 ? "high" : ""}">
+                        ⭐ ${m.opportunityCount} Pitch${m.opportunityCount > 1 ? "es" : ""} Ready
+                      </span>
+                    ` : `
+                      <span class="pitch-match-pill mute">Monitoring Feeds</span>
+                    `}
+                    <button class="pitch-expand-icon-btn" data-toggle-card="${esc(m.id)}" aria-label="Toggle details">
+                      ${isExpanded ? "▲" : "▼"}
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Expanded Workspace (Only shown when this card is clicked) -->
+                ${isExpanded ? `
+                  <div class="pitch-expanded-body">
+                    ${hasPitches && pitch ? `
+                      <!-- Multi-pitch switcher pills if more than 1 pitch -->
+                      ${m.opportunityCount > 1 ? `
+                        <div class="pitch-switcher-bar">
+                          <span class="pitch-switcher-lbl">Available Angles:</span>
+                          ${m.opportunities.map((o, idx) => `
+                            <button class="pitch-switch-pill ${idx === currentIdx ? "active" : ""}" data-switch-mdp="${esc(m.id)}" data-switch-idx="${idx}">
+                              #${idx + 1}: ${esc(o.topic)} (${o.fitScore}% Fit)
+                            </button>
+                          `).join("")}
+                        </div>
+                      ` : ""}
+
+                      <div class="pitch-workspace-card">
+                        <!-- Top Metadata Row -->
+                        <div class="pitch-ws-top">
+                          <div class="pitch-ws-topic-tag" data-opp="${esc(pitch.oppKey)}" title="Click to open full opportunity details &amp; evidence in side panel">
+                            <span class="pitch-ws-dot">●</span> 
+                            <span>Live Topic: <b>${esc(pitch.topic)}</b></span>
+                            <span class="pitch-ws-score">Score ${Math.round(pitch.score || 0)}</span>
+                            <span class="pitch-ws-link-hint">Open Evidence Drawer →</span>
+                          </div>
+                          <div class="pitch-ws-meta-tags">
+                            <span class="fit-score-pill ${pitch.fitScore >= 75 ? "fit-high" : "fit-med"}">${pitch.fitScore}% Fit ⭐</span>
+                            <span class="tag">🎯 ${esc(pitch.targetOutlets.split(",").slice(0, 2).join(", "))}</span>
+                          </div>
+                        </div>
+
+                        <!-- Proposed Headline -->
+                        <div class="pitch-headline-display">
+                          <div class="pitch-headline-lbl">PROPOSED OP-ED HEADLINE</div>
+                          <div class="pitch-headline-quote">"${esc(pitch.headline)}"</div>
+                        </div>
+
+                        <!-- Core Thesis -->
+                        <div class="pitch-thesis-display">
+                          <span class="pitch-thesis-lbl">EDITORIAL THESIS:</span>
+                          <span class="pitch-thesis-body">${esc(pitch.thesis)}</span>
+                        </div>
+
+                        <!-- Boardroom Questions -->
+                        <div class="pitch-boardroom-box">
+                          <div class="pitch-boardroom-lbl">KEY QUESTIONS THIS OP-ED ANSWERS:</div>
+                          <ul class="pitch-questions-list">
+                            ${(pitch.boardroomQuestions || []).slice(0, 3).map((q) => `<li>${esc(q)}</li>`).join("")}
+                          </ul>
+                        </div>
+
+                        <!-- Action Bar (Prominent and Clean) -->
+                        <div class="pitch-ws-actions">
+                          <button class="btn btn-primary" data-opp="${esc(pitch.oppKey)}" title="Open side panel drawer with news stories, volume curves and causal pathways">
+                            📊 Inspect Opportunity &amp; Evidence (Side Panel) →
+                          </button>
+                          <button class="btn ghost" data-memo-mdp="${esc(m.id)}" data-memo-opp="${esc(pitch.oppKey)}">
+                            📋 Copy Pitch Memo
+                          </button>
+                          <span class="pitch-ws-why-text">💡 ${esc(pitch.why)}</span>
+                        </div>
+                      </div>
+                    ` : `
+                      <div class="pitch-empty-clean">
+                        <span>📡 Currently monitoring live feeds for <b>${esc(m.primarySector)}</b> triggers. No high-momentum news cycle currently fits this practice area.</span>
+                      </div>
+                    `}
+                  </div>
+                ` : ""}
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    }
+
+    function renderByOppClean(list) {
+      if (!list.length) {
+        return `
+          <div class="card" style="text-align:center;padding:40px 20px">
+            <h3 style="margin:0 0 6px">No opportunities match current filter</h3>
+            <p class="mute">Try adjusting practice area or search query.</p>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="pitch-opp-clean-list">
+          ${list.map((o) => {
+            const m = o.topMdp;
+            return `
+              <div class="pitch-opp-row" data-opp="${esc(o.oppKey)}">
+                <div class="pitch-opp-main">
+                  <div class="pitch-opp-header-line">
+                    <span class="pitch-tag-practice">🏢 ${esc(o.sector)}</span>
+                    <h3 class="pitch-opp-name" data-opp="${esc(o.oppKey)}">
+                      ${esc(o.topic)}
+                    </h3>
+                    <span class="pitch-ws-score">Score ${Math.round(o.score || 0)}</span>
+                    <span class="tag">${esc(o.stage || "emerging")}</span>
+                  </div>
+
+                  ${m ? `
+                    <div class="pitch-opp-author-line">
+                      <span class="pitch-opp-auth-lbl">Recommended Author:</span>
+                      <span class="pitch-opp-auth-name"><b>${esc(m.mdpName)}</b> (${esc(m.designation)})</span>
+                      <span class="fit-score-pill ${m.fitScore >= 75 ? "fit-high" : "fit-med"}">${m.fitScore}% Fit ⭐</span>
+                    </div>
+                    <div class="pitch-opp-headline-line">
+                      "${esc(m.headline)}"
+                    </div>
+                  ` : `
+                    <div class="mute" style="font-size:12px;margin-top:4px">No author mapped.</div>
+                  `}
+                </div>
+
+                <div class="pitch-opp-actions-col">
+                  <button class="btn sm" data-opp="${esc(o.oppKey)}" title="Open side panel drawer with all evidence, charts and stories">
+                    📊 Inspect Evidence (Side Panel) →
+                  </button>
+                  ${m ? `
+                    <button class="btn sm ghost" data-memo-mdp="${esc(m.mdpId)}" data-memo-opp="${esc(o.oppKey)}">
+                      📋 Copy Memo
+                    </button>
+                  ` : ""}
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    }
+
+    function bindEvents() {
+      // Search
+      const searchEl = $("#pitch-search", el);
+      if (searchEl) {
+        searchEl.oninput = () => {
+          searchQ = searchEl.value;
+          const pos = searchEl.selectionStart;
+          render(); // the page is redrawn, so put the cursor back where the user was typing
+          const again = $("#pitch-search", el);
+          if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch {} }
+        };
+      }
+
+      // Sector select
+      const sectorSel = $("#pitch-sector-sel", el);
+      if (sectorSel) {
+        sectorSel.onchange = () => {
+          selectedSector = sectorSel.value;
+          render();
+        };
+      }
+
+      // Pitches only toggle
+      const toggleOnly = $("#pitch-toggle-only", el);
+      if (toggleOnly) {
+        toggleOnly.onclick = () => {
+          onlyPitches = !onlyPitches;
+          render();
+        };
+      }
+
+      // Reset filters
+      const resetBtn = $("#pitch-reset-filters", el);
+      if (resetBtn) {
+        resetBtn.onclick = () => {
+          searchQ = "";
+          selectedSector = "all";
+          onlyPitches = false;
+          render();
+        };
+      }
+
+      // Toggle Card Expand / Collapse
+      $$("[data-toggle-card]", el).forEach((row) => {
+        row.onclick = (e) => {
+          // If clicked a button inside, let button handler deal with it
+          if (e.target.closest("button") || e.target.closest("[data-opp]") || e.target.closest("[data-memo-mdp]")) return;
+          const id = row.dataset.toggleCard || row.closest("[data-mdpid]")?.dataset.mdpid;
+          if (!id) return;
+          if (expandedMdpIds.has(id)) expandedMdpIds.delete(id);
+          else expandedMdpIds.add(id);
+          render();
+        };
+      });
+
+      $$(".pitch-expand-icon-btn", el).forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.toggleCard || btn.closest("[data-mdpid]")?.dataset.mdpid;
+          if (!id) return;
+          if (expandedMdpIds.has(id)) expandedMdpIds.delete(id);
+          else expandedMdpIds.add(id);
+          render();
+        };
+      });
+
+      // Switch active pitch for an MDP with multiple matches
+      $$("[data-switch-mdp]", el).forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const mdpId = btn.dataset.switchMdp;
+          const idx = parseInt(btn.dataset.switchIdx, 10) || 0;
+          activePitchIdx.set(mdpId, idx);
+          render();
+        };
+      });
+
+      // Inspect Evidence & Open Side Panel Drawer
+      $$("[data-opp]", el).forEach((btn) => {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const oppKey = btn.dataset.opp;
+          if (oppKey) {
+            openOpp(oppKey);
+          }
+        };
+      });
+
+      // Copy Pitch Memo
+      $$("[data-memo-mdp]", el).forEach((btn) => {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const mdpId = btn.dataset.memoMdp;
+          const oppKey = btn.dataset.memoOpp;
+
+          const mdp = mdps.find((m) => m.id === mdpId);
+          if (!mdp) return;
+
+          let oppPitch = (mdp.opportunities || []).find((o) => o.oppKey === oppKey);
+          if (!oppPitch) {
+            const rootOpp = opportunities.find((o) => o.oppKey === oppKey);
+            if (rootOpp && rootOpp.topMdp && rootOpp.topMdp.mdpId === mdpId) {
+              oppPitch = { ...rootOpp.topMdp, ...rootOpp };
+            }
+          }
+          if (!oppPitch) return;
+
+          const memo = [
+            `BCG OP-ED EDITORIAL PITCH MEMO`,
+            `==================================================`,
+            `TARGET AUTHOR:   ${mdp.name} (${mdp.designation})`,
+            `PRACTICE AREA:   ${mdp.primarySector}`,
+            `TARGET OUTLETS:  ${oppPitch.targetOutlets || "Mint, The Economic Times, Financial Express, BCG Henderson Institute"}`,
+            ``,
+            `PROPOSED OP-ED HEADLINE:`,
+            `"${oppPitch.headline}"`,
+            ``,
+            `CORE EDITORIAL THESIS:`,
+            `${oppPitch.thesis}`,
+            ``,
+            `KEY BOARDROOM / C-SUITE QUESTIONS ADDRESSED:`,
+            ...((oppPitch.boardroomQuestions || []).map((q, i) => `${i + 1}. ${q}`)),
+            ``,
+            `WHY THIS AUTHOR & ANGLE:`,
+            `${oppPitch.why}`,
+            ``,
+            `PITCH HOOK FOR EDITORS:`,
+            `${oppPitch.pitchHook}`,
+            ``,
+            `EDITORIAL CONTEXT:`,
+            `- HiveMind Topic: ${oppPitch.topic} (Score: ${Math.round(oppPitch.score || 0)}, Stage: ${oppPitch.stage || "emerging"}, Action: ${oppPitch.action || "investigate"})`,
+            `- Focus Themes: ${(mdp.themes || []).join(", ")}`,
+            `==================================================`,
+            `Generated by HiveMind Editorial Intelligence`
+          ].join("\n");
+
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(memo).then(() => {
+              toast(`Editorial Pitch Memo for ${mdp.name} copied to clipboard!`);
+            }).catch(() => fallbackCopy(memo, mdp.name));
+          } else {
+            fallbackCopy(memo, mdp.name);
+          }
+        };
+      });
+    }
+
+    function fallbackCopy(text, authorName) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        toast(`Editorial Pitch Memo for ${authorName} copied to clipboard!`);
+      } catch {
+        toast("Could not copy memo automatically. Please copy manually.");
+      }
+      document.body.removeChild(ta);
+    }
+
+    render();
+  } catch (err) {
+    el.innerHTML = `<div class="card"><div class="banner bad">Could not load pitch matching view: ${esc(err.message)}</div><button class="btn sm" onclick="location.reload()" style="margin-top:8px">Retry</button></div>`;
+  }
+}
