@@ -36,6 +36,7 @@ import { usageReport } from "./usage.mjs";
 import { writeFileAtomic } from "./atomic.mjs";
 import { createAuth, setSecurityHeaders, resolveClientMetadata, recordActivity, flushActivityQueue, inferAction, isHttps, clientIp } from "./auth.mjs";
 import { getPgPool, initPgSchema } from "./pg.mjs";
+import { checkExportKey, exportIndex, exportPage } from "./export.mjs";
 
 const MAX_BODY = 1_000_000;
 const LIVE_FRESH_MS = 90_000; // a run that hasn't touched the database for this long is treated as stopped
@@ -172,7 +173,8 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // or after a collection when online.analyze is switched on in the config. The daily cap (online.dailyCap) bounds it either way.
   const startOnline = (trigger = "manual", onDone = null) => startJob("online", ["online"], { trigger, onDone: (code) => { if (code === 0) analytics.cache.clear(); onDone?.(code); } });
   const startFulltext = (trigger = "manual", onDone = null) => startJob("fulltext", ["fulltext"], { trigger, onDone });
-  const startSync = (full = false, trigger = "manual", onDone = null) => startJob("sync", ["sync", ...(full ? ["--full"] : [])], { trigger, onDone: (code) => { if (code === 0) { analytics.cache.clear(); matchNow(); } onDone?.(code); } });
+  const syncConfigured = () => !!String(process.env.HIVEMIND_SYNC_KEY || "").trim();
+  const startSync = (full = false, trigger = "manual", onDone = null) => !syncConfigured() ? { code: 400, error: "Sync is not set up on this copy (set HIVEMIND_SYNC_KEY, and HIVEMIND_SYNC_URL if not the default server)." } : startJob("sync", ["sync", ...(full ? ["--full"] : [])], { trigger, onDone: (code) => { if (code === 0) { analytics.cache.clear(); matchNow(); } onDone?.(code); } });
 
   // Automated 8-hour Twitter / X trending sync (India & Worldwide)
   const XTRENDS_SCHEDULE_MS = 8 * 3600e3;
@@ -360,7 +362,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // }
   // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
   const status = () => ({
-    llm, runner: runnerState(), live: liveRun(),
+    llm, runner: runnerState(), live: liveRun(), syncConfigured: syncConfigured(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
     sentiment: { running: jobs.sentiment.running, startedAt: jobs.sentiment.startedAt, labelled: store.sentimentCount(), pending: store.unsentimentedCount() },
     topicMerge: { running: jobs["topic-merge"].running, merged: store.mergedTopicCount() },
@@ -432,7 +434,9 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   timers.push(setInterval(() => { runXTrendsSync("scheduled").catch(() => {}); }, XTRENDS_SCHEDULE_MS));
   // HiveMind live export data polling (every 8 hours when API key is present)
   const EXPORT_SYNC_MS = 8 * 3600e3;
-  if (process.env.HIVEMIND_EXPORT_KEY) {
+  // Only a copy that syncs FROM another server (HIVEMIND_SYNC_KEY set) polls it. The live server itself has only HIVEMIND_EXPORT_KEY
+  // (the key that protects its own /api/export), so it never tries to sync from itself.
+  if (process.env.HIVEMIND_SYNC_KEY) {
     timers.push(setInterval(() => {
       if (!jobs.sync?.running && !anyJobRunning()) {
         startSync(false, "scheduled");
@@ -827,6 +831,24 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
       if (!allowedHosts.has(oh)) return json(res, 403, { error: "Origin not allowed" });
     }
     try {
+      // Data export for other systems: its own secret key (HIVEMIND_EXPORT_KEY), read-only, answered before the website sign-in (see export.mjs).
+      if (p === "/api/export" || p.startsWith("/api/export/")) {
+        if (req.method !== "GET") return json(res, 405, { error: "Read-only: use GET" });
+        const denied = checkExportKey(req);
+        if (denied) return json(res, denied.code, { error: denied.error });
+        if (p === "/api/export" || p === "/api/export/") return json(res, 200, exportIndex(store.db));
+        if (p === "/api/export/brackets") return json(res, 200, readJson(join(root, "data", "brackets-v3.json"), { brackets: seed }));
+        if (p === "/api/export/companies") return json(res, 200, { companies: companies.list() });
+        if (p === "/api/export/xtrends") return json(res, 200, store.getJson("social.xtrends.cache", null) ?? { india: [], worldwide: [], fetchedAt: null });
+        if (p.startsWith("/api/export/views/")) {
+          const r = ROUTES["/api/" + p.slice("/api/export/views/".length)];
+          if (!r) return json(res, 404, { error: "Unknown view. GET /api/export lists them." });
+          const v = r(url, company);
+          return v.error ? json(res, 400, { error: v.error }) : view(req, res, v.method, v.args);
+        }
+        const out = exportPage(store.db, p.slice("/api/export/".length), url.searchParams);
+        return json(res, out.code, out.body);
+      }
       if (authz ? await authz.handle(req, res, url, p) : p === "/login" && req.method === "GET" && (res.writeHead(302, { location: "/" }), res.end(), true)) return; // sign-in gate (see auth.mjs)
 
       // Client isolation: normal users are strictly scoped to their assigned company

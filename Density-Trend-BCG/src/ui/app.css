@@ -228,6 +228,10 @@ svg .grid{stroke:var(--line)}svg .axis{stroke:var(--line2)}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:color-mix(in srgb,var(--ink) 92%,transparent);color:var(--bg);padding:9px 18px;border-radius:99px;z-index:96;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.28)}
 .skel{background:linear-gradient(90deg,var(--line),var(--surface2),var(--line));background-size:200% 100%;animation:sk 1.2s infinite;border-radius:12px;height:80px}
 @keyframes sk{to{background-position:-200% 0}}
+.loadmsg{display:flex;align-items:center;gap:12px;margin:0 0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.loadmsg .spin{flex:none;width:22px;height:22px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--brand,#2563eb);animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.loadmsg .spin{animation-duration:3s}}
 details>summary{cursor:pointer;font-weight:600}
 
 /* ---- toggle switch ---- */

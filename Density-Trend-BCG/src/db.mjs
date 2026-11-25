@@ -808,6 +808,12 @@ export class Store {
   // ---- one-time import of the earlier JSON files ----
   importLegacy(dataDir) {
     if (this.db.prepare("SELECT v FROM meta WHERE k = 'legacy_imported'").get()) return null;
+    // Only an empty database takes the old JSON files. A database that already has stories (collected, imported or synced)
+    // must not get the old sample stories mixed into it.
+    if (this.db.prepare("SELECT 1 FROM stories LIMIT 1").get()) {
+      this.db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('legacy_imported', ?)").run("skipped: database already had stories");
+      return null;
+    }
     const out = { readings: 0, stories: 0 };
     const readJson = (f) => { const p = join(dataDir, f); return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null; };
     const readings = readJson("readings-v3.json"), stories = readJson("stories-v3.json");

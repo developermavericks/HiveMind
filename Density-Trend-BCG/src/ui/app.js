@@ -119,7 +119,19 @@ const evPill = (e) => `<span class="pill p-${e.level}" title="${esc((e.reasons |
 const COMP = { momentum: "Momentum", acceleration: "Acceleration", sourceBreadth: "Independent sources", sectorEvidence: "Sector evidence", triggerTiming: "Trigger timing", headroom: "Editorial headroom" };
 const STAGE_ORDER = ["emerging", "rising", "steady", "crowded", "declining", "watch"];
 const STAGE_NAME = { emerging: "Emerging", rising: "Rising", steady: "Steady", crowded: "Crowded", declining: "Declining", watch: "Watchlist" };
-const loading = () => `<div class="grid g3"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>`;
+// Loader: a spinner, a plain message and a seconds counter, so a slow first load (up to ~20 s while the server calculates) never looks broken.
+const loading = () => `<div class="loadmsg" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span><div><b>Loading…</b><div class="small mute">Calculating the latest numbers. The first load after an update can take up to 20 seconds. <span class="loadsecs"></span></div></div></div><div class="grid g3"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>`;
+let loadTick = null;
+function startLoadTimer() {
+  clearInterval(loadTick);
+  const t0 = Date.now();
+  loadTick = setInterval(() => {
+    const els = document.querySelectorAll(".loadsecs");
+    if (!els.length) { clearInterval(loadTick); return; }
+    const s = Math.round((Date.now() - t0) / 1000);
+    els.forEach((e) => { e.textContent = s >= 2 ? `(${s} s)` : ""; });
+  }, 1000);
+}
 const banner = (kind, html) => `<div class="banner ${kind}"><span>${kind === "bad" ? "⚠" : kind === "warn" ? "⚠" : "ⓘ"}</span><div>${html}</div></div>`;
 const stack = (comp) => `<div class="stack">${Object.entries(comp).map(([k, c]) => `<i class="c-${k}" style="width:${c.points}%" title="${COMP[k]}: ${c.points.toFixed(1)} pts"></i>`).join("")}</div>`;
 const stackLegend = () => `<div class="legend">${Object.keys(COMP).map((k) => `<span><i class="c-${k}"></i>${COMP[k]}${typeof info === "function" ? info("c_" + k) : ""}</span>`).join("")}</div>`;
@@ -206,6 +218,7 @@ function renderProgress(st) {
 }
 
 function renderTop() {
+  showSyncBox();
   const st = S.status, p = PAGES[S.page], tab = curTab();
   const isAdm = typeof isAdmin === "function" && isAdmin();
   const assignedCo = S.me?.company ? S.me.company.toUpperCase() : "BCG";
@@ -308,7 +321,7 @@ async function render() {
   renderTop();
   const el = $("#page"), page = S.page;
   const tab = curTab(), fn = tab ? tab.fn : PAGES[page].fn, sig = `${page}/${S.tab ?? ""}/${S.date ?? "live"}`;
-  if (el.dataset.page !== sig) { el.innerHTML = loading(); el.dataset.page = sig; }
+  if (el.dataset.page !== sig) { el.innerHTML = loading(); el.dataset.page = sig; startLoadTimer(); }
   try { await fn(el); } catch (e) { if (S.page === page) el.innerHTML = banner("bad", `<b>Could not load this page.</b> ${esc(e.message)}`); }
 }
 
@@ -892,6 +905,8 @@ function bindRunPanel() {
   };
 }
 async function loadStatusOnce() { S.status = await api("/api/status"); renderTop(); }
+// The sync buttons only appear on a copy that is set up to sync from another server (never on the live server itself).
+function showSyncBox() { const b = document.getElementById("rsyncbox"); if (b) b.style.display = S.status?.syncConfigured ? "" : "none"; }
 
 // ---------------------------------------------------------------- boot
 function init() {
