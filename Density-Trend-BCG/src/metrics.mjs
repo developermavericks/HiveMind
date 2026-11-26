@@ -304,6 +304,19 @@ export function holtDamped(y, { alpha, beta, phi, z }, h) {
   return { points: out, sigma };
 }
 
+// The index over ALL stories is the same for every topic of one data version (same items, granularity and time), so it is built once and
+// shared: every topic page and chart used to rebuild it over ~90,000 stories, which made preparing the pages after each collection take ~30 min.
+// Kept per items array (a WeakMap, so it goes away with the old data); nothing below changes the shared index.
+const INDEX_MEMO = new WeakMap();
+function sharedIndex(items, ctx, asOf, opts) {
+  let entry = INDEX_MEMO.get(items);
+  if (!entry || entry.ctx !== ctx || entry.asOf !== asOf) { entry = { ctx, asOf, byGran: new Map() }; INDEX_MEMO.set(items, entry); }
+  const k = `${opts.kind}|${opts.binMs}|${opts.end}|${opts.nBins}`;
+  let idx = entry.byGran.get(k);
+  if (!idx) { idx = buildIndex(items, opts); entry.byGran.set(k, idx); }
+  return idx;
+}
+
 export function seriesFor(items, key, gran, ctx, asOf) {
   const cfg = { ...ctx.cfg, _asOf: asOf }, iv = cfg.intervals;
   const binMs = gran === "day" ? DAY_MS : HOUR;
@@ -311,7 +324,7 @@ export function seriesFor(items, key, gran, ctx, asOf) {
   const end = gran === "day" ? dayStart(dayOf(asOf)) + DAY_MS : floorHour(asOf) + HOUR;
   const span = Number.isFinite(firstObs) ? Math.ceil((end - firstObs) / binMs) : 1;
   const nBins = gran === "day" ? clamp(span, 2, iv.dayView) : clamp(span, 24, iv.hourView);
-  const idx = buildIndex(items, { binMs, end, nBins, cfg, kind: gran === "day" ? "day" : "hour", elig: ctx.elig });
+  const idx = sharedIndex(items, ctx, asOf, { binMs, end, nBins, cfg, kind: gran === "day" ? "day" : "hour", elig: ctx.elig });
   const L = idx.labels.get(key);
   const tot = L?.total ?? idx.total;
   const zeros = new Array(nBins).fill(0);
