@@ -28,8 +28,7 @@ import { extractArticleText } from "./gnews.mjs";
 import { detectSystem, detectOllama, machineId } from "./system.mjs";
 import { buildQuery, fetchCounts, socialStats } from "./social.mjs";
 import { refreshIndiaTrends, getIndiaTrends, getTrends, refreshTrends, matchOpportunityTrend } from "./xtrends.mjs";
-// JOURNALISTS DISABLED for now: the directory, its sync, matching and API are commented out. Re-enable by removing the comment markers.
-// import { syncJournalists, DEFAULT_URL as JOURNALISTS_URL } from "./journalists.mjs";
+import { syncJournalists, DEFAULT_URL as JOURNALISTS_URL } from "./journalists.mjs";
 import { refreshHot } from "./hot.mjs";
 import { dedupePass } from "./quality.mjs";
 import { usageReport } from "./usage.mjs";
@@ -385,20 +384,20 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     return run && !run.finishedAt && Date.now() - run.updatedAt < LIVE_FRESH_MS ? { done: run.done, total: run.total, date: run.targetDate } : null;
   };
   let closed = false; // set when the server shuts down, so background work stops instead of writing to a closed database
-  // // Journalist directory: pulled from the external endpoint into the local database (resumable; one sync at a time).
-  // const journalistsUrl = () => process.env.JOURNALISTS_API_URL || JOURNALISTS_URL;
-  // const jsync = { running: false, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: 0, finishedAt: 0 };
-  // async function startJournalistSync(trigger = "manual") {
-  //   if (jsync.running) return false;
-  //   Object.assign(jsync, { running: true, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: Date.now() });
-  //   const logId = store.startJob({ kind: "journalists", trigger, summary: "" });
-  //   syncJournalists(store, { url: journalistsUrl(), onProgress: (p) => { if (closed) throw new Error("server closed"); Object.assign(jsync, p); } })
-  //     .then((r) => { if (closed) return; log(`journalist directory synced: ${r.total} records`); integrations.recordEvent("journalists", { ok: true, detail: `${r.total} records` }); store.finishJob(logId, { status: "ok", summary: `Directory synced: ${r.total} journalists`, stats: { total: r.total } }); })
-  //     .catch((e) => { if (closed) return; jsync.error = e.message; log(`journalist sync failed: ${e.message}`); integrations.recordEvent("journalists", { ok: false, error: e.message }); try { store.finishJob(logId, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } })
-  //     .finally(() => { jsync.running = false; jsync.finishedAt = Date.now(); });
-  //   return true;
-  // }
-  // const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
+  // Journalist directory: pulled from the external endpoint into the local database (resumable; one sync at a time).
+  const journalistsUrl = () => process.env.JOURNALISTS_API_URL || JOURNALISTS_URL;
+  const jsync = { running: false, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: 0, finishedAt: 0 };
+  async function startJournalistSync(trigger = "manual") {
+    if (jsync.running) return false;
+    Object.assign(jsync, { running: true, page: 0, pages: null, saved: 0, total: null, error: null, startedAt: Date.now() });
+    const logId = store.startJob({ kind: "journalists", trigger, summary: "" });
+    syncJournalists(store, { url: journalistsUrl(), onProgress: (p) => { if (closed) throw new Error("server closed"); Object.assign(jsync, p); } })
+      .then((r) => { if (closed) return; log(`journalist directory synced: ${r.total} records`); integrations.recordEvent("journalists", { ok: true, detail: `${r.total} records` }); store.finishJob(logId, { status: "ok", summary: `Directory synced: ${r.total} journalists`, stats: { total: r.total } }); })
+      .catch((e) => { if (closed) return; jsync.error = e.message; log(`journalist sync failed: ${e.message}`); integrations.recordEvent("journalists", { ok: false, error: e.message }); try { store.finishJob(logId, { status: "failed", summary: e.message, error: e.message }); } catch { /* closing */ } })
+      .finally(() => { jsync.running = false; jsync.finishedAt = Date.now(); });
+    return true;
+  }
+  const journalistStatus = () => ({ count: store.journalistCount(), lastSync: +store.getMeta("journalists.lastSync", 0) || null, url: journalistsUrl(), ...jsync });
   const status = (n = statusCounts()) => ({
     llm, runner: runnerState(), live: liveRun(), syncConfigured: syncConfigured(),
     jobs: Object.fromEntries(Object.entries(jobs).map(([k, j]) => [k, { running: j.running, startedAt: j.startedAt, lastExit: j.lastExit, lastMessage: j.lastMessage }])),
@@ -412,7 +411,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
     companies: companies.list().map((c) => ({ id: c.id, name: c.name, builtin: !!c.builtin, sectors: c.sectors.length, matched: Object.keys(c.matches).length })),
     dates: n.dates, recommendations: n.recommendations,
     integrations: integrations.status({ ollama: { reachable: reader.chain.includes("ollama") }, journalists: { count: store.journalistCount() } }),
-    // journalists: journalistStatus(), // JOURNALISTS DISABLED
+    journalists: journalistStatus(),
     provider: reader.provider, noClaude: reader.noClaude, models: { groq: reader.groqOk ? reader.groqModel : null, openai: reader.openaiOk ? reader.openaiModel : null },
     chain: reader.chain,
     fallbackActive: reader.fallbackActive,
@@ -1271,21 +1270,109 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         return json(res, 200, { ...store.ocrSearch({ q: g("q", 80), source: g("source", 40), kind: g("kind", 10) || "authored", matched: g("matched", 1), limit: lim, offset: Math.max(0, +url.searchParams.get("offset") || 0), company }), facets: url.searchParams.get("facets") === "1" ? store.ocrFacets() : undefined });
       }
 
-      // // ---- journalist directory ----
-      // if (req.method === "GET" && p === "/api/journalists/status") return json(res, 200, journalistStatus());
-      // if (req.method === "POST" && p === "/api/journalists/sync") {
-      //   if (!needJson(req, res)) return;
-      //   return (await startJournalistSync()) ? json(res, 200, { ok: true }) : json(res, 409, { error: "A sync is already running." });
-      // }
-      // if (req.method === "GET" && p === "/api/journalists") {
-      //   const lim = Math.min(200, Math.max(1, +url.searchParams.get("limit") || 50));
-      //   const r = store.searchJournalists({ q: (url.searchParams.get("q") || "").slice(0, 80), beat: (url.searchParams.get("beat") || "").slice(0, 60), publication: (url.searchParams.get("publication") || "").slice(0, 80), limit: lim, offset: Math.max(0, +url.searchParams.get("offset") || 0) });
-      //   return json(res, 200, { ...r, facets: url.searchParams.get("facets") === "1" ? store.journalistFacets() : undefined });
-      // }
-      // if (req.method === "GET" && p === "/api/journalists/matches") {
-      //   const r = analytics.journalistMatches({ oppKey: String(url.searchParams.get("opp") || ""), company, date: dayParam(url), limit: Math.min(20, +url.searchParams.get("limit") || 8) });
-      //   return json(res, r.error ? 404 : 200, r);
-      // }
+      // ---- journalist directory & topic intelligence ----
+      if (req.method === "GET" && p === "/api/journalists/status") return json(res, 200, journalistStatus());
+      if (req.method === "POST" && p === "/api/journalists/sync") {
+        if (!needJson(req, res)) return;
+        return (await startJournalistSync()) ? json(res, 200, { ok: true }) : json(res, 409, { error: "A sync is already running." });
+      }
+      if (req.method === "GET" && p === "/api/journalists") {
+        const lim = Math.min(200, Math.max(1, +url.searchParams.get("limit") || 50));
+        const r = store.searchJournalists({
+          q: (url.searchParams.get("q") || "").slice(0, 80),
+          topic: (url.searchParams.get("topic") || "").slice(0, 80),
+          beat: (url.searchParams.get("beat") || "").slice(0, 60),
+          publication: (url.searchParams.get("publication") || "").slice(0, 80),
+          limit: lim,
+          offset: Math.max(0, +url.searchParams.get("offset") || 0)
+        });
+        return json(res, 200, { ...r, facets: url.searchParams.get("facets") === "1" ? store.journalistFacets() : undefined });
+      }
+      if (req.method === "GET" && p === "/api/journalists/matches") {
+        const r = analytics.journalistMatches({ oppKey: String(url.searchParams.get("opp") || ""), company, date: dayParam(url), limit: Math.min(20, +url.searchParams.get("limit") || 8) });
+        return json(res, r.error ? 404 : 200, r);
+      }
+
+      // ---- custom topic mappings (admin) ----
+      if (p === "/api/admin/topic-mapping") {
+        if (req.method === "GET") {
+          return json(res, 200, { mappings: store.listCustomTopicMappings() });
+        }
+        if (req.method === "POST") {
+          if (!needJson(req, res)) return;
+          const body = JSON.parse(await readBody(req) || "{}");
+          if (!body.topicName || !String(body.topicName).trim()) return json(res, 400, { error: "Topic name is required." });
+          const saved = store.putCustomTopicMapping(body);
+          cache.clear();
+          return json(res, 200, { ok: true, mapping: saved });
+        }
+        if (req.method === "DELETE") {
+          const id = url.searchParams.get("id");
+          if (!id) return json(res, 400, { error: "Mapping ID required." });
+          store.deleteCustomTopicMapping(id);
+          cache.clear();
+          return json(res, 200, { ok: true });
+        }
+      }
+
+      // ---- client custom priorities ----
+      if (p.startsWith("/api/companies/") && p.endsWith("/priorities")) {
+        const parts = p.split("/");
+        const coId = parts[3];
+        if (req.method === "GET") {
+          return json(res, 200, store.getClientPriorities(coId));
+        }
+        if (req.method === "POST") {
+          if (!needJson(req, res)) return;
+          const body = JSON.parse(await readBody(req) || "{}");
+          const saved = store.setClientPriorities(coId, body);
+          cache.clear();
+          return json(res, 200, { ok: true, priorities: saved });
+        }
+      }
+
+      // ---- manual op-ed submission (admin) ----
+      if (req.method === "POST" && p === "/api/admin/authored/manual") {
+        if (!needJson(req, res)) return;
+        const body = JSON.parse(await readBody(req) || "{}");
+        if (!body.headline || !String(body.headline).trim()) return json(res, 400, { error: "Headline is required." });
+        if (!body.author || !String(body.author).trim()) return json(res, 400, { error: "Author name is required." });
+        const saved = store.addManualAuthoredArticle(body);
+        cache.clear();
+        return json(res, 200, { ok: true, article: saved });
+      }
+
+      // ---- AI overview & quick brief for trends and topics tab ----
+      if (req.method === "GET" && p === "/api/topic/ai-brief") {
+        const key = labelKey(url.searchParams.get("key"));
+        if (!key) return json(res, 400, { error: "Bad topic key" });
+        const top = analytics.topic({ key, company, date: dayParam(url) });
+        if (top.error) return json(res, 404, top);
+        const name = top.row?.name || key;
+        const stories = (top.stories || []).slice(0, 5);
+        const tracking = top.storyTracking || {};
+        const sent = top.sentiment?.recent || { pos: 0, neg: 0, neu: 0 };
+        const sentTotal = sent.pos + sent.neg + sent.neu;
+        const toneDesc = sentTotal > 0
+          ? (sent.neg > sent.pos ? `Predominantly adverse tone (${Math.round((sent.neg / sentTotal) * 100)}% negative coverage)` : sent.pos > sent.neg ? `Constructive tone (${Math.round((sent.pos / sentTotal) * 100)}% positive sentiment)` : "Balanced / neutral sentiment across media")
+          : "Neutral coverage profile";
+        const growthDesc = tracking.growth24h != null ? (tracking.growth24h > 0 ? `+${tracking.growth24h}% volume surge in last 24h` : `${tracking.growth24h}% velocity`) : "Steady reporting cadence";
+        const narrative = stories.length
+          ? `Media attention is anchored around "${stories[0].title}". Reporting spans ${tracking.outletsCount || stories.length} major outlets, highlighting ${top.geoBreakdown?.[0]?.name || "national"} developments.`
+          : `Emerging theme with initial coverage across financial and trade press.`;
+        const editorialAngle = top.opportunities?.[0]?.angle || `Address structural impacts of ${name} and offer boardroom recommendations before public discourse saturates.`;
+        return json(res, 200, {
+          key,
+          topic: name,
+          asOf: top.asOf,
+          narrative,
+          velocity: `${growthDesc} · ${top.row ? `×${top.row.ratio.toFixed(2)} momentum (${top.row.stage})` : "Active"}`,
+          sentimentTone: toneDesc,
+          editorialAngle,
+          keyDrivers: stories.map((s) => ({ title: s.title, url: s.url, outlets: s.outlets, primary: s.primary })),
+          topOutlets: tracking.topOutlets || [],
+        });
+      }
 
       // ---- search interest (separate signal) ----
       if (req.method === "POST" && p === "/api/search-interest") {

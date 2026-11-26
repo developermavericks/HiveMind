@@ -18,7 +18,9 @@ async function pgMomentum(el) {
   el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="ctl">${levelSeg()}
     <div class="seg" id="gseg"><button data-g="hour" class="${S.gran === "hour" ? "on" : ""}">Hourly</button><button data-g="day" class="${S.gran === "day" ? "on" : ""}">Daily</button></div>
     <label>Topic <select id="tsel" style="max-width:340px">${rows.map((r) => `<option value="${esc(r.key)}"${r.key === S.sel ? " selected" : ""}>${esc(r.name)} · ${x2(r.ratio)} · ${r.stage === "watch" ? "watchlist" : r.stage}</option>`).join("")}</select></label>
-    <span class="mute small">As of ${dt(L.asOf)} · recent window ${L.params.recentHours}h vs ${L.history.baselineHours}h baseline</span></div></div>
+    ${typeof isAdmin === "function" && isAdmin() ? '<button class="btn sm ghost" id="btn-custom-topic-map" style="display:inline-flex;align-items:center;gap:5px;margin-left:auto" title="Custom mapping for important topics in case the app misses it">⚙️ Custom Topic Mapping</button>' : ''}
+    <span class="mute small" style="${typeof isAdmin === "function" && isAdmin() ? "" : "margin-left:auto"}">As of ${dt(L.asOf)} · recent window ${L.params.recentHours}h vs ${L.history.baselineHours}h baseline</span></div></div>
+  <div id="maioverview" class="card" style="margin-bottom:16px;background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(59,130,246,0.05));border:1.5px solid rgba(99,102,241,0.22);border-radius:8px;padding:16px 18px"></div>
   <div class="grid g-8-4">
     <div class="card">
       <div class="sec-h" style="margin:0 0 8px">
@@ -121,11 +123,70 @@ async function pgMomentum(el) {
   $("#mrule").innerHTML = `<b>Stage rule:</b> ${esc(cur.stageRule)}`;
   $("#mkpi").innerHTML = [["Coverage share", pct(cur.share), `baseline ${pct(cur.baseShare)}`], ["Momentum", x2(cur.ratio), `previous step ${x2(cur.ratioPrev)}`], ["Acceleration", cur.accel == null ? "–" : (cur.accel >= 0 ? "+" : "") + cur.accel.toFixed(2), "Δ log₂ momentum"], ["Coverage volume", cur.count, `of ${n0(cur.total)} stories in ${cur.windowHours}h`], ["Independent origins", cur.originsRecent, `${cur.originsTotal} over the whole window`], ["Impact breadth", cur.areaCount, (cur.areas || []).slice(0, 3).join(", ") || "impact areas"]].map(([l, v, s]) => `<div class="compo" style="grid-template-columns:150px 1fr"><span>${lbl(l, { ...DRAWER_TIP, "Coverage volume": "stories" }[l])}</span><span><b class="num">${l === "Independent origins" ? originsLink(v, cur.key, cur.name) : v}</b> <span class="mute tiny">${esc(s)}</span></span></div>`).join("");
 
+  if ($("#btn-custom-topic-map")) $("#btn-custom-topic-map").onclick = () => showCustomTopicMapModal();
+
   const sels = [S.sel, ...S.compare];
   const [ser, top] = await Promise.all([
     api(`/api/series?keys=${sels.map(encodeURIComponent).join(",")}&gran=${S.gran}${S.date ? `&date=${S.date}` : ""}`),
     api(`/api/topic?${qs(`&key=${encodeURIComponent(S.sel)}`)}`),
   ]);
+
+  const renderAiOverview = (topData) => {
+    const elOverview = $("#maioverview");
+    if (!elOverview) return;
+    const tracking = topData?.storyTracking || {};
+    const sent = topData?.sentiment?.recent || { pos: 0, neg: 0, neu: 0 };
+    const sentTotal = sent.pos + sent.neg + sent.neu;
+    const isAdverse = sent.neg > sent.pos && (sent.neg / Math.max(1, sentTotal)) >= 0.35;
+    const toneText = sentTotal > 0
+      ? (isAdverse ? `Adverse tone (${Math.round((sent.neg / sentTotal) * 100)}% negative)` : sent.pos > sent.neg ? `Positive tone (${Math.round((sent.pos / sentTotal) * 100)}% positive)` : "Balanced tone")
+      : "Balanced media tone";
+    const topStory = (topData?.stories || [])[0];
+    const narrativeText = topStory
+      ? `Active reporting centers on "<b>${esc(topStory.title)}</b>". Media coverage spans ${tracking.outletsCount || "major"} national newsrooms and trade publications.`
+      : `Recurring strategic theme in Indian media with consistent news density.`;
+    const angleText = topData?.opportunities?.[0]?.angle || `Assess near-term impacts of ${esc(cur?.name || "this topic")} and publish authoritative op-ed commentary before topic saturation.`;
+    const growth = tracking.growth24h != null ? (tracking.growth24h > 0 ? `+${tracking.growth24h}% 24h volume` : `${tracking.growth24h}%`) : "Stable cadence";
+    const ratioStr = cur?.ratio != null ? `×${cur.ratio.toFixed(2)}` : (cur?.ratioPrev != null ? `×${cur.ratioPrev.toFixed(2)}` : "–");
+
+    elOverview.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="pill" style="background:#4f46e5;color:#fff;font-weight:700;font-size:11px;letter-spacing:.03em;padding:4px 10px">✨ AI OVERVIEW &amp; QUICK BRIEF</span>
+          <span class="small b" style="color:var(--ink)">${esc(cur?.name || "")}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn sm ghost" id="btn-copy-brief" style="font-size:11px;padding:3px 8px">📋 Copy Brief</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;background:var(--surface);padding:14px 16px;border-radius:6px;border:1px solid rgba(99,102,241,0.18)">
+        <div>
+          <div class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Media Narrative &amp; Trigger</div>
+          <div class="small" style="line-height:1.45">${narrativeText}</div>
+        </div>
+        <div>
+          <div class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Velocity &amp; Trend</div>
+          <div class="small" style="line-height:1.45"><b>${growth}</b> · ${ratioStr} momentum (${cur?.stage || "emerging"}) across ${tracking.outletsCount || "multiple"} outlets with ${cur?.originsRecent || 0} independent origins.</div>
+        </div>
+        <div>
+          <div class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Coverage Tone</div>
+          <div class="small" style="line-height:1.45"><span class="tag" style="background:${isAdverse ? "rgba(242,54,69,0.15);color:#b71c1c;font-weight:700" : "rgba(8,153,129,0.15);color:#089981;font-weight:700"}">${toneText}</span></div>
+        </div>
+        <div>
+          <div class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Boardroom / Editorial Angle</div>
+          <div class="small" style="line-height:1.45">${esc(angleText)}</div>
+        </div>
+      </div>
+    `;
+    const btnCopy = $("#btn-copy-brief");
+    if (btnCopy) {
+      btnCopy.onclick = () => {
+        const text = `AI BRIEF: ${cur?.name || ""}\n\nNarrative: ${topStory ? topStory.title : cur?.name || ""}\nVelocity: ${ratioStr} momentum (${cur?.stage || "emerging"}) · ${growth}\nTone: ${toneText}\nStrategic Angle: ${angleText}`;
+        navigator.clipboard?.writeText(text).then(() => toast("AI brief copied to clipboard!")).catch(() => toast("Brief ready to copy"));
+      };
+    }
+  };
+  if (top) renderAiOverview(top);
   const main = ser?.series?.[S.sel], cmps = [...S.compare].map((k) => ({ name: ser?.series?.[k]?.name ?? k, s: ser?.series?.[k] })).filter((c) => c.s);
   // No chart data for this topic (not enough stories in the window yet): say so instead of an error screen.
   if (!main) {
@@ -720,8 +781,10 @@ async function pgAuthored(el) {
   '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><div class="ctl"><input type="text" id="aq" placeholder="Search headline, writer or text…" value="' + esc(f.q) + '" style="max-width:320px">' +
   '<label>Paper <select id="asrc"><option value="">All</option>' + st.sources.map((x) => '<option value="' + esc(x.source) + '"' + (x.source === f.source ? " selected" : "") + '>' + esc(x.source) + ' (' + (x.authored || 0) + ')</option>').join("") + '</select></label>' +
   '<label>Kind <select id="akind">' + [["authored", "Opinion + analysis"], ["opinion", "Opinion only"], ["analysis", "Analysis only"], ["news", "Reported news (for checking)"]].map(([k, t]) => '<option value="' + k + '"' + (k === f.kind ? " selected" : "") + '>' + t + '</option>').join("") + '</select></label>' +
-  '<label>Angle <select id="amatch">' + [["", "Any"], ["1", "Takes up a suggested angle"], ["0", "No current angle"]].map(([k, t]) => '<option value="' + k + '"' + (k === f.matched ? " selected" : "") + '>' + t + '</option>').join("") + '</select></label>' +
-  '<span class="mute small">' + n0(L.total) + ' match</span></div></div>' +
+  '<label>Angle <select id="amatch">' + [["", "Any"], ["1", "Takes up a suggested angle"], ["0", "No current angle"]].map(([k, t]) => '<option value="' + k + '"' + (k === f.kind ? " selected" : "") + '>' + t + '</option>').join("") + '</select></label>' +
+  '<span class="mute small">' + n0(L.total) + ' match</span>' +
+  (typeof isAdmin === "function" && isAdmin() ? '<button class="btn sm" id="btn-add-authored" style="margin-left:auto;background:var(--brand);color:#fff">+ Add Op-Ed Manually</button>' : '') +
+  '</div></div>' +
   '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Piece</th><th>Writer</th><th>Paper</th><th>Date</th><th>Kind</th><th>Suggested angle it takes up</th></tr></thead><tbody>' +
   (L.rows.map((a) => '<tr class="click" data-a="' + esc(a.id) + '"><td style="max-width:380px"><span class="b">' + esc(a.headline) + '</span>' + titleTag(a) + (a.page ? '<div class="tiny mute">page ' + a.page + '</div>' : "") + '</td><td class="small" style="min-width:130px">' + (a.author ? '<b>' + esc(a.author) + '</b>' : '<span class="mute" title="No writer is printed: an unsigned editorial or a desk-written piece">unsigned</span>') + '</td><td class="small">' + esc(a.source) + '</td><td class="small">' + esc(a.date) + '</td><td>' + kindPill(a.kind) + '</td><td class="small" style="max-width:380px">' +
       (a.matches.length ? a.matches.slice(0, 2).map((m) => '<div><b>' + esc(m.sector) + '</b>: ' + esc(clip(m.angle || "", 120)) + ' <span class="mute tiny">fit ' + Number(m.fit).toFixed(2) + '</span></div>').join("") : '<span class="mute">none</span>') + '</td></tr>' +
@@ -737,50 +800,346 @@ async function pgAuthored(el) {
   $("#amatch").onchange = (e) => { f.matched = e.target.value; again(); };
   $("#aprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
   $("#anext").onclick = () => { f.offset += PER; render(); };
+  if ($("#btn-add-authored")) $("#btn-add-authored").onclick = () => showManualOpEdModal();
   $$("tr[data-a]", el).forEach((r) => (r.onclick = () => { const d = document.getElementById(domId(r.dataset.a)); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
 }
 
-// JOURNALISTS DISABLED (kept for later): the journalist directory page that this replaced.
-// async function pgJournalists(el) {
-//   const f = (S.jf ??= { q: "", beat: "", publication: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
-//   const [st, L, B] = await Promise.all([
-//     api("/api/journalists/status"),
-//     api("/api/journalists?facets=1&limit=" + PER + "&offset=" + f.offset + "&q=" + enc(f.q) + "&beat=" + enc(f.beat) + "&publication=" + enc(f.publication)),
-//     api("/api/briefs"),
-//   ]);
-//   const fc = L.facets, cov = fc.coverage, total = st.count || 1, bs = B.stats;
-//   const decided = (bs.approved || 0) + (bs.rejected || 0) + (bs.needs_evidence || 0);
-//   const pg = (st.pages && st.page ? Math.min(100, Math.round((100 * st.page) / st.pages)) : 0);
-//   const pc = (n) => Math.round((100 * n) / total) + "%";
-//   el.innerHTML = banner("info", "<b>How matching works.</b> Journalists come from the directory endpoint and are stored on this machine only. An opportunity is matched using only what each record states: declared beat, outlet, location and recent articles. Contact details are shown to you but never sent to the AI model, and nothing is ever sent to a journalist: outreach is a human decision.") +
-//   '<div class="kpis"><div class="kpi"><div class="v num">' + n0(st.count) + '</div><div class="l">Journalists in directory</div><div class="s">' + (st.lastSync ? "synced " + ago(st.lastSync) : "not synced yet") + '</div></div>' +
-//   '<div class="kpi"><div class="v num">' + pc(cov.beat) + '</div><div class="l">With a declared beat</div><div class="s">' + pc(cov.articles) + ' have recent articles</div></div>' +
-//   '<div class="kpi"><div class="v num">' + pc(cov.email) + '</div><div class="l">With an email</div><div class="s">' + pc(cov.linkedin) + ' LinkedIn · ' + pc(cov.phone) + ' phone</div></div>' +
-//   '<div class="kpi"><div class="v num">' + (bs.pending || 0) + '</div><div class="l">Briefs awaiting an editor</div><div class="s">' + (bs.approved || 0) + ' approved · ' + decided + ' decided</div></div></div>' +
-//   '<section class="card" style="margin-bottom:16px"><div class="sec-h" style="margin:0"><div><h3>Directory sync</h3><p class="hint" style="margin:0">Source: <span class="code">' + esc(clip(st.url, 70)) + '</span>. Records are saved page by page; a failed sync keeps what it already stored.</p></div><button class="btn sm" id="jsync"' + (st.running ? " disabled" : "") + '>' + (st.running ? "Syncing…" : "Sync now") + '</button></div>' +
-//   (st.running ? '<div class="bar" style="margin-top:10px"><i style="width:' + pg + '%"></i></div><p class="small mute" style="margin:6px 0 0">Page ' + st.page + (st.pages ? " of " + st.pages : "") + ' · ' + n0(st.saved) + ' of ' + n0(st.total) + ' records saved</p>' : "") +
-//   (st.error ? '<p class="small" style="color:var(--bad);margin:8px 0 0">Last sync failed: ' + esc(st.error) + '</p>' : "") + '</section>' +
-//   '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><div class="ctl"><input type="text" id="jq" placeholder="Search name, outlet, beat, city or article title…" value="' + esc(f.q) + '" style="max-width:320px">' +
-//   '<label>Beat <select id="jbeat"><option value="">All</option>' + fc.beats.map((b) => '<option value="' + esc(b.v) + '"' + (b.v === f.beat ? " selected" : "") + '>' + esc(b.v) + ' (' + b.n + ')</option>').join("") + '</select></label>' +
-//   '<label>Outlet <select id="jpub"><option value="">All</option>' + fc.publications.map((p) => '<option value="' + esc(p.v) + '"' + (p.v === f.publication ? " selected" : "") + '>' + esc(clip(p.v, 34)) + ' (' + p.n + ')</option>').join("") + '</select></label>' +
-//   '<span class="mute small">' + n0(L.total) + ' match</span></div></div>' +
-//   '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Journalist</th><th>Outlet</th><th>Beat</th><th>Location</th><th class="r">Articles</th><th>Contact</th></tr></thead><tbody>' +
-//   (L.rows.map((j) => '<tr class="click" data-j="' + esc(j.id) + '"><td><span class="b">' + esc(j.name) + '</span><div class="tiny mute">' + esc(j.designation) + '</div></td><td class="small">' + esc(j.publication) + '</td><td class="small" style="max-width:260px">' + (esc(j.beat) || '<span class="mute">not declared</span>') + '</td><td class="small">' + esc([j.city, j.state].filter(Boolean).join(", ")) + '</td><td class="r num">' + j.articles.length + '</td><td class="tiny">' + contactLinks({ email: j.email, linkedin: j.linkedin, profile: j.profileUrl, phone: "" }) + '</td></tr>' +
-//     '<tr class="jd" id="jd-' + esc(j.id) + '" style="display:none"><td colspan="6" style="background:var(--surface2)">' + (j.articles.length ? j.articles.map((a) => '<div class="story"><a class="h" href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.title) + '</a> <span class="mute tiny">' + esc((a.publishDate || "").slice(0, 10)) + (a.website ? " · " + esc(a.website) : "") + '</span>' + (a.summary ? '<div class="small mute">' + esc(a.summary) + '</div>' : "") + '</div>').join("") : '<span class="mute small">No recent articles on record.</span>') + (j.phone ? '<div class="tiny mute" style="margin-top:6px">Phone: ' + esc(j.phone) + '</div>' : "") + '</td></tr>').join("") || '<tr><td colspan="6" class="mute">' + (st.count ? "No journalist matches these filters." : "The directory is empty. Press Sync now.") + '</td></tr>') +
-//   '</tbody></table></div><div class="ctl" style="padding:10px 16px;justify-content:space-between;border-top:1px solid var(--line)"><span class="small mute">Showing ' + (L.total ? f.offset + 1 : 0) + '–' + Math.min(L.total, f.offset + PER) + ' of ' + n0(L.total) + '</span><span><button class="btn ghost sm" id="jprev"' + (f.offset <= 0 ? " disabled" : "") + '>Previous</button> <button class="btn ghost sm" id="jnext"' + (f.offset + PER >= L.total ? " disabled" : "") + '>Next</button></span></div></div>' +
-//   '<section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Pitch brief queue</h3><p class="hint">Open an opportunity to see its best-fit journalists and draft a brief. Every brief waits for an editor decision.</p></div><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Drafted</th><th>Opportunity</th><th>Headline</th><th>Pitch to</th><th>Status</th></tr></thead><tbody>' +
-//   (B.briefs.map((b) => '<tr><td class="small">' + dt(b.createdAt) + '</td><td class="small">' + esc(b.sector) + ' × ' + esc(b.topic) + '</td><td class="b" style="max-width:340px">' + esc(b.brief.headline) + '</td><td class="small">' + esc(b.brief.generatedFor?.recipient?.name ?? "—") + '</td><td>' + statusPill(b.status) + '</td></tr>').join("") || '<tr><td colspan="5" class="mute">No briefs yet.</td></tr>') + '</tbody></table></div></section>';
+// ---------------------------------------------------------------- Manual Op-Ed Modal (Admin)
+async function showManualOpEdModal() {
+  const modalHtml = `
+    <div class="modal-bg" id="oped-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+      <div class="card" style="width:100%;max-width:580px;background:var(--surface);box-shadow:0 12px 36px rgba(0,0,0,0.3);border-radius:8px;padding:22px;max-height:92vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div>
+            <h3 style="margin:0;font-size:17px">✍️ Add Op-Ed / Authored Article Manually</h3>
+            <p class="small mute" style="margin:2px 0 0">Log print or online opinion and analysis pieces directly into the database.</p>
+          </div>
+          <button class="btn ghost sm" id="oped-close" style="font-size:16px;line-height:1;padding:4px 8px">✕</button>
+        </div>
+        <form id="oped-form" onsubmit="return false;" style="display:flex;flex-direction:column;gap:12px">
+          <div>
+            <label class="small b">Article Headline *</label>
+            <input type="text" id="oped-headline" required placeholder="e.g. India's Next Semiconductor Hub: Building The Silicon Shield" style="width:100%;margin-top:4px">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div>
+              <label class="small b">Author / Byline *</label>
+              <input type="text" id="oped-author" required placeholder="e.g. Rajiv Kumar, Nandan Nilekani" style="width:100%;margin-top:4px">
+            </div>
+            <div>
+              <label class="small b">Publication / Outlet *</label>
+              <input type="text" id="oped-source" list="oped-sources-list" required placeholder="Select or type outlet..." style="width:100%;margin-top:4px">
+              <datalist id="oped-sources-list">
+                <option value="Forbes India (Print)">
+                <option value="Forbes India (Online)">
+                <option value="Fortune India (Print)">
+                <option value="Fortune India (Online)">
+                <option value="Business Today (Print)">
+                <option value="Business Today (Online)">
+                <option value="The Economic Times (Print)">
+                <option value="The Economic Times (Online)">
+                <option value="Mint (Print)">
+                <option value="Mint (Online)">
+                <option value="Business Standard (Print)">
+                <option value="Business Standard (Online)">
+                <option value="Financial Express (Print)">
+                <option value="The Hindu Business Line (Print)">
+              </datalist>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+            <div>
+              <label class="small b">Date *</label>
+              <input type="date" id="oped-date" value="${new Date().toISOString().slice(0, 10)}" style="width:100%;margin-top:4px">
+            </div>
+            <div>
+              <label class="small b">Kind</label>
+              <select id="oped-kind" style="width:100%;margin-top:4px">
+                <option value="opinion" selected>Opinion / Column</option>
+                <option value="analysis">Analysis</option>
+                <option value="authored">Authored Feature</option>
+              </select>
+            </div>
+            <div>
+              <label class="small b">Page (if print)</label>
+              <input type="text" id="oped-page" placeholder="e.g. 14, Oped" style="width:100%;margin-top:4px">
+            </div>
+          </div>
+          <div>
+            <label class="small b">Matched Topic / Suggested Angle (optional)</label>
+            <input type="text" id="oped-opp" placeholder="e.g. semiconductors × supply-chain-resilience" style="width:100%;margin-top:4px">
+          </div>
+          <div>
+            <label class="small b">Article Excerpt / Body Text</label>
+            <textarea id="oped-body" rows="4" placeholder="Paste full article text, abstract, or excerpt..." style="width:100%;margin-top:4px"></textarea>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px">
+            <button type="button" class="btn ghost sm" id="oped-cancel">Cancel</button>
+            <button type="submit" class="btn sm" id="oped-submit" style="background:var(--brand);color:#fff">Save Authored Piece</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML("beforeend", modalHtml);
+  const m = $("#oped-modal");
+  const close = () => m?.remove();
+  $("#oped-close").onclick = close;
+  $("#oped-cancel").onclick = close;
+  $("#oped-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const headline = $("#oped-headline").value.trim();
+    const author = $("#oped-author").value.trim();
+    const source = $("#oped-source").value.trim();
+    const date = $("#oped-date").value.trim();
+    const kind = $("#oped-kind").value;
+    const page = $("#oped-page").value.trim();
+    const oppKey = $("#oped-opp").value.trim();
+    const body = $("#oped-body").value.trim();
+    if (!headline || !author || !source) {
+      toast("Headline, author and publication are required", 4000);
+      return;
+    }
+    try {
+      await post("/api/admin/authored/manual", { headline, author, source, date, kind, page, oppKey, body, company: S.company || "bcg" });
+      toast("Op-ed successfully recorded!");
+      close();
+      render();
+    } catch (err) {
+      toast(err.message || "Failed to save op-ed", 5000);
+    }
+  };
+}
 
-//   const again = () => { f.offset = 0; render(); };
-//   let t; $("#jq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; again(); }, 350); };
-//   $("#jbeat").onchange = (e) => { f.beat = e.target.value; again(); };
-//   $("#jpub").onchange = (e) => { f.publication = e.target.value; again(); };
-//   $("#jprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
-//   $("#jnext").onclick = () => { f.offset += PER; render(); };
-//   $$("tr[data-j]", el).forEach((r) => (r.onclick = (e) => { if (e.target.closest("a")) return; const d = $("#jd-" + r.dataset.j.replace(/"/g, "")); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
-//   $("#jsync").onclick = async () => { try { await post("/api/journalists/sync", {}); toast("Sync started"); render(); } catch (e) { toast(e.message, 5000); } };
-//   if (st.running) setTimeout(() => { if (S.tab === "journalists" && !document.activeElement?.matches("input,select,textarea")) render(); }, 2500);
-// }
+// ---------------------------------------------------------------- Custom Topic Mapping Modal (Admin)
+async function showCustomTopicMapModal() {
+  let mappings = [];
+  try {
+    const res = await api("/api/admin/topic-mapping");
+    mappings = res.mappings || [];
+  } catch (e) {
+    console.error(e);
+  }
+
+  const renderModalContent = () => {
+    const m = $("#ctm-modal");
+    if (!m) return;
+    const listEl = $("#ctm-list");
+    if (listEl) {
+      if (!mappings.length) {
+        listEl.innerHTML = `<div class="mute small" style="padding:14px;text-align:center">No custom topic mappings yet. Add one below to guide automatic tagging.</div>`;
+      } else {
+        listEl.innerHTML = `
+          <div class="tw" style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:6px">
+            <table class="t" style="margin:0">
+              <thead><tr><th>Topic</th><th>Sector/Bracket</th><th>Matching Keywords</th><th></th></tr></thead>
+              <tbody>
+                ${mappings.map((m) => `
+                  <tr>
+                    <td class="b">${esc(m.topicName)}</td>
+                    <td><span class="pill">${esc(m.bracketId || "general")}</span></td>
+                    <td class="small" style="max-width:260px">${(m.keywords || []).map((k) => `<span class="tag">${esc(k)}</span>`).join(" ")}</td>
+                    <td class="r"><button class="btn sm ghost" data-del-cm="${esc(m.id)}" style="color:var(--bad);padding:2px 6px">🗑️</button></td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        `;
+        $$("[data-del-cm]", listEl).forEach((btn) => {
+          btn.onclick = async () => {
+            const id = btn.dataset.delCm;
+            try {
+              await fetch(`/api/admin/topic-mapping?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+              mappings = mappings.filter((x) => x.id !== id);
+              toast("Custom mapping deleted");
+              renderModalContent();
+            } catch (err) {
+              toast("Failed to delete mapping: " + err.message);
+            }
+          };
+        });
+      }
+    }
+  };
+
+  const brackets = [
+    { id: "tmt", name: "Technology, Media & Telecom" },
+    { id: "financial-institutions", name: "Financial Institutions" },
+    { id: "energy", name: "Energy & Utilities" },
+    { id: "industrial-goods", name: "Industrial Goods & Infrastructure" },
+    { id: "consumer-goods", name: "Consumer & Retail" },
+    { id: "health-care", name: "Healthcare & Life Sciences" },
+    { id: "public-sector", name: "Public Sector & Defense" },
+    { id: "climate-sustainability", name: "Climate & Sustainability" }
+  ];
+
+  const modalHtml = `
+    <div class="modal-bg" id="ctm-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+      <div class="card" style="width:100%;max-width:620px;background:var(--surface);box-shadow:0 12px 36px rgba(0,0,0,0.3);border-radius:8px;padding:22px;max-height:92vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div>
+            <h3 style="margin:0;font-size:17px">⚙️ Custom Topic Mapping (Admin)</h3>
+            <p class="small mute" style="margin:2px 0 0">Map custom high-priority topics and keywords in case the automatic NLP misses them.</p>
+          </div>
+          <button class="btn ghost sm" id="ctm-close" style="font-size:16px;line-height:1;padding:4px 8px">✕</button>
+        </div>
+        <div style="margin-bottom:16px">
+          <div class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Active Custom Mappings</div>
+          <div id="ctm-list"></div>
+        </div>
+        <div style="border-top:1px solid var(--line);padding-top:14px">
+          <div class="small b" style="margin-bottom:8px">➕ Add New Custom Topic Mapping</div>
+          <form id="ctm-form" onsubmit="return false;" style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label class="small b">Topic Display Name *</label>
+                <input type="text" id="ctm-name" required placeholder="e.g. Semiconductor Fab Hub" style="width:100%;margin-top:4px">
+              </div>
+              <div>
+                <label class="small b">Sector / Bracket</label>
+                <select id="ctm-bracket" style="width:100%;margin-top:4px">
+                  ${brackets.map((b) => `<option value="${b.id}">${b.name}</option>`).join("")}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="small b">Keywords / Match Triggers *</label>
+              <input type="text" id="ctm-keywords" required placeholder="Comma-separated: semiconductor, wafer fab, chip assembly, dholera, micron" style="width:100%;margin-top:4px">
+              <span class="tiny mute">Stories matching these keywords in headline or body will be mapped to this topic.</span>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:8px">
+              <button type="button" class="btn ghost sm" id="ctm-cancel">Close</button>
+              <button type="submit" class="btn sm" id="ctm-submit" style="background:var(--brand);color:#fff">Add Topic Mapping</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML("beforeend", modalHtml);
+  const m = $("#ctm-modal");
+  const close = () => { m?.remove(); render(); };
+  $("#ctm-close").onclick = close;
+  $("#ctm-cancel").onclick = close;
+  renderModalContent();
+
+  $("#ctm-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const topicName = $("#ctm-name").value.trim();
+    const bracketId = $("#ctm-bracket").value;
+    const rawKeywords = $("#ctm-keywords").value;
+    const keywords = rawKeywords.split(",").map((k) => k.trim()).filter(Boolean);
+    if (!topicName || !keywords.length) {
+      toast("Topic name and at least one keyword are required", 4000);
+      return;
+    }
+    try {
+      const res = await post("/api/admin/topic-mapping", { topicName, bracketId, keywords });
+      if (res?.mapping) {
+        mappings.push(res.mapping);
+      }
+      toast("Custom topic mapping saved!");
+      $("#ctm-name").value = "";
+      $("#ctm-keywords").value = "";
+      renderModalContent();
+    } catch (err) {
+      toast(err.message || "Failed to save mapping", 5000);
+    }
+  };
+}
+
+// ---------------------------------------------------------------- Journalist & Topic Intelligence
+// Find out which journalist writes about which topic, from which publication. Available for Admin and Member.
+const contactLinks = (c) => c ? [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>` : `<span class="mute">no contact details on record</span>`;
+
+async function pgJournalists(el) {
+  const f = (S.jf ??= { q: "", topic: "", beat: "", publication: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
+  const admin = typeof isAdmin === "function" && isAdmin();
+  const [st, L, B] = await Promise.all([
+    api("/api/journalists/status"),
+    api("/api/journalists?facets=1&limit=" + PER + "&offset=" + f.offset + "&q=" + enc(f.q) + "&topic=" + enc(f.topic || "") + "&beat=" + enc(f.beat) + "&publication=" + enc(f.publication)),
+    api("/api/briefs"),
+  ]);
+  const fc = L.facets || { beats: [], publications: [], coverage: {} };
+  const cov = fc.coverage || {};
+  const total = st.count || 1;
+  const bs = B.stats || {};
+  const decided = (bs.approved || 0) + (bs.rejected || 0) + (bs.needs_evidence || 0);
+  const pg = (st.pages && st.page ? Math.min(100, Math.round((100 * st.page) / st.pages)) : 0);
+  const pc = (n) => Math.round((100 * (n || 0)) / total) + "%";
+
+  // Common high-priority editorial topics for quick filtering
+  const TOPIC_PRESETS = [
+    "Artificial Intelligence", "Semiconductors", "Banking & Finance", 
+    "Clean Energy & EV", "Healthcare & Pharma", "Startups & Tech", 
+    "Macro & Economy", "Supply Chain"
+  ];
+
+  // Core publications including Forbes India, Fortune India, Business Today
+  const CORE_PUBS = [
+    "Forbes India", "Fortune India", "Business Today", 
+    "The Economic Times", "Livemint", "Business Standard", 
+    "Financial Express", "The Hindu Business Line", "NDTV Profit"
+  ];
+  const pubSet = new Set(fc.publications.map((p) => p.v));
+  CORE_PUBS.forEach((cp) => { if (!pubSet.has(cp)) fc.publications.unshift({ v: cp, n: 0 }); });
+
+  el.innerHTML = banner("info", "<b>Journalist &amp; Topic Intelligence.</b> Find out which journalist writes about which topic, from which publication. Search by topic or click a preset below to see who covers that theme, their publication, and their articles.") +
+  '<div class="kpis"><div class="kpi"><div class="v num">' + n0(st.count) + '</div><div class="l">Journalists in directory</div><div class="s">' + (st.lastSync ? "synced " + ago(st.lastSync) : "ready") + '</div></div>' +
+  '<div class="kpi"><div class="v num">' + pc(cov.beat) + '</div><div class="l">With a declared beat</div><div class="s">' + pc(cov.articles) + ' have recent articles</div></div>' +
+  '<div class="kpi"><div class="v num">' + pc(cov.email) + '</div><div class="l">With an email</div><div class="s">' + pc(cov.linkedin) + ' LinkedIn · ' + pc(cov.phone) + ' phone</div></div>' +
+  '<div class="kpi"><div class="v num">' + (bs.pending || 0) + '</div><div class="l">Briefs awaiting an editor</div><div class="s">' + (bs.approved || 0) + ' approved · ' + decided + ' decided</div></div></div>' +
+  
+  (admin ? 
+    ('<section class="card" style="margin-bottom:16px"><div class="sec-h" style="margin:0"><div><h3>Directory sync <span class="tag" style="background:var(--brand-soft);color:var(--brand);margin-left:6px">Admin</span></h3><p class="hint" style="margin:0">Source: <span class="code">' + esc(clip(st.url || "Directory API", 70)) + '</span>. Records are saved page by page.</p></div><button class="btn sm" id="jsync"' + (st.running ? " disabled" : "") + '>' + (st.running ? "Syncing…" : "Sync now") + '</button></div>' +
+    (st.running ? '<div class="bar" style="margin-top:10px"><i style="width:' + pg + '%"></i></div><p class="small mute" style="margin:6px 0 0">Page ' + st.page + (st.pages ? " of " + st.pages : "") + ' · ' + n0(st.saved) + ' of ' + n0(st.total) + ' records saved</p>' : "") +
+    (st.error ? '<p class="small" style="color:var(--bad);margin:8px 0 0">Last sync failed: ' + esc(st.error) + '</p>' : "") + '</section>') 
+    : '') +
+
+  '<div class="card flush"><div style="padding:14px 16px;border-bottom:1px solid var(--line)">' +
+  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px">' +
+    '<span class="tiny mute b" style="text-transform:uppercase;letter-spacing:.05em;margin-right:4px">Topic Filter:</span>' +
+    TOPIC_PRESETS.map((tp) => `<button class="pill ${f.topic === tp ? "p-ok" : "p-muted"}" data-topic-preset="${esc(tp)}" style="cursor:pointer;border:none;font-size:12px">${esc(tp)}</button>`).join(" ") +
+    (f.topic ? `<button class="pill ghost" id="jclear-topic" style="cursor:pointer;font-size:11px;color:var(--bad)">✕ Clear Topic</button>` : "") +
+  '</div>' +
+  '<div class="ctl" style="flex-wrap:wrap;gap:10px">' +
+    '<input type="text" id="jtopic" placeholder="🔍 Search topic (e.g. AI, semiconductor, banking)…" value="' + esc(f.topic || "") + '" style="max-width:240px;border-color:var(--brand)">' +
+    '<input type="text" id="jq" placeholder="Search journalist name, city or keyword…" value="' + esc(f.q) + '" style="max-width:240px">' +
+    '<label>Outlet / Publication <select id="jpub" style="max-width:200px"><option value="">All Publications</option>' + fc.publications.map((p) => '<option value="' + esc(p.v) + '"' + (p.v === f.publication ? " selected" : "") + '>' + esc(clip(p.v, 34)) + (p.n ? ' (' + p.n + ')' : '') + '</option>').join("") + '</select></label>' +
+    '<label>Beat <select id="jbeat" style="max-width:180px"><option value="">All Beats</option>' + fc.beats.map((b) => '<option value="' + esc(b.v) + '"' + (b.v === f.beat ? " selected" : "") + '>' + esc(b.v) + ' (' + b.n + ')</option>').join("") + '</select></label>' +
+    '<span class="mute small" style="margin-left:auto">' + n0(L.total) + ' journalists match</span>' +
+  '</div></div>' +
+  '<div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Journalist</th><th>Outlet / Publication</th><th>Beat</th><th>Location</th><th class="r">Articles</th><th>Contact</th></tr></thead><tbody>' +
+  (L.rows.map((j) => '<tr class="click" data-j="' + esc(j.id) + '"><td><span class="b">' + esc(j.name) + '</span>' + (j.designation ? '<div class="tiny mute">' + esc(j.designation) + '</div>' : "") + '</td><td class="small"><span class="pill ' + (j.publication && (j.publication.includes("Forbes") || j.publication.includes("Fortune") || j.publication.includes("Business Today")) ? "p-high" : "p-muted") + '">' + esc(j.publication || "Independent") + '</span></td><td class="small" style="max-width:240px">' + (esc(j.beat) || '<span class="mute">General Business</span>') + '</td><td class="small">' + esc([j.city, j.state].filter(Boolean).join(", ") || "India") + '</td><td class="r num b">' + (j.articles ? j.articles.length : 0) + '</td><td class="tiny">' + contactLinks({ email: j.email, linkedin: j.linkedin, profile: j.profileUrl, phone: admin ? j.phone : "" }) + '</td></tr>' +
+    '<tr class="jd" id="jd-' + esc(j.id) + '" style="display:none"><td colspan="6" style="background:var(--surface2);padding:14px 18px">' + 
+    '<div style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between"><b>Recent articles &amp; topics covered by ' + esc(j.name) + ':</b>' + (admin && j.phone ? '<span class="tiny mute">Direct Phone: ' + esc(j.phone) + '</span>' : '') + '</div>' +
+    ((j.articles && j.articles.length) ? j.articles.map((a) => '<div class="story" style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(0,0,0,0.05)"><a class="h" href="' + esc(a.url || "#") + '" target="_blank" rel="noopener">' + esc(a.title) + '</a> <span class="mute tiny">' + esc((a.publishDate || "").slice(0, 10)) + (a.website ? " · " + esc(a.website) : "") + '</span>' + (a.summary ? '<div class="small mute" style="margin-top:2px">' + esc(a.summary) + '</div>' : "") + '</div>').join("") : '<span class="mute small">No recent articles on record.</span>') + 
+    '</td></tr>').join("") || '<tr><td colspan="6" class="mute" style="text-align:center;padding:24px">' + (st.count ? "No journalist matches these filters." : "The directory is empty. Syncing in progress.") + '</td></tr>') +
+  '</tbody></table></div><div class="ctl" style="padding:10px 16px;justify-content:space-between;border-top:1px solid var(--line)"><span class="small mute">Showing ' + (L.total ? f.offset + 1 : 0) + '–' + Math.min(L.total, f.offset + PER) + ' of ' + n0(L.total) + '</span><span><button class="btn ghost sm" id="jprev"' + (f.offset <= 0 ? " disabled" : "") + '>Previous</button> <button class="btn ghost sm" id="jnext"' + (f.offset + PER >= L.total ? " disabled" : "") + '>Next</button></span></div></div>' +
+  '<section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Pitch brief queue</h3><p class="hint">Open an opportunity to see its best-fit journalists and draft a brief. Every brief waits for an editor decision.</p></div><div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Drafted</th><th>Opportunity</th><th>Headline</th><th>Pitch to</th><th>Status</th></tr></thead><tbody>' +
+  (B.briefs.map((b) => '<tr><td class="small">' + dt(b.createdAt) + '</td><td class="small">' + esc(b.sector) + ' × ' + esc(b.topic) + '</td><td class="b" style="max-width:340px">' + esc(b.brief.headline) + '</td><td class="small">' + esc(b.brief.generatedFor?.recipient?.name ?? "—") + '</td><td>' + statusPill(b.status) + '</td></tr>').join("") || '<tr><td colspan="5" class="mute">No briefs yet.</td></tr>') + '</tbody></table></div></section>';
+
+  const again = () => { f.offset = 0; render(); };
+  let t; 
+  $("#jq").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; again(); }, 350); };
+  $("#jtopic").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.topic = e.target.value; again(); }, 350); };
+  $$("[data-topic-preset]", el).forEach((btn) => {
+    btn.onclick = () => {
+      const val = btn.dataset.topicPreset;
+      f.topic = f.topic === val ? "" : val;
+      again();
+    };
+  });
+  if ($("#jclear-topic")) $("#jclear-topic").onclick = () => { f.topic = ""; again(); };
+  $("#jbeat").onchange = (e) => { f.beat = e.target.value; again(); };
+  $("#jpub").onchange = (e) => { f.publication = e.target.value; again(); };
+  $("#jprev").onclick = () => { f.offset = Math.max(0, f.offset - PER); render(); };
+  $("#jnext").onclick = () => { f.offset += PER; render(); };
+  $$("tr[data-j]", el).forEach((r) => (r.onclick = (e) => { if (e.target.closest("a")) return; const d = $("#jd-" + r.dataset.j.replace(/"/g, "")); if (d) d.style.display = d.style.display === "none" ? "" : "none"; }));
+  if (admin && $("#jsync")) $("#jsync").onclick = async () => { try { await post("/api/journalists/sync", {}); toast("Sync started"); render(); } catch (e) { toast(e.message, 5000); } };
+  if (st.running) setTimeout(() => { if (S.tab === "journalists" && !document.activeElement?.matches("input,select,textarea")) render(); }, 2500);
+}
 
 // ---------------------------------------------------------------- Validation
 async function pgValidation(el) {

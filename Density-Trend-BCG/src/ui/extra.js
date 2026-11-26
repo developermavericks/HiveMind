@@ -285,6 +285,68 @@ async function pgSentiment(el) {
     <div class="kpi"><div class="v num">${p((o.neu || 0) + (o.mixed || 0))}</div><div class="l">Neutral / mixed</div><div class="s">${n0((o.neu || 0) + (o.mixed || 0))} stories</div></div>
     <div class="kpi"><div class="v num">${n0(cv.labelled)}</div><div class="l">Stories labelled</div><div class="s">of ${n0(cv.total)}</div></div></div>
   <section class="card"><div class="sec-h" style="margin:0"><div><h3>Daily sentiment</h3><p class="hint" style="margin:0">Green up = positive, red down = negative, grey = neutral or mixed.</p></div></div><div class="chart" id="sch" style="margin-top:8px"></div></section>
+
+  <!-- Negative News Trends (Admin & Editorial Boom View) -->
+  <section class="card flush" style="margin-top:16px;border:1.5px solid rgba(220,38,38,0.25)">
+    <div style="padding:16px 16px 12px;background:linear-gradient(135deg,rgba(239,68,68,0.06),rgba(153,27,27,0.03))">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div>
+          <h3 style="margin:0;display:flex;align-items:center;gap:8px">
+            <span style="font-size:18px">💥</span> Negative News Trends &amp; Adverse Momentum
+            ${typeof isAdmin === "function" && isAdmin() ? '<span class="pill" style="background:#7f1d1d;color:#fff;font-size:10px;font-weight:700">ADMIN VIEW</span>' : ''}
+          </h3>
+          <p class="hint" style="margin:4px 0 0">
+            Adverse themes driving crisis coverage and op-ed opportunity boom. <b>Darker colour indicates more prominent negative sentiment.</b>
+          </p>
+        </div>
+        <div class="tiny mute" style="background:var(--surface);padding:4px 10px;border-radius:20px;border:1px solid var(--line)">
+          Color scale: <span style="background:#fecaca;color:#7f1d1d;padding:1px 6px;border-radius:3px;font-weight:600">Moderate</span> →
+          <span style="background:#dc2626;color:#fff;padding:1px 6px;border-radius:3px;font-weight:600">High</span> →
+          <span style="background:#991b1b;color:#fff;padding:1px 6px;border-radius:3px;font-weight:600">Severe</span> →
+          <span style="background:#4a0e17;color:#fff;padding:1px 6px;border-radius:3px;font-weight:700">Critical Boom</span>
+        </div>
+      </div>
+    </div>
+    <div class="tw" style="max-height:none">
+      <table class="t">
+        <thead>
+          <tr>
+            <th>Adverse Topic</th>
+            <th>Prominence &amp; Tone</th>
+            <th class="r">Negative Stories</th>
+            <th class="r">Adverse Ratio</th>
+            <th class="r">Boom Edge</th>
+            <th>Top Negative Headline</th>
+          </tr>
+        </thead>
+        <tbody id="negbody">
+          ${(d.negativeTrends && d.negativeTrends.length ? d.negativeTrends : []).map((nt) => {
+            const sev = nt.severity || 50;
+            const bg = sev >= 75 ? "#4a0e17" : sev >= 55 ? "#991b1b" : sev >= 35 ? "#dc2626" : "#fecaca";
+            const fg = sev >= 35 ? "#ffffff" : "#7f1d1d";
+            const edgePoints = Math.round(nt.negRatio * 15);
+            const topHeadline = nt.stories?.[0]?.title ? clip(nt.stories[0].title, 90) : "Multiple adverse reports";
+            return `<tr class="click" data-neg="${esc(nt.key)}" style="transition:background .15s">
+              <td class="b">
+                <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${bg};margin-right:6px"></span>
+                ${esc(nt.name)}
+              </td>
+              <td>
+                <span class="pill" style="background:${bg};color:${fg};font-weight:700;font-size:11px;padding:3px 8px" title="Negative sentiment severity score ${sev}/100">
+                  ${Math.round(nt.negRatio * 100)}% Negative (Tone ${nt.net})
+                </span>
+              </td>
+              <td class="r num b">${nt.negCount} <span class="mute tiny">of ${nt.total}</span></td>
+              <td class="r num">${Math.round(nt.negRatio * 100)}%</td>
+              <td class="r num" style="color:#b91c1c;font-weight:700">+${edgePoints} pts</td>
+              <td class="small mute" style="max-width:320px">${esc(topHeadline)}</td>
+            </tr>`;
+          }).join("") || '<tr><td colspan="6" class="mute" style="text-align:center;padding:16px">No persistent negative news trends in the current window.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="card flush" style="margin-top:16px"><div style="padding:16px 16px 0"><h3>Biggest swings by sector and topic</h3><p class="hint">Net sentiment now against the previous period. Rising negative coverage of a sector means something different from rising positive coverage.</p>
     <div class="ctl" style="margin-bottom:12px"><input type="text" id="sq" placeholder="Search…" value="${esc(f.q)}" style="max-width:240px"><div class="seg" id="slv">${[["all", "All"], ["bracket", "Sectors"], ["topic", "Topics"]].map(([k, l]) => `<button data-l="${k}" class="${f.level === k ? "on" : ""}">${l}</button>`).join("")}</div></div></div>
     <div class="tw" style="max-height:none"><table class="t"><thead><tr><th>Name</th><th class="r">Stories</th><th class="r">Net now</th><th class="r">Previous</th><th class="r">Change</th></tr></thead><tbody id="sbody"></tbody></table></div><div id="spager"></div></section>`;
@@ -296,6 +358,7 @@ async function pgSentiment(el) {
     $("#sbody").innerHTML = rows.slice((f.page - 1) * f.size, f.page * f.size).map((r) => `<tr class="click" data-k="${esc(r.key)}"><td class="b">${esc(r.name)} <span class="tag">${r.level === "topic" ? "topic" : "sector"}</span></td><td class="r num">${n0(r.count)}</td><td class="r num b">${sgn(r.net)}</td><td class="r num">${sgn(r.netPrev)}</td><td class="r"><span class="pill ${(r.delta ?? 0) > 0.05 ? "p-pos" : (r.delta ?? 0) < -0.05 ? "p-neg" : "p-muted"}">${(r.delta ?? 0) > 0.05 ? "▲" : (r.delta ?? 0) < -0.05 ? "▼" : "•"} ${sgn(r.delta)}</span></td></tr>`).join("") || `<tr><td colspan="5" class="mute">Nothing to show yet.</td></tr>`;
     $("#spager").innerHTML = xPager(rows.length, f.page, f.size);
     $$("#sbody tr[data-k]").forEach((r) => (r.onclick = () => { S.sel = r.dataset.k; location.hash = r.dataset.k.startsWith("t:") ? "#/trends/topics" : "#/trends/sectors"; }));
+    $$("#negbody tr[data-neg]").forEach((r) => (r.onclick = () => { S.sel = r.dataset.neg; location.hash = r.dataset.neg.startsWith("t:") ? "#/trends/topics" : "#/trends/sectors"; }));
     $$("#spager [data-pg]").forEach((b) => (b.onclick = () => { f.page = +b.dataset.pg; draw(); }));
     const sz = $("#spager [data-size]"); if (sz) sz.onchange = () => { f.size = +sz.value; f.page = 1; draw(); };
   };

@@ -8,7 +8,7 @@ import { evaluatePending, outcomeSummary, tuneWeights } from "./outcomes.mjs";
 import { isWeakLabel } from "./topics.mjs";
 import { qualityReport } from "./quality.mjs";
 import { buildOpportunities, itemsByLabel, onlineOnAngle } from "./opportunity.mjs";
-// JOURNALISTS DISABLED: import { journalistFit, toAuthor, toks } from "./journalists.mjs";
+import { journalistFit, toAuthor, toks } from "./journalists.mjs";
 import { runBacktest } from "./backtest.mjs";
 import { norm } from "./brackets.mjs";
 import { TopicRegistry } from "./topics.mjs";
@@ -331,7 +331,13 @@ export class Analytics {
     const liveAsOf = Math.max(span.last, span.lastSeen);
     const asOf = date ? Math.min(dayStart(date) + DAY_MS, liveAsOf) : liveAsOf;
     const topics = new TopicRegistry(this.store);
-    const ctx = { cfg: this.cfg, registry, sources: this.sources, topics: topics.asMap(), signals: { searchInterest: this.store.signalTopics().length > 0 } };
+    const customMappings = this.store.listCustomTopicMappings ? this.store.listCustomTopicMappings() : [];
+    const ctx = {
+      cfg: this.cfg, registry, sources: this.sources, topics: topics.asMap(),
+      signals: { searchInterest: this.store.signalTopics().length > 0 },
+      customMappings,
+      customTopicNames: new Map(customMappings.map((m) => [m.id, m.topicName])),
+    };
     // When each label came into existence, so its share is judged only against stories that could have carried it.
     const topicMap = ctx.topics;
     ctx.elig = (key) => {
@@ -341,7 +347,7 @@ export class Analytics {
     };
     const loadDays = span.days >= (this.cfg.seasonality?.minDays ?? 28) ? Math.max(LOAD_DAYS, (this.cfg.seasonality?.minDays ?? 28) + 17) : LOAD_DAYS;
     const stories = this.store.loadStories({ from: asOf - loadDays * DAY_MS, to: asOf + 1 });
-    const items = prepareItems(stories, { registry, sources: this.sources, cfg: this.cfg, asOf, gate: false }); // browsing: every story published by asOf
+    const items = prepareItems(stories, { registry, sources: this.sources, cfg: this.cfg, asOf, gate: false, customMappings }); // browsing: every story published by asOf
     ctx.seasonal = buildSeasonality(items, asOf, this.cfg);
     const analysis = analyse(items, ctx, asOf);
     const value = { asOf, date, span, ctx, items, analysis, byLabel: itemsByLabel(items), storyCount: stories.length };
@@ -354,7 +360,12 @@ export class Analytics {
     return m.level === "bracket" || (m.count >= this.cfg.evidence.minClusters && m.originsRecent >= (this.cfg.topics?.minOrigins ?? 3) && !isWeakLabel(this.labelName(c, m.key), this.cfg));
   }
 
-  labelName(c, key) { return (key.startsWith("b:") ? c.ctx.registry.get(key.slice(2))?.name : c.ctx.topics.get(key.slice(2))?.name) ?? key; }
+  labelName(c, key) {
+    if (key.startsWith("b:")) return c.ctx.registry.get(key.slice(2))?.name ?? key;
+    const tid = key.slice(2);
+    if (c.ctx.customTopicNames?.has(tid)) return c.ctx.customTopicNames.get(tid);
+    return c.ctx.topics.get(tid)?.name ?? key;
+  }
 
   labelRow(c, m) {
     return {
@@ -395,7 +406,8 @@ export class Analytics {
     }
     const c = this.context(date), company = this.company(companyId);
     if (!c || !company) return { empty: true, items: [], counts: { total: 0, action: {}, stage: {} } };
-    const res = buildOpportunities({ company, matches: company.matches, analysisResult: c.analysis, byLabel: c.byLabel, ctx: c.ctx, asOf: c.asOf, limit, topicMatches: this.store.topicMatches(company.id), qualityRed: this.qualityRed(c), ocr: this.ocrHeadroom(company.id, c.asOf, mode), online: this.onlineContext(company.id) });
+    const clientPriorities = this.store.getClientPriorities ? this.store.getClientPriorities(company.id) : null;
+    const res = buildOpportunities({ company, matches: company.matches, analysisResult: c.analysis, byLabel: c.byLabel, ctx: c.ctx, asOf: c.asOf, limit, topicMatches: this.store.topicMatches(company.id), qualityRed: this.qualityRed(c), ocr: this.ocrHeadroom(company.id, c.asOf, mode), online: this.onlineContext(company.id), clientPriorities });
     const briefs = new Map();
     for (const b of this.store.listBriefs({ limit: 500 })) if (!briefs.has(b.oppKey)) briefs.set(b.oppKey, { id: b.id, status: b.status });
     for (const o of res.items) o.brief = briefs.get(o.key) ?? null;
@@ -701,10 +713,50 @@ export class Analytics {
       byLabel.push({ key, name: this.labelName(c, key), level: m.level, count: cur.n, pos: cur.pos, neg: cur.neg, neu: cur.neu, mixed: cur.mixed, net: cur.net, netPrev: pr.n >= 5 ? pr.net : null, delta: pr.n >= 5 ? cur.net - pr.net : null });
     }
     byLabel.sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0) || b.count - a.count);
+
+    // Negative news trends: topics with prominent adverse coverage
+    const negativeTrends = [];
+    for (const [key, list] of c.byLabel) {
+      const m = c.analysis.labels.get(key);
+      if (!m || !this.topicOk(c, m)) continue;
+      const recentList = list.filter((i) => asOf - i.at <= 72 * HOUR);
+      if (!recentList.length) continue;
+      let neg = 0, pos = 0, neu = 0;
+      for (const it of recentList) {
+        if (it.sentiment === "negative") neg++;
+        else if (it.sentiment === "positive") pos++;
+        else if (it.sentiment) neu++;
+      }
+      const total = neg + pos + neu;
+      if (neg < 2 || total < 3) continue;
+      const negRatio = neg / total;
+      const net = (pos - neg) / total;
+      // Severity 0-100: darker red / higher prominence the stronger the negative sentiment
+      const severity = Math.min(100, Math.round(negRatio * 65 + Math.min(35, neg * 6)));
+      const negStories = recentList.filter((it) => it.sentiment === "negative").slice(0, 3).map((it) => ({
+        id: it.id, title: it.title, url: it.url, at: it.at, outlets: it.outletCount
+      }));
+      negativeTrends.push({
+        key,
+        name: this.labelName(c, key),
+        level: m.level,
+        negCount: neg,
+        posCount: pos,
+        total,
+        negRatio: +negRatio.toFixed(2),
+        net: +net.toFixed(2),
+        severity,
+        stage: m.stage,
+        ratio: m.ratio,
+        stories: negStories
+      });
+    }
+    negativeTrends.sort((a, b) => b.severity - a.severity || b.negCount - a.negCount);
+
     return {
       asOf, overall: tallySentiment(recent), previous: tallySentiment(prev),
       daily: [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).slice(-14).map(([day, l]) => ({ day, ...tallySentiment(l) })),
-      byLabel: byLabel.slice(0, 60), coverage: { labelled, total: items.length, pending: this.store.unsentimentedCount() },
+      byLabel: byLabel.slice(0, 60), negativeTrends: negativeTrends.slice(0, 40), coverage: { labelled, total: items.length, pending: this.store.unsentimentedCount() },
     };
   }
 
@@ -813,22 +865,22 @@ export class Analytics {
     return runBacktest({ stories, ctx: c.ctx, days: this.store.days(), briefStats: this.store.briefStats() });
   }
 
-  // // ---------------------------------------------------------------- journalists
-  // // Best-matching journalists for one opportunity, computed on demand from the cached directory.
-  // journalistMatches({ oppKey, company: companyId = "bcg", date = null, limit = 8 }) {
-  //   const c = this.context(date);
-  //   const opp = this.opportunities({ company: companyId, date, limit: 300 }).items.find((o) => o.key === oppKey) ?? this.opportunities({ company: companyId, date, limit: 300, group: false }).items.find((o) => o.key === oppKey);
-  //   if (!c || !opp) return { error: "That opportunity is no longer in the ranked list." };
-  //   if (!this.journalistCache || this.journalistCache.n !== this.store.journalistCount()) this.journalistCache = { n: this.store.journalistCount(), list: this.store.allJournalists() };
-  //   const items = (c.byLabel.get(opp.label.key) ?? []).filter((i) => c.asOf - i.at <= 7 * 24 * HOUR);
-  //   const kw = c.ctx.registry.get(opp.label.parent ?? "")?.keywords ?? [];
-  //   const topicTokens = toks([...kw, opp.label.name, ...opp.stories.map((s) => s.title)].join(" "));
-  //   const ctx = { topicTokens, geography: [...new Set(items.flatMap((i) => i.geography))].slice(0, 25), outlets: new Set(items.flatMap((i) => i.outlets.map((o) => norm(o)))), now: c.asOf };
-  //   const fits = [];
-  //   for (const j of this.journalistCache.list) { const f = journalistFit(j, opp, ctx); if (f.parts.beat.score > 0 || f.parts.articles.score > 0) fits.push(f); } // place or outlet alone is not a topical link
-  //   fits.sort((a, b) => b.score - a.score);
-  //   return { opportunity: { key: opp.key, sector: opp.sector, topic: opp.label.name }, directory: this.journalistCache.n, matched: fits.length, matches: fits.slice(0, limit) };
-  // }
+  // ---------------------------------------------------------------- journalists
+  // Best-matching journalists for one opportunity, computed on demand from the cached directory.
+  journalistMatches({ oppKey, company: companyId = "bcg", date = null, limit = 8 }) {
+    const c = this.context(date);
+    const opp = this.opportunities({ company: companyId, date, limit: 300 }).items.find((o) => o.key === oppKey) ?? this.opportunities({ company: companyId, date, limit: 300, group: false }).items.find((o) => o.key === oppKey);
+    if (!c || !opp) return { error: "That opportunity is no longer in the ranked list." };
+    if (!this.journalistCache || this.journalistCache.n !== this.store.journalistCount()) this.journalistCache = { n: this.store.journalistCount(), list: this.store.allJournalists() };
+    const items = (c.byLabel.get(opp.label.key) ?? []).filter((i) => c.asOf - i.at <= 7 * 24 * HOUR);
+    const kw = c.ctx.registry.get(opp.label.parent ?? "")?.keywords ?? [];
+    const topicTokens = toks([...kw, opp.label.name, ...opp.stories.map((s) => s.title)].join(" "));
+    const ctx = { topicTokens, geography: [...new Set(items.flatMap((i) => i.geography))].slice(0, 25), outlets: new Set(items.flatMap((i) => i.outlets.map((o) => norm(o)))), now: c.asOf };
+    const fits = [];
+    for (const j of this.journalistCache.list) { const f = journalistFit(j, opp, ctx); if (f.parts.beat.score > 0 || f.parts.articles.score > 0) fits.push(f); } // place or outlet alone is not a topical link
+    fits.sort((a, b) => b.score - a.score);
+    return { opportunity: { key: opp.key, sector: opp.sector, topic: opp.label.name }, directory: this.journalistCache.n, matched: fits.length, matches: fits.slice(0, limit) };
+  }
 
   // ---------------------------------------------------------------- data quality, judged links, audit, forecasts
   aliases() { if (!this._al || Date.now() - this._al.at > 30000) this._al = { at: Date.now(), map: this.store.entityAliases() }; return this._al.map; }

@@ -8,7 +8,7 @@ const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { retur
 const S = {
   company: ls.get("company") || "bcg", date: null, page: "overview", status: null, cfg: null,
   gran: ls.get("gran") || "hour", level: "bracket", sel: null, compare: new Set(), show: { bars: true, share: true, avg: true, forecast: true },
-  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false, xtrend: false, mode: "whitespace" }, oppByKey: new Map(), authors: [],
+  opp: { action: "all", stage: "all", q: "", group: true, sort: "score", dir: -1, page: 1, size: 25, trigger: false, xtrend: false, priority: false, adverse: false, mode: "whitespace" }, oppByKey: new Map(), authors: [],
 };
 // Sidebar groups. Each group with several views shows them as tabs; old routes still work through LEGACY.
 const PAGES = {
@@ -19,6 +19,7 @@ const PAGES = {
     { k: "by-mdp", t: "By BCG Leader", sub: "Browse BCG Managing Directors and see their mapped opportunities and op-ed angles", fn: (el) => pgPitch(el) },
     { k: "by-opp", t: "By Opportunity", sub: "Live editorial opportunities with recommended BCG authors and boardroom angles", fn: (el) => pgPitch(el) },
   ] },
+  journalists: { name: "Journalists", title: "Journalist Intelligence", sub: "Find out which journalist writes about which topic, from which publication", fn: (el) => pgJournalists(el) },
   trends: { name: "Trends", title: "Trends", sub: "Coverage volume, share and forecast over time", tabs: [
     { k: "topics", t: "Topics", sub: "Specific recurring topics: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
     { k: "sectors", t: "Sectors", sub: "Broad news areas: coverage volume, share and forecast over time", fn: (el) => pgMomentum(el) },
@@ -32,7 +33,7 @@ const PAGES = {
   ] },
   sources: { name: "Sources", title: "Sources", sub: "Where the news comes from", tabs: [
     { k: "collection", t: "Sources & collection", sub: "Approved sources, independence of coverage and collection health", fn: (el) => pgSources(el) },
-    // JOURNALISTS DISABLED: { k: "journalists", t: "Journalists", sub: "Journalist directory, best-fit journalists per opportunity and editor approval", fn: (el) => pgJournalists(el) },
+    { k: "journalists", t: "Journalists & Topics", sub: "Find which journalist writes about which topic, from which publication", fn: (el) => pgJournalists(el) },
     { k: "authored", t: "Authored articles", sub: "Opinion and analysis pieces from the print editions, the angles they take up, and the editor approval queue", fn: (el) => pgAuthored(el) },
   ] },
   accuracy: { name: "Accuracy", title: "Accuracy", sub: "Does the method predict topics that later gain attention?", tabs: [
@@ -53,14 +54,15 @@ const PAGES = {
     { k: "users", t: "Users & Client Scoping", admin: true, sub: "Who can sign in, client scoping, and permissions", fn: (el) => pgUsers(el) },
   ] },
 };
-const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "sources/authored", validation: "accuracy/validation", method: "accuracy/method" };
+const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "journalists", validation: "accuracy/validation", method: "accuracy/method" };
 const MEMBER_HIDDEN = new Set(["leadership", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
-const NAV_TOP = ["overview", "leadership", "opportunities", "pitch", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
+const NAV_TOP = ["overview", "leadership", "opportunities", "pitch", "journalists", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
 const NAV_ICON = {
   overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   leadership: '<path d="M4 20V9M10 20V4M16 20v-8M22 20H2"/>',
   opportunities: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
   pitch: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  journalists: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   trends: '<path d="M3 17l6-6 4 4 8-9"/><path d="M15 6h6v6"/>',
   clients: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M10 21v-4h4v4"/>',
   sources: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/>',
@@ -419,16 +421,21 @@ async function pgOpportunities(el) {
     <label class="chk"><input type="checkbox" id="ogroup" ${f.group ? "checked" : ""}> One row per topic</label>
     <label class="chk"><input type="checkbox" id="otrig" ${f.trigger ? "checked" : ""}> With a verified trigger</label>
     <label class="chk"><input type="checkbox" id="oxtrend" ${f.xtrend ? "checked" : ""}> 𝕏 Trending only</label>
+    <label class="chk" title="Show only opportunities matching this client's priority focus"><input type="checkbox" id="opriority" ${f.priority ? "checked" : ""}> ⭐ Client Priority</label>
+    <label class="chk" title="Show opportunities with constant negative news momentum ('Adverse Boom')"><input type="checkbox" id="oadverse" ${f.adverse ? "checked" : ""}> 💥 Adverse Trends</label>
+    <button class="btn ghost sm" id="btn-client-priorities" style="margin-left:auto" title="Configure custom priority sectors and topics for this client">⭐ Client Priorities</button>
     <span class="mute small" id="ocount"></span></div></div>
   <div class="card flush"><div class="tw" style="max-height:none"><table class="t" id="otab"><thead><tr><th>Score${info("score")}</th><th>Opportunity</th><th>Action</th><th>Stage</th><th class="r s" data-s="ratio">Momentum${info("momentum")}</th><th class="r s" data-s="share">Share${info("share")}</th><th class="r s" data-s="origins">Origins${info("origins")}</th><th>Evidence</th><th>Window</th></tr></thead><tbody></tbody></table></div><div id="opager"></div></div>
   <p class="small mute" style="margin-top:10px">Score (0–100) ranks opportunities; it is <b>not</b> a probability. Weights are pilot assumptions — see <a href="#/accuracy/method">Method</a>.</p>`;
   const rowHtml = (o) => {
     const more = moreOf(o), isOpen = open.has(o.key);
-    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}${o.xTrending ? `<span class="pill" style="background:#1d9bf0;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Trending on X (${o.xTrending.region === 'worldwide' ? 'Worldwide' : 'India'}): Rank #${o.xTrending.rank} · ${esc(o.xTrending.name)}">𝕏 #${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? '🌐' : '🇮🇳'}</span>` : ""}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
+    const priBadge = o.clientPriority ? `<span class="pill" style="background:#f59e0b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Client Priority focus (+${o.clientPriority.boost} score points)">⭐ Priority</span>` : "";
+    const advBadge = o.negativeNews?.isNegativeBoom ? `<span class="pill" style="background:#991b1b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Adverse/Negative trend edge (+${o.negativeNews.negativeEdge})">💥 Adverse Boom</span>` : "";
+    return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}${priBadge}${advBadge} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}${o.xTrending ? `<span class="pill" style="background:#1d9bf0;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Trending on X (${o.xTrending.region === 'worldwide' ? 'Worldwide' : 'India'}): Rank #${o.xTrending.rank} · ${esc(o.xTrending.name)}">𝕏 #${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? '🌐' : '🇮🇳'}</span>` : ""}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
       (isOpen ? `<tr class="sub"><td></td><td colspan="8"><div class="chips">${more.map((s) => `<span class="chip" ${s.key && S.oppByKey.has(s.key) ? `data-opp="${esc(s.key)}"` : ""}>${esc(s.sector)} <b class="num">${Math.round(s.score)}</b>${s.action ? ` ${actionPill(s.action)}` : ""}</span>`).join("")}</div></td></tr>` : "");
   };
   const draw = () => {
-    let rows = r.items.filter((o) => (f.action === "all" || o.action === f.action) && (f.stage === "all" || o.stage === f.stage) && (!f.trigger || o.trigger?.verified) && (!f.xtrend || o.xTrending) && (!f.q || `${o.sector} ${o.label.name} ${o.angle} ${o.label.parentName}`.toLowerCase().includes(f.q.toLowerCase())));
+    let rows = r.items.filter((o) => (f.action === "all" || o.action === f.action) && (f.stage === "all" || o.stage === f.stage) && (!f.trigger || o.trigger?.verified) && (!f.xtrend || o.xTrending) && (!f.priority || o.clientPriority) && (!f.adverse || o.negativeNews?.isNegativeBoom) && (!f.q || `${o.sector} ${o.label.name} ${o.angle} ${o.label.parentName}`.toLowerCase().includes(f.q.toLowerCase())));
     const key = { score: (o) => o.score, ratio: (o) => o.metrics.ratio ?? -1, share: (o) => o.metrics.share, origins: (o) => o.metrics.originsRecent }[f.sort];
     rows = rows.sort((a, b) => f.dir * (key(a) - key(b)));
     const pages = Math.max(1, Math.ceil(rows.length / f.size)); if (f.page > pages) f.page = pages;
@@ -449,8 +456,85 @@ async function pgOpportunities(el) {
   $("#ogroup").onchange = (e) => { f.group = e.target.checked; f.page = 1; render(); };
   $("#otrig").onchange = (e) => { f.trigger = e.target.checked; f.page = 1; draw(); };
   $("#oxtrend").onchange = (e) => { f.xtrend = e.target.checked; f.page = 1; draw(); };
+  if ($("#opriority")) $("#opriority").onchange = (e) => { f.priority = e.target.checked; f.page = 1; draw(); };
+  if ($("#oadverse")) $("#oadverse").onchange = (e) => { f.adverse = e.target.checked; f.page = 1; draw(); };
+  if ($("#btn-client-priorities")) $("#btn-client-priorities").onclick = () => showClientPrioritiesModal();
   $$("#otab th.s").forEach((th) => (th.onclick = (e) => { if (e.target.closest("[data-info]")) return; f.dir = f.sort === th.dataset.s ? -f.dir : -1; f.sort = th.dataset.s; draw(); }));
   draw();
+}
+
+async function showClientPrioritiesModal() {
+  const co = S.company || "bcg";
+  let cur = { sectors: [], topics: [], boostFactor: 1.25 };
+  try { cur = await api(`/api/companies/${encodeURIComponent(co)}/priorities`); } catch {}
+  let comp = null;
+  try { comp = (await api("/api/companies"))?.find((c) => c.id === co); } catch {}
+  const allSectors = comp?.sectors?.map((s) => s.name) || ["Healthcare", "Technology, Media, Telecommunications", "Financial Institutions", "Energy", "Industrial Goods", "Consumer Goods", "Public Sector", "Climate & Sustainability"];
+
+  const modalHtml = `
+    <div class="modal-bg" id="cp-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+      <div class="card" style="width:100%;max-width:540px;background:var(--surface);box-shadow:0 12px 36px rgba(0,0,0,0.3);border-radius:8px;padding:22px;max-height:90vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div>
+            <h3 style="margin:0;font-size:17px">⭐ Client Custom Priorities</h3>
+            <p class="small mute" style="margin:2px 0 0">Configure focus priority sectors and topics for <b>${esc(co.toUpperCase())}</b></p>
+          </div>
+          <button class="btn ghost sm" id="cp-close" style="font-size:16px;padding:4px 8px">✕</button>
+        </div>
+        <p class="small" style="color:var(--ink-light);margin-bottom:14px">Opportunities matching prioritized sectors or topics receive higher ranking scores and a prominent priority badge.</p>
+        
+        <div style="margin-bottom:14px">
+          <label class="b small" style="display:block;margin-bottom:6px">Prioritized Sectors</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:160px;overflow-y:auto;background:var(--surface2);padding:10px;border-radius:6px">
+            ${allSectors.map((sec) => `
+              <label class="chk small" style="display:flex;align-items:center;gap:6px">
+                <input type="checkbox" class="cp-sec" value="${esc(sec)}"${(cur.sectors || []).some(s => String(s).toLowerCase() === sec.toLowerCase()) ? " checked" : ""}> ${esc(sec)}
+              </label>
+            `).join("")}
+          </div>
+        </div>
+
+        <div style="margin-bottom:14px">
+          <label class="b small" style="display:block;margin-bottom:4px">Prioritized Topics or Keywords</label>
+          <input type="text" id="cp-topics" class="f" placeholder="e.g. ai-tech, semiconductor, green energy, supply chain" value="${esc((cur.topics || []).join(", "))}" style="width:100%;font-size:13px">
+          <span class="tiny mute">Comma-separated topics, keywords or bracket names to boost for this client.</span>
+        </div>
+
+        <div style="margin-bottom:18px">
+          <label class="b small" style="display:block;margin-bottom:4px">Priority Score Boost Factor</label>
+          <select id="cp-boost" class="f" style="width:100%">
+            <option value="1.15"${cur.boostFactor === 1.15 ? " selected" : ""}>+15% score boost (Moderate priority)</option>
+            <option value="1.25"${!cur.boostFactor || cur.boostFactor === 1.25 ? " selected" : ""}>+25% score boost (High priority - Recommended)</option>
+            <option value="1.40"${cur.boostFactor === 1.40 ? " selected" : ""}>+40% score boost (Critical strategic priority)</option>
+            <option value="1.60"${cur.boostFactor === 1.60 ? " selected" : ""}>+60% score boost (Maximum priority override)</option>
+          </select>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:10px">
+          <button class="btn ghost" id="cp-cancel">Cancel</button>
+          <button class="btn primary" id="cp-save">Save Priorities</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML("beforeend", modalHtml);
+  const m = $("#cp-modal");
+  const close = () => m?.remove();
+  $("#cp-close").onclick = close;
+  $("#cp-cancel").onclick = close;
+  $("#cp-save").onclick = async () => {
+    const selectedSectors = $$(".cp-sec:checked", m).map((el) => el.value);
+    const topics = ($("#cp-topics", m).value || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const boostFactor = parseFloat($("#cp-boost", m).value) || 1.25;
+    try {
+      await post(`/api/companies/${encodeURIComponent(co)}/priorities`, { sectors: selectedSectors, topics, boostFactor });
+      toast("Client custom priorities saved successfully!");
+      close();
+      render();
+    } catch (e) {
+      toast("Failed to save priorities: " + e.message, 5000);
+    }
+  };
 }
 
 // ---------------------------------------------------------------- Opportunity drawer
@@ -862,7 +946,7 @@ function searchPanel(el, si, name) {
 //       <div class="tiny" style="margin-top:3px">${contactLinks(a.contact)}</div>${a.missing.length ? `<div class="tiny mute">Record has no: ${a.missing.join(", ")}</div>` : ""}</div></div></div>`).join("") || `<p class="small mute">No journalist in the directory has a recorded link to this topic.</p>`);
 //   S.briefRedraw?.();
 // }
-// const contactLinks = (c) => [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>`;
+const contactLinks = (c) => c ? [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>` : `<span class="mute">no contact details on record</span>`;
 
 function briefPanel(el, o, briefs) {
   let cur = briefs;

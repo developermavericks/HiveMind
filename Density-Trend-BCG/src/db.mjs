@@ -130,6 +130,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS stories_title ON stories(title);
       CREATE TABLE IF NOT EXISTS online_matches (story_key TEXT NOT NULL, opp_key TEXT NOT NULL, company TEXT NOT NULL, fit REAL NOT NULL, angle TEXT, matched_at INTEGER NOT NULL, PRIMARY KEY (story_key, opp_key));
       CREATE INDEX IF NOT EXISTS online_matches_opp ON online_matches(company, opp_key);
+      CREATE TABLE IF NOT EXISTS custom_topic_mappings (
+        id TEXT PRIMARY KEY, topic_name TEXT NOT NULL, bracket_id TEXT, keywords TEXT NOT NULL, priority TEXT DEFAULT 'normal', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS custom_topic_mappings_topic ON custom_topic_mappings(topic_name);
+      CREATE TABLE IF NOT EXISTS client_priorities (
+        company_id TEXT PRIMARY KEY, sectors TEXT NOT NULL DEFAULT '[]', topics TEXT NOT NULL DEFAULT '[]', boost_factor REAL NOT NULL DEFAULT 1.25, updated_at INTEGER NOT NULL);
     `);
     // Indexes for every lookup the dashboard, the jobs and the analytics make (IF NOT EXISTS: safe on every start).
     this.db.exec(`
@@ -383,9 +388,10 @@ export class Store {
   #jrow(r) { return { id: r.id, name: r.name, publication: r.publication, beat: r.beat, designation: r.designation, city: r.city, state: r.state, country: r.country, email: r.email, phone: r.phone, linkedin: r.linkedin, twitter: r.twitter, profileUrl: r.profile_url, articles: JSON.parse(r.articles) }; }
   allJournalists() { return this.db.prepare("SELECT * FROM journalists").all().map((r) => this.#jrow(r)); }
   getJournalist(id) { const r = this.db.prepare("SELECT * FROM journalists WHERE id = ?").get(id); return r ? this.#jrow(r) : null; }
-  searchJournalists({ q = "", beat = "", publication = "", limit = 50, offset = 0 } = {}) {
+  searchJournalists({ q = "", topic = "", beat = "", publication = "", limit = 50, offset = 0 } = {}) {
     const where = [], args = [];
     if (q) { where.push("(name LIKE ? OR publication LIKE ? OR beat LIKE ? OR city LIKE ? OR articles LIKE ?)"); args.push(...Array(5).fill(`%${q}%`)); }
+    if (topic) { where.push("(beat LIKE ? OR articles LIKE ?)"); args.push(`%${topic}%`, `%${topic}%`); }
     if (beat) { where.push("beat LIKE ?"); args.push(`%${beat}%`); }
     if (publication) { where.push("publication LIKE ?"); args.push(`%${publication}%`); }
     const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -399,6 +405,79 @@ export class Store {
     for (const { beat } of this.db.prepare("SELECT beat FROM journalists WHERE beat != ''").all()) for (const b of beat.split(",")) { const t = b.trim(); if (t) beats[t] = (beats[t] || 0) + 1; }
     const c = this.db.prepare("SELECT SUM(email != '') AS email, SUM(phone != '') AS phone, SUM(linkedin != '') AS linkedin, SUM(beat != '') AS beat, SUM(articles != '[]') AS articles FROM journalists").get();
     return { publications: pubs, beats: Object.entries(beats).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([v, n]) => ({ v, n })), coverage: { email: c.email || 0, phone: c.phone || 0, linkedin: c.linkedin || 0, beat: c.beat || 0, articles: c.articles || 0 } };
+  }
+
+  // ---- custom topic mappings (admin-configured topic keywords/rules so app never misses important topics) ----
+  listCustomTopicMappings() {
+    return this.db.prepare("SELECT * FROM custom_topic_mappings ORDER BY updated_at DESC").all().map((r) => ({
+      id: r.id,
+      topicName: r.topic_name,
+      bracketId: r.bracket_id,
+      keywords: (r.keywords || "").split(",").map((k) => k.trim()).filter(Boolean),
+      priority: r.priority || "normal",
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+  }
+  putCustomTopicMapping({ id, topicName, bracketId = null, keywords = [], priority = "normal" }) {
+    const key = id || String(topicName || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+    const kwStr = Array.isArray(keywords) ? keywords.join(", ") : String(keywords || "");
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO custom_topic_mappings (id, topic_name, bracket_id, keywords, priority, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET topic_name = excluded.topic_name, bracket_id = excluded.bracket_id, keywords = excluded.keywords, priority = excluded.priority, updated_at = excluded.updated_at
+    `).run(key, String(topicName || "").trim(), bracketId, kwStr, priority, now, now);
+    return { id: key, topicName, bracketId, keywords: kwStr.split(",").map((k) => k.trim()).filter(Boolean), priority };
+  }
+  deleteCustomTopicMapping(id) {
+    return Number(this.db.prepare("DELETE FROM custom_topic_mappings WHERE id = ?").run(id).changes);
+  }
+
+  // ---- client priorities (custom priority weighting for specific clients) ----
+  getClientPriorities(companyId) {
+    const r = this.db.prepare("SELECT * FROM client_priorities WHERE company_id = ?").get(companyId);
+    if (!r) return { companyId, sectors: [], topics: [], boostFactor: 1.25, updatedAt: null };
+    return {
+      companyId: r.company_id,
+      sectors: JSON.parse(r.sectors || "[]"),
+      topics: JSON.parse(r.topics || "[]"),
+      boostFactor: Number(r.boost_factor) || 1.25,
+      updatedAt: r.updated_at,
+    };
+  }
+  setClientPriorities(companyId, { sectors = [], topics = [], boostFactor = 1.25 }) {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO client_priorities (company_id, sectors, topics, boost_factor, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(company_id) DO UPDATE SET sectors = excluded.sectors, topics = excluded.topics, boost_factor = excluded.boost_factor, updated_at = excluded.updated_at
+    `).run(companyId, JSON.stringify(sectors), JSON.stringify(topics), boostFactor, now);
+    return { companyId, sectors, topics, boostFactor, updatedAt: now };
+  }
+
+  // ---- manual authored op-ed article insertion (admin) ----
+  addManualAuthoredArticle({ headline, author, source, date, page = 1, kind = "opinion", body = "", words = null, oppKey = null, company = "bcg", fit = 0.95 }) {
+    const safeHeadline = String(headline || "").trim();
+    const safeAuthor = String(author || "").trim();
+    const safeSource = String(source || "The Economic Times").trim();
+    const safeDate = String(date || new Date().toISOString().slice(0, 10)).trim();
+    const id = `manual|${safeSource.replace(/\s+/g, "_")}|${safeDate}|${Date.now()}`;
+    const wordCount = words != null ? Number(words) : (body.trim() ? body.trim().split(/\s+/).length : 350);
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO ocr_articles (id, source, edition_date, page, headline, body, words, author, author_checked, title, title_source, fetched_at, classified_at, kind, why, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'manual', ?, ?, ?, 'Manually submitted op-ed by administrator', 'manual')
+      ON CONFLICT(id) DO UPDATE SET headline = excluded.headline, author = excluded.author, body = excluded.body, kind = excluded.kind
+    `).run(id, safeSource, safeDate, page, safeHeadline, body || safeHeadline, wordCount, safeAuthor, safeHeadline, now, now, kind);
+    if (oppKey) {
+      this.db.prepare(`
+        INSERT INTO ocr_angle_matches (article_id, opp_key, company, fit, angle, matched_at)
+        VALUES (?, ?, ?, ?, 'Manual editorial match', ?)
+        ON CONFLICT(article_id, opp_key) DO UPDATE SET fit = excluded.fit, matched_at = excluded.matched_at
+      `).run(id, oppKey, company, fit, now);
+    }
+    return { id, headline: safeHeadline, author: safeAuthor, source: safeSource, date: safeDate, kind };
   }
 
   // ---- topic registry rows (merged topics are hidden; their names live on as aliases of the topic that absorbed them) ----

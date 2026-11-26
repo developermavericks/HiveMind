@@ -37,22 +37,22 @@ const STOP_WORDS = new Set([
 // Media outlets tailored by practice area
 const OUTLET_BY_PRACTICE = {
   "Healthcare": "Mint, The Economic Times, Financial Express, Pharmabiz",
-  "Technology, Media, Telecommunications": "The Economic Times, Mint, TechCrunch, FactorDaily, Financial Express",
-  "BCG X": "The Economic Times (Tech), Mint, TechCircle, MIT Technology Review India",
-  "Technology and Digital Advantage": "The Economic Times, Mint, CIO India, Business Standard",
-  "Financial Institutions": "The Economic Times, Mint, Business Standard, Bloomberg Quint",
+  "Technology, Media, Telecommunications": "The Economic Times, Mint, Forbes India, Business Today, TechCrunch, Financial Express",
+  "BCG X": "The Economic Times (Tech), Mint, Forbes India, TechCircle, MIT Technology Review India",
+  "Technology and Digital Advantage": "The Economic Times, Mint, Fortune India, CIO India, Business Standard",
+  "Financial Institutions": "The Economic Times, Mint, Business Standard, Fortune India, Business Today",
   "Energy": "The Economic Times (Energy), Financial Express, Business Standard, Powerline",
-  "Industrial Goods": "The Economic Times, Business Standard, AutoCar Pro, Construction World",
-  "Consumer Goods": "The Economic Times (Brand Equity), Mint, Retail4Growth, Financial Express",
-  "Marketing, Sales and Pricing": "The Economic Times (Brand Equity), Mint (Lounge), Storyboard18, Campaign India",
+  "Industrial Goods": "The Economic Times, Business Standard, Fortune India, Business Today",
+  "Consumer Goods": "The Economic Times (Brand Equity), Mint, Forbes India, Retail4Growth, Financial Express",
+  "Marketing, Sales and Pricing": "The Economic Times (Brand Equity), Mint (Lounge), Forbes India, Storyboard18, Campaign India",
   "Public Sector": "The Economic Times, Indian Express, Business Standard, ORF / Policy Portals",
   "Travel, Cities and Infrastructure": "The Economic Times, Mint, Infrastructure Today, Construction Week",
-  "Principal Investors and Private Equity": "VCCircle, Mint, The Economic Times (Deals), DealStreetAsia",
-  "Climate & Sustainability": "Mint (ESG), The Economic Times, DownToEarth, Clean Energy Wire",
-  "CEO Profiling / Leadership": "The Economic Times (Corporate), Mint, Financial Express, BCG Henderson Institute"
+  "Principal Investors and Private Equity": "VCCircle, Mint, Fortune India, Forbes India, The Economic Times (Deals), DealStreetAsia",
+  "Climate & Sustainability": "Mint (ESG), The Economic Times, Forbes India, DownToEarth, Clean Energy Wire",
+  "CEO Profiling / Leadership": "The Economic Times (Corporate), Forbes India, Fortune India, Business Today, Mint, BCG Henderson Institute"
 };
 
-const DEFAULT_OUTLETS = "The Economic Times, Mint, Business Standard, Financial Express, BCG Henderson Institute";
+export const DEFAULT_OUTLETS = "The Economic Times, Mint, Business Standard, Financial Express, Forbes India, Fortune India, Business Today, BCG Henderson Institute";
 
 // Map an opportunity to an MDP with scoring and tailored pitch details
 export function scoreMdpFit(mdp, opp) {

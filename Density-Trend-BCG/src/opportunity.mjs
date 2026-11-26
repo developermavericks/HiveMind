@@ -117,7 +117,7 @@ export function onlineOnAngle(list, oppKey, onl, asOf) {
   return out.sort((a, b) => b.at - a.at);
 }
 
-export function buildOpportunities({ company, matches, analysisResult, byLabel, ctx, asOf, minRelevance = 0.3, limit = 60, topicMatches = new Map(), qualityRed = false, ocr = null, online = null }) {
+export function buildOpportunities({ company, matches, analysisResult, byLabel, ctx, asOf, minRelevance = 0.3, limit = 60, topicMatches = new Map(), qualityRed = false, ocr = null, online = null, clientPriorities = null }) {
   const { cfg, registry, topics, signals = {} } = ctx;
   const headlineMode = cfg.reading?.mode === "headline", tm = cfg.topicMatch ?? {};
   const labelName = (key) => (key.startsWith("b:") ? registry.get(key.slice(2))?.name : topics.get(key.slice(2))?.name) ?? key;
@@ -146,7 +146,43 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
       }, cfg);
       const evidenceStatus = !inherited && h.relevance >= (judged ? tm.supportedRelevance ?? 0.5 : 0.5) && m.count >= (tm.minStories ?? 2) && (headlineMode || m.fullTextCount >= 1) ? "supported" : "hypothesis";
       // The write-now and skip rules ask for room to say something new; in the validated view that question is not asked, so they ignore headroom.
-      const gateHeadroom = taken && ocr.mode === "validated" ? 100 : headroom;      const decision = actionFor({ score, stage: m.stage, evidence: m.evidence, headroom: gateHeadroom, trigger, evidenceStatus, baselineHours: m.baselineHours, origins: m.originsRecent, qualityRed }, cfg);
+      const gateHeadroom = taken && ocr.mode === "validated" ? 100 : headroom;
+
+      // Negative news trends: calculate adverse sentiment edge ("give it a little edge if its constantly negative")
+      let negCount = 0, posCount = 0, neuCount = 0;
+      for (const i of list) {
+        if (i.sentiment === "negative") negCount++;
+        else if (i.sentiment === "positive") posCount++;
+        else if (i.sentiment) neuCount++;
+      }
+      const sentTotal = negCount + posCount + neuCount;
+      const negRatio = sentTotal > 0 ? negCount / sentTotal : 0;
+      const netSent = sentTotal > 0 ? (posCount - negCount) / sentTotal : 0;
+      const isNegativeBoom = negCount >= 2 && (negRatio >= 0.35 || netSent <= -0.15);
+      const negativeEdge = isNegativeBoom ? Math.round(clamp(negRatio * 15, 4, 15)) : 0;
+      let finalScore = score + negativeEdge;
+
+      // Custom priority for specific clients (boost opportunities that match client-chosen focus)
+      let isClientPriority = false;
+      let priorityBoost = 0;
+      if (clientPriorities) {
+        const pSectors = (clientPriorities.sectors || []).map((s) => String(s).toLowerCase().trim());
+        const pTopics = (clientPriorities.topics || []).map((t) => String(t).toLowerCase().trim());
+        const secMatch = pSectors.includes(String(h.sector).toLowerCase().trim());
+        const tKey = String(m.key).toLowerCase().trim();
+        const tId = String(m.id || "").toLowerCase().trim();
+        const tName = String(labelName(m.key)).toLowerCase().trim();
+        const topMatch = pTopics.some((p) => p && (tKey.includes(p) || tId.includes(p) || tName.includes(p)));
+        if (secMatch || topMatch) {
+          isClientPriority = true;
+          const factor = Math.max(1.05, clientPriorities.boostFactor || 1.25);
+          priorityBoost = Math.round(finalScore * (factor - 1));
+          finalScore += priorityBoost;
+        }
+      }
+      finalScore = Math.min(100, Math.round(finalScore));
+
+      const decision = actionFor({ score: finalScore, stage: m.stage, evidence: m.evidence, headroom: gateHeadroom, trigger, evidenceStatus, baselineHours: m.baselineHours, origins: m.originsRecent, qualityRed }, cfg);
       const horizons = list.map((i) => i.horizon);
       const immediate = horizons.filter((x) => x === "immediate").length >= horizons.length / 2;
       const window = immediate || (trigger && trigger.ageHours <= 48) ? { label: "Next 24–72 hours", kind: "immediate" } : { label: "Next 3–7 days", kind: "analysis" };
@@ -180,12 +216,29 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
         key: oppKey, company: company.id, sector: h.sector, sectorDescription: secDesc,
         label: { key: m.key, name: labelName(m.key), level: m.level, parent: bracketId ?? null, parentName: bracketName },
         angle: h.write_about, why: h.why, relevance: h.relevance, channel: h.channel, front: h.front, evidenceStatus,
-        score, components: comp, stage: m.stage, stageRule: m.stageRule, evidence: m.evidence, spark: m.spark,
+        score: finalScore, baseScore: score,
+        clientPriority: isClientPriority ? { isPriority: true, boost: priorityBoost, factor: clientPriorities?.boostFactor || 1.25 } : null,
+        negativeNews: {
+          isNegativeBoom,
+          negativeEdge,
+          negCount,
+          posCount,
+          neuCount,
+          net: +netSent.toFixed(2),
+          negRatio: +negRatio.toFixed(2),
+        },
+        components: comp, stage: m.stage, stageRule: m.stageRule, evidence: m.evidence, spark: m.spark,
         kind: m.stage === "watch" || m.ratio == null ? "editorial" : "forecast",
         action: decision.action, actionWhy: decision.why, window, trigger, headroom, holdReason: decision.hold ?? null,
         authored: taken ? { count: counted, print: printed.length, online: onlinePieces.length, cap: ocr.cap, mode: ocr.mode, windowDays: ocr.windowDays, articles: taken.slice(0, 12), onlineArticles: onlinePieces.slice(0, 12) } : null,
         fit: m.level === "topic" ? { mode: judged ? "judged" : "inherited", relevance: h.relevance, judgedAt: judged?.judgedAt ?? null } : { mode: "judged", relevance: h.relevance, judgedAt: null },
-        dataFlags: [...(m.baselineHours < (cfg.action.writeNowMinBaselineHours ?? 0) ? ["Thin history"] : []), ...(m.originsRecent < (cfg.action.writeNowMinOrigins ?? 0) ? ["Few independent origins"] : []), ...(inherited ? ["Sector link inherited"] : [])],
+        dataFlags: [
+          ...(isClientPriority ? ["Client Priority ⭐"] : []),
+          ...(isNegativeBoom ? [`Negative Trend Edge 💥 (+${negativeEdge})`] : []),
+          ...(m.baselineHours < (cfg.action.writeNowMinBaselineHours ?? 0) ? ["Thin history"] : []),
+          ...(m.originsRecent < (cfg.action.writeNowMinOrigins ?? 0) ? ["Few independent origins"] : []),
+          ...(inherited ? ["Sector link inherited"] : [])
+        ],
         metrics: { count: m.count, countPrev: m.countPrev, total: m.total, share: m.share, baseShare: m.baseShare, ratio: m.ratio, ratioPrev: m.ratioPrev, accel: m.accel,
           originsRecent: m.originsRecent, areaCount: m.areaCount, areas: m.areas, baselineHours: m.baselineHours, fullTextCount: m.fullTextCount, verifiedCount: m.verifiedCount, windowHours: m.windowHours, storiesAll: m.storiesAll },
         missing, stories: top,

@@ -25,7 +25,7 @@ const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length 
 // story could have been known to us (recorded first-seen time when collection was timely, else the publication time:
 // stories backfilled long after publication are flagged `reconstructed`). Charts bin by `at`; a replay (gate = true)
 // additionally requires observedAt <= asOf so late-arriving articles cannot leak into an earlier prediction.
-export function prepareItems(stories, { registry, sources, cfg, asOf = Infinity, gate = true }) {
+export function prepareItems(stories, { registry, sources, cfg, asOf = Infinity, gate = true, customMappings = [] }) {
   const lagMs = cfg.intervals.observedLagHours * HOUR;
   const items = [];
   for (const s of stories) {
@@ -52,6 +52,19 @@ export function prepareItems(stories, { registry, sources, cfg, asOf = Infinity,
       if (meta && i.severity >= 0.2) (areas.get(`b:${meta.id}`) ?? areas.set(`b:${meta.id}`, new Set()).get(`b:${meta.id}`)).add(i.area);
     }
     for (const tid of s.meta?.topics ?? []) { labels.set(`t:${tid}`, { w: maxSev * scale, direction: "mixed" }); areas.set(`t:${tid}`, allAreas); }
+    for (const cm of customMappings || []) {
+      const titleLower = (s.title || "").toLowerCase();
+      const sumLower = (s.analysis?.summary || "").toLowerCase();
+      const hit = cm.keywords?.some((k) => k && (titleLower.includes(k.toLowerCase()) || sumLower.includes(k.toLowerCase())));
+      if (hit) {
+        labels.set(`t:${cm.id}`, { w: Math.max(0.6, maxSev * scale), direction: "mixed" });
+        areas.set(`t:${cm.id}`, allAreas);
+        if (cm.bracketId) {
+          const bk = `b:${cm.bracketId}`;
+          if (!labels.has(bk)) labels.set(bk, { w: 0.7, direction: "mixed" });
+        }
+      }
+    }
     const horizonRank = { immediate: 0, near: 1, long: 2 };
     const horizon = impacts.length ? impacts.reduce((h, i) => (horizonRank[i.horizon] < horizonRank[h] ? i.horizon : h), "long") : "near";
     items.push({
