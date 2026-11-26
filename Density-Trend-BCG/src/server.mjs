@@ -880,12 +880,18 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
   // Client logins never receive how the score is weighted: each score part keeps its own 0-100 score and note, but its weight and points are taken
   // out of the data (not only hidden on screen). Done once per page version and kept with it.
   const isClient = (req) => !!req?.user && req.user.role !== "admin";
-  const hideScoreParts = (body) => !body.includes('"points"') ? body : JSON.stringify(JSON.parse(body, (k, v) => {
+  // Client logins: no score weights/points, and no boost numbers (pre-boost score, adverse-news edge, priority boost).
+  const hasScoreParts = (body) => body.includes('"points"') || body.includes('"baseScore"');
+  const hideScoreParts = (body) => !hasScoreParts(body) ? body : JSON.stringify(JSON.parse(body, (k, v) => {
+    if (k === "baseScore") return undefined;
+    if (k === "clientPriority" && v && typeof v === "object") return { isPriority: true };
+    if (k === "negativeNews" && v && typeof v === "object") return { isNegativeBoom: !!v.isNegativeBoom };
+    if (k === "dataFlags" && Array.isArray(v)) return v.map((x) => typeof x === "string" ? x.replace(/\s*\(\+\d+\)\s*$/, "") : x);
     if (v && typeof v === "object" && !Array.isArray(v) && "weight" in v && "points" in v && "score" in v) { const { weight, points, ...rest } = v; return rest; }
     return v;
   }));
   const clientEntry = (e) => {
-    if (e.failed || !e.body.includes('"points"')) return e;
+    if (e.failed || !hasScoreParts(e.body)) return e;
     if (!e.client) { const body = hideScoreParts(e.body); e.client = { ...entryOf(e.sig, body, false), transient: e.transient }; }
     return e.client;
   };
@@ -1303,14 +1309,14 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           const body = JSON.parse(await readBody(req) || "{}");
           if (!body.topicName || !String(body.topicName).trim()) return json(res, 400, { error: "Topic name is required." });
           const saved = store.putCustomTopicMapping(body);
-          cache.clear();
+          analytics.cache.clear();
           return json(res, 200, { ok: true, mapping: saved });
         }
         if (req.method === "DELETE") {
           const id = url.searchParams.get("id");
           if (!id) return json(res, 400, { error: "Mapping ID required." });
           store.deleteCustomTopicMapping(id);
-          cache.clear();
+          analytics.cache.clear();
           return json(res, 200, { ok: true });
         }
       }
@@ -1326,7 +1332,7 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
           if (!needJson(req, res)) return;
           const body = JSON.parse(await readBody(req) || "{}");
           const saved = store.setClientPriorities(coId, body);
-          cache.clear();
+          analytics.cache.clear();
           return json(res, 200, { ok: true, priorities: saved });
         }
       }
@@ -1338,41 +1344,11 @@ export async function serve({ root, bcg, port = 8788, host = process.env.HIVEMIN
         if (!body.headline || !String(body.headline).trim()) return json(res, 400, { error: "Headline is required." });
         if (!body.author || !String(body.author).trim()) return json(res, 400, { error: "Author name is required." });
         const saved = store.addManualAuthoredArticle(body);
-        cache.clear();
+        analytics.cache.clear();
         return json(res, 200, { ok: true, article: saved });
       }
 
-      // ---- AI overview & quick brief for trends and topics tab ----
-      if (req.method === "GET" && p === "/api/topic/ai-brief") {
-        const key = labelKey(url.searchParams.get("key"));
-        if (!key) return json(res, 400, { error: "Bad topic key" });
-        const top = analytics.topic({ key, company, date: dayParam(url) });
-        if (top.error) return json(res, 404, top);
-        const name = top.row?.name || key;
-        const stories = (top.stories || []).slice(0, 5);
-        const tracking = top.storyTracking || {};
-        const sent = top.sentiment?.recent || { pos: 0, neg: 0, neu: 0 };
-        const sentTotal = sent.pos + sent.neg + sent.neu;
-        const toneDesc = sentTotal > 0
-          ? (sent.neg > sent.pos ? `Predominantly adverse tone (${Math.round((sent.neg / sentTotal) * 100)}% negative coverage)` : sent.pos > sent.neg ? `Constructive tone (${Math.round((sent.pos / sentTotal) * 100)}% positive sentiment)` : "Balanced / neutral sentiment across media")
-          : "Neutral coverage profile";
-        const growthDesc = tracking.growth24h != null ? (tracking.growth24h > 0 ? `+${tracking.growth24h}% volume surge in last 24h` : `${tracking.growth24h}% velocity`) : "Steady reporting cadence";
-        const narrative = stories.length
-          ? `Media attention is anchored around "${stories[0].title}". Reporting spans ${tracking.outletsCount || stories.length} major outlets, highlighting ${top.geoBreakdown?.[0]?.name || "national"} developments.`
-          : `Emerging theme with initial coverage across financial and trade press.`;
-        const editorialAngle = top.opportunities?.[0]?.angle || `Address structural impacts of ${name} and offer boardroom recommendations before public discourse saturates.`;
-        return json(res, 200, {
-          key,
-          topic: name,
-          asOf: top.asOf,
-          narrative,
-          velocity: `${growthDesc} · ${top.row ? `×${top.row.ratio.toFixed(2)} momentum (${top.row.stage})` : "Active"}`,
-          sentimentTone: toneDesc,
-          editorialAngle,
-          keyDrivers: stories.map((s) => ({ title: s.title, url: s.url, outlets: s.outlets, primary: s.primary })),
-          topOutlets: tracking.topOutlets || [],
-        });
-      }
+      // (AI overview & quick brief: built in the browser from /api/topic, shown on the topic and sector overview; no separate link.)
 
       // ---- search interest (separate signal) ----
       if (req.method === "POST" && p === "/api/search-interest") {

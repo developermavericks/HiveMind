@@ -55,7 +55,7 @@ const PAGES = {
   ] },
 };
 const LEGACY = { momentum: "trends/topics", sectors: "clients/lens", company: "clients/lens", clients: "clients/clients", sources: "sources/collection", journalists: "journalists", validation: "accuracy/validation", method: "accuracy/method" };
-const MEMBER_HIDDEN = new Set(["leadership", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
+const MEMBER_HIDDEN = new Set(["leadership", "journalists", "clients", "sources", "accuracy", "settings"]); // pages a normal user does not see
 const NAV_TOP = ["overview", "leadership", "opportunities", "pitch", "journalists", "trends", "clients", "sources", "accuracy"], NAV_BOTTOM = ["guide", "support", "settings"];
 const NAV_ICON = {
   overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -423,14 +423,14 @@ async function pgOpportunities(el) {
     <label class="chk"><input type="checkbox" id="oxtrend" ${f.xtrend ? "checked" : ""}> 𝕏 Trending only</label>
     <label class="chk" title="Show only opportunities matching this client's priority focus"><input type="checkbox" id="opriority" ${f.priority ? "checked" : ""}> ⭐ Client Priority</label>
     <label class="chk" title="Show opportunities with constant negative news momentum ('Adverse Boom')"><input type="checkbox" id="oadverse" ${f.adverse ? "checked" : ""}> 💥 Adverse Trends</label>
-    <button class="btn ghost sm" id="btn-client-priorities" style="margin-left:auto" title="Configure custom priority sectors and topics for this client">⭐ Client Priorities</button>
+    <button class="btn ghost sm admin-only" id="btn-client-priorities" style="margin-left:auto" title="Configure custom priority sectors and topics for this client">⭐ Client Priorities</button>
     <span class="mute small" id="ocount"></span></div></div>
   <div class="card flush"><div class="tw" style="max-height:none"><table class="t" id="otab"><thead><tr><th>Score${info("score")}</th><th>Opportunity</th><th>Action</th><th>Stage</th><th class="r s" data-s="ratio">Momentum${info("momentum")}</th><th class="r s" data-s="share">Share${info("share")}</th><th class="r s" data-s="origins">Origins${info("origins")}</th><th>Evidence</th><th>Window</th></tr></thead><tbody></tbody></table></div><div id="opager"></div></div>
   <p class="small mute" style="margin-top:10px">Score (0–100) ranks opportunities; it is <b>not</b> a probability. Weights are pilot assumptions — see <a href="#/accuracy/method">Method</a>.</p>`;
   const rowHtml = (o) => {
     const more = moreOf(o), isOpen = open.has(o.key);
-    const priBadge = o.clientPriority ? `<span class="pill" style="background:#f59e0b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Client Priority focus (+${o.clientPriority.boost} score points)">⭐ Priority</span>` : "";
-    const advBadge = o.negativeNews?.isNegativeBoom ? `<span class="pill" style="background:#991b1b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Adverse/Negative trend edge (+${o.negativeNews.negativeEdge})">💥 Adverse Boom</span>` : "";
+    const priBadge = o.clientPriority ? `<span class="pill" style="background:#f59e0b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="${isAdmin() && o.clientPriority.boost != null ? `Client Priority focus (+${o.clientPriority.boost} score points)` : "Client priority focus"}">⭐ Priority</span>` : "";
+    const advBadge = o.negativeNews?.isNegativeBoom ? `<span class="pill" style="background:#991b1b;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="${isAdmin() && o.negativeNews.negativeEdge != null ? `Adverse/Negative trend edge (+${o.negativeNews.negativeEdge})` : "Mostly negative coverage"}">💥 Adverse Boom</span>` : "";
     return `<tr class="click" data-opp="${esc(o.key)}"><td>${ring(o.score, 44)}</td><td style="max-width:420px"><div class="b">${esc(o.sector)} <span class="mute">×</span> ${esc(o.label.name)}${priBadge}${advBadge} ${xSentChip(o.sentiment)}${fitChip(o)}${authChip(o)}${flagChips(o)}${o.xTrending ? `<span class="pill" style="background:#1d9bf0;color:#fff;font-size:10px;font-weight:700;margin-left:4px" title="Trending on X (${o.xTrending.region === 'worldwide' ? 'Worldwide' : 'India'}): Rank #${o.xTrending.rank} · ${esc(o.xTrending.name)}">𝕏 #${o.xTrending.rank} ${o.xTrending.region === 'worldwide' ? '🌐' : '🇮🇳'}</span>` : ""}</div><div class="small mute">${esc(clip(o.angle || o.why, 140))}</div>${alsoLine(o)}${more.length ? `<button type="button" class="chip" data-more="${esc(o.key)}" aria-expanded="${isOpen}" style="margin-top:4px">${isOpen ? "Hide" : `+${more.length} more sector${more.length > 1 ? "s" : ""}`}</button>` : ""}</td><td>${actionPill(o.action)}</td><td>${stagePill(o.stage)}</td><td class="r num b">${x2(o.metrics.ratio)}</td><td class="r num">${pct(o.metrics.share)}</td><td class="r num">${originsLink(o.metrics.originsRecent, o.label.key, o.label.name)}</td><td>${evPill(o.evidence)}</td><td class="small">${esc(o.window.label)}</td></tr>` +
       (isOpen ? `<tr class="sub"><td></td><td colspan="8"><div class="chips">${more.map((s) => `<span class="chip" ${s.key && S.oppByKey.has(s.key) ? `data-opp="${esc(s.key)}"` : ""}>${esc(s.sector)} <b class="num">${Math.round(s.score)}</b>${s.action ? ` ${actionPill(s.action)}` : ""}</span>`).join("")}</div></td></tr>` : "");
   };
@@ -510,6 +510,11 @@ async function showClientPrioritiesModal() {
           </select>
         </div>
 
+        <div style="margin-bottom:18px;display:grid;gap:8px">
+          <label class="chk small"><input type="checkbox" id="cp-priority-on"${cur.priorityBoost !== false ? " checked" : ""}> <b>Priority boost</b> on (opportunities in the chosen sectors and topics score higher)</label>
+          <label class="chk small"><input type="checkbox" id="cp-negative-on"${cur.negativeEdge !== false ? " checked" : ""}> <b>Adverse news edge</b> on (topics with mostly negative news get a small extra score)</label>
+        </div>
+
         <div style="display:flex;justify-content:flex-end;gap:10px">
           <button class="btn ghost" id="cp-cancel">Cancel</button>
           <button class="btn primary" id="cp-save">Save Priorities</button>
@@ -527,7 +532,7 @@ async function showClientPrioritiesModal() {
     const topics = ($("#cp-topics", m).value || "").split(",").map((s) => s.trim()).filter(Boolean);
     const boostFactor = parseFloat($("#cp-boost", m).value) || 1.25;
     try {
-      await post(`/api/companies/${encodeURIComponent(co)}/priorities`, { sectors: selectedSectors, topics, boostFactor });
+      await post(`/api/companies/${encodeURIComponent(co)}/priorities`, { sectors: selectedSectors, topics, boostFactor, priorityBoost: $("#cp-priority-on", m).checked, negativeEdge: $("#cp-negative-on", m).checked });
       toast("Client custom priorities saved successfully!");
       close();
       render();

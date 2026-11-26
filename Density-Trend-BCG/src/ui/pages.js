@@ -950,7 +950,7 @@ async function showCustomTopicMapModal() {
           btn.onclick = async () => {
             const id = btn.dataset.delCm;
             try {
-              await fetch(`/api/admin/topic-mapping?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+              await api(`/api/admin/topic-mapping?id=${encodeURIComponent(id)}`, { method: "DELETE", headers: { "x-requested-with": "hivemind" } });
               mappings = mappings.filter((x) => x.id !== id);
               toast("Custom mapping deleted");
               renderModalContent();

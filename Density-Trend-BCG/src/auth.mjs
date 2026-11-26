@@ -255,7 +255,7 @@ export const csrfOk = (req) => {
 };
 
 const PUBLIC_ASSETS = new Set(["/ui/login.css", "/ui/login.js", "/ui/logo.png", "/ui/wordmark.png", "/ui/intro.mp4"]);
-const MEMBER_DENY_GET = [/^\/api\/(integrations|system|usage|logs|quality|tuning|outcomes|forecast-accuracy|backtest|notifications|companies|authors|sources|leadership|admin)(\/|$)/, /^\/api\/audit\//];
+const MEMBER_DENY_GET = [/^\/api\/(integrations|system|usage|logs|quality|tuning|outcomes|forecast-accuracy|backtest|notifications|companies|authors|journalists|sources|leadership|admin)(\/|$)/, /^\/api\/audit\//];
 const MEMBER_WRITES = new Set(["/api/brief", "/api/brief/decide", "/api/audit/review", "/api/auth/logout", "/api/auth/password", "/api/clip", "/api/auth/geo", "/api/tickets"]);
 const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const tempPassword = () => Array.from(randomBytes(16), (b) => alphabet[b % alphabet.length]).join("");

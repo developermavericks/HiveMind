@@ -158,13 +158,24 @@ function opportunitiesFor(stories, asOf, rel) {
   return buildOpportunities({ company: fakeCompany(rel), matches: fakeCompany(rel).matches, analysisResult, byLabel: itemsByLabel(items), ctx: ctxFor(), asOf });
 }
 
+test("opportunity: with both boosts switched off for a client, the score is the plain weighted sum", () => {
+  const asOf = T0 + 4 * DAY_MS;
+  const items = prepareItems(history({ days: 4, risingFrom: 4 * 24 - 12 }), { registry, sources, cfg, asOf });
+  const analysisResult = analyse(items, ctxFor(), asOf);
+  const off = { sectors: ["Climate"], topics: ["climate"], boostFactor: 1.6, negativeEdge: false, priorityBoost: false };
+  const { items: opps } = buildOpportunities({ company: fakeCompany(0.8), matches: fakeCompany(0.8).matches, analysisResult, byLabel: itemsByLabel(items), ctx: ctxFor(), asOf, clientPriorities: off });
+  assert.ok(opps.length);
+  for (const o of opps) { assert.equal(o.score, Math.min(100, Math.round(o.baseScore))); assert.equal(o.clientPriority, null); assert.equal(o.negativeNews.negativeEdge, 0); }
+});
+
 test("opportunity: score is the weighted sum of its six components and stays within 0–100", () => {
   const asOf = T0 + 4 * DAY_MS;
   const { items } = opportunitiesFor(history({ days: 4, risingFrom: 4 * 24 - 12 }), asOf, 0.8);
   const o = items.find((x) => x.label.key === "b:climate");
   assert.ok(o);
   const sum = Object.values(o.components).reduce((a, c) => a + c.points, 0);
-  assert.ok(Math.abs(sum - o.score) < 1e-9);
+  assert.ok(Math.abs(sum - o.baseScore) < 1e-9, "the score before any boost is the weighted sum");
+  assert.ok(o.score >= Math.round(o.baseScore) && o.score <= 100, "boosts only add, and the score stays within 0–100");
   assert.ok(o.score > 0 && o.score <= 100);
   assert.deepEqual(Object.keys(o.components).sort(), ["acceleration", "headroom", "momentum", "sectorEvidence", "sourceBreadth", "triggerTiming"]);
   assert.ok(["write now", "investigate", "monitor", "skip"].includes(o.action));

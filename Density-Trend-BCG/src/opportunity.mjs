@@ -159,13 +159,13 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
       const negRatio = sentTotal > 0 ? negCount / sentTotal : 0;
       const netSent = sentTotal > 0 ? (posCount - negCount) / sentTotal : 0;
       const isNegativeBoom = negCount >= 2 && (negRatio >= 0.35 || netSent <= -0.15);
-      const negativeEdge = isNegativeBoom ? Math.round(clamp(negRatio * 15, 4, 15)) : 0;
+      const negativeEdge = isNegativeBoom && clientPriorities?.negativeEdge !== false ? Math.round(clamp(negRatio * 15, 4, 15)) : 0; // admin can switch the edge off per client
       let finalScore = score + negativeEdge;
 
       // Custom priority for specific clients (boost opportunities that match client-chosen focus)
       let isClientPriority = false;
       let priorityBoost = 0;
-      if (clientPriorities) {
+      if (clientPriorities && clientPriorities.priorityBoost !== false) {
         const pSectors = (clientPriorities.sectors || []).map((s) => String(s).toLowerCase().trim());
         const pTopics = (clientPriorities.topics || []).map((t) => String(t).toLowerCase().trim());
         const secMatch = pSectors.includes(String(h.sector).toLowerCase().trim());
@@ -234,7 +234,7 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
         fit: m.level === "topic" ? { mode: judged ? "judged" : "inherited", relevance: h.relevance, judgedAt: judged?.judgedAt ?? null } : { mode: "judged", relevance: h.relevance, judgedAt: null },
         dataFlags: [
           ...(isClientPriority ? ["Client Priority ⭐"] : []),
-          ...(isNegativeBoom ? [`Negative Trend Edge 💥 (+${negativeEdge})`] : []),
+          ...(isNegativeBoom && negativeEdge ? [`Negative Trend Edge 💥 (+${negativeEdge})`] : []),
           ...(m.baselineHours < (cfg.action.writeNowMinBaselineHours ?? 0) ? ["Thin history"] : []),
           ...(m.originsRecent < (cfg.action.writeNowMinOrigins ?? 0) ? ["Few independent origins"] : []),
           ...(inherited ? ["Sector link inherited"] : [])

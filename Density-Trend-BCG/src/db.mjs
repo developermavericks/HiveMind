@@ -435,10 +435,13 @@ export class Store {
   }
 
   // ---- client priorities (custom priority weighting for specific clients) ----
+  // On/off switches per client (admin): the adverse-news edge and the priority boost. Both on unless switched off.
+  scoreToggles(companyId) { return { negativeEdge: this.getMeta(`score.${companyId}.negativeEdge`, "1") !== "0", priorityBoost: this.getMeta(`score.${companyId}.priorityBoost`, "1") !== "0" }; }
   getClientPriorities(companyId) {
     const r = this.db.prepare("SELECT * FROM client_priorities WHERE company_id = ?").get(companyId);
-    if (!r) return { companyId, sectors: [], topics: [], boostFactor: 1.25, updatedAt: null };
+    if (!r) return { companyId, sectors: [], topics: [], boostFactor: 1.25, updatedAt: null, ...this.scoreToggles(companyId) };
     return {
+      ...this.scoreToggles(companyId),
       companyId: r.company_id,
       sectors: JSON.parse(r.sectors || "[]"),
       topics: JSON.parse(r.topics || "[]"),
@@ -446,14 +449,16 @@ export class Store {
       updatedAt: r.updated_at,
     };
   }
-  setClientPriorities(companyId, { sectors = [], topics = [], boostFactor = 1.25 }) {
+  setClientPriorities(companyId, { sectors = [], topics = [], boostFactor = 1.25, negativeEdge, priorityBoost }) {
     const now = Date.now();
+    if (typeof negativeEdge === "boolean") this.setMeta(`score.${companyId}.negativeEdge`, negativeEdge ? "1" : "0");
+    if (typeof priorityBoost === "boolean") this.setMeta(`score.${companyId}.priorityBoost`, priorityBoost ? "1" : "0");
     this.db.prepare(`
       INSERT INTO client_priorities (company_id, sectors, topics, boost_factor, updated_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(company_id) DO UPDATE SET sectors = excluded.sectors, topics = excluded.topics, boost_factor = excluded.boost_factor, updated_at = excluded.updated_at
     `).run(companyId, JSON.stringify(sectors), JSON.stringify(topics), boostFactor, now);
-    return { companyId, sectors, topics, boostFactor, updatedAt: now };
+    return { companyId, sectors, topics, boostFactor, updatedAt: now, ...this.scoreToggles(companyId) };
   }
 
   // ---- manual authored op-ed article insertion (admin) ----
