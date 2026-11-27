@@ -90,7 +90,7 @@ test("sections: only papers with an opinion path are asked; one that fails is sk
   const fetchPub = async (p) => { asked.push(p.domain); if (p.domain.startsWith("livemint")) throw new Error("HTTP 503"); return [{ title: "t", url: "u" + p.domain, publishedAt: NOW, publication: p.name, outlet: p.name }]; };
   const out = await pollSections(pubs, { fetchPub });
   const withPath = pubs.filter((p) => p.opinionPath);
-  assert.equal(withPath.length, 14); // 26 Nov: + Forbes India, Fortune India, Business Today
+  assert.equal(withPath.length, 15); // 26 Nov: + Forbes India, Fortune India, Business Today; 27 Nov: + Bloomberg
   assert.equal(asked.length, withPath.length);
   assert.ok(asked.includes("thehindu.com/opinion") && asked.includes("indianexpress.com/article/opinion"));
   assert.equal(out.length, withPath.length - 1);
@@ -160,7 +160,7 @@ test("leadership: trending angles split into written and open, with writers and 
   Analytics.prototype.leadership.call(cached, {}); Analytics.prototype.leadership.call(cached, {}); assert.equal(cached.calls, 1);
   cached.cache.clear(); Analytics.prototype.leadership.call(cached, {}); assert.equal(cached.calls, 2);
   assert.equal(L.hot.length, 1); assert.equal(L.hot[0].web.outside, 1);
-  assert.deepEqual([L.online.analyze, L.online.sectionsOn, L.online.readToday], [false, 14, 4]);
+  assert.deepEqual([L.online.analyze, L.online.sectionsOn, L.online.readToday], [false, 15, 4]);
 });
 
 test("config: the paid reading of online pieces is off by default, capped, and opinion pages are polled for free", () => {
