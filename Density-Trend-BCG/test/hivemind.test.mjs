@@ -158,6 +158,24 @@ function opportunitiesFor(stories, asOf, rel) {
   return buildOpportunities({ company: fakeCompany(rel), matches: fakeCompany(rel).matches, analysisResult, byLabel: itemsByLabel(items), ctx: ctxFor(), asOf });
 }
 
+test("opportunity: adverse-news edge (Pooja's rule) is 10% of the score, only for negative topics with high coverage", () => {
+  const asOf = T0 + 4 * DAY_MS;
+  const stories = history({ days: 4, risingFrom: 4 * 24 - 12 });
+  const items = prepareItems(stories, { registry, sources, cfg, asOf });
+  for (const i of items) i.sentiment = "negative";
+  const analysisResult = analyse(items, ctxFor(), asOf);
+  const { items: opps } = buildOpportunities({ company: fakeCompany(0.8), matches: fakeCompany(0.8).matches, analysisResult, byLabel: itemsByLabel(items), ctx: ctxFor(), asOf });
+  const hot = opps.filter((o) => o.negativeNews.isNegativeBoom);
+  assert.ok(hot.length, "a rising, all-negative topic gets the edge");
+  for (const o of opps) {
+    if (o.negativeNews.isNegativeBoom) { assert.equal(o.negativeNews.negativeEdge, Math.round(o.baseScore * 0.1)); assert.ok(o.negativeNews.negCount >= 5 && o.metrics.ratio >= 1); }
+    else assert.equal(o.negativeNews.negativeEdge, 0);
+  }
+  for (const i of items) i.sentiment = "positive";
+  const pos = buildOpportunities({ company: fakeCompany(0.8), matches: fakeCompany(0.8).matches, analysisResult: analyse(items, ctxFor(), asOf), byLabel: itemsByLabel(items), ctx: ctxFor(), asOf });
+  assert.ok(pos.items.every((o) => !o.negativeNews.isNegativeBoom && o.negativeNews.negativeEdge === 0), "positive news: no edge");
+});
+
 test("opportunity: with both boosts switched off for a client, the score is the plain weighted sum", () => {
   const asOf = T0 + 4 * DAY_MS;
   const items = prepareItems(history({ days: 4, risingFrom: 4 * 24 - 12 }), { registry, sources, cfg, asOf });

@@ -158,8 +158,12 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
       const sentTotal = negCount + posCount + neuCount;
       const negRatio = sentTotal > 0 ? negCount / sentTotal : 0;
       const netSent = sentTotal > 0 ? (posCount - negCount) / sentTotal : 0;
-      const isNegativeBoom = negCount >= 2 && (negRatio >= 0.35 || netSent <= -0.15);
-      const negativeEdge = isNegativeBoom && clientPriorities?.negativeEdge !== false ? Math.round(clamp(negRatio * 15, 4, 15)) : 0; // admin can switch the edge off per client
+      // Adverse-news edge (rule suggested by Pooja): negative news with a LOT of coverage adds 10% to the score.
+      // "A lot of coverage" = at least 5 negative stories in the last 7 days, at least half of the topic's stories negative,
+      // and the topic above its usual share of the news (momentum >= 1). Settings: cfg.negativeNews; admin can switch it off per client.
+      const nn = { boostPct: 10, minNegative: 5, minNegShare: 0.5, minMomentum: 1, ...(cfg.negativeNews ?? {}) };
+      const isNegativeBoom = negCount >= nn.minNegative && negRatio >= nn.minNegShare && (m.ratio ?? 0) >= nn.minMomentum;
+      const negativeEdge = isNegativeBoom && clientPriorities?.negativeEdge !== false ? Math.round(score * nn.boostPct / 100) : 0;
       let finalScore = score + negativeEdge;
 
       // Custom priority for specific clients (boost opportunities that match client-chosen focus)
@@ -234,7 +238,7 @@ export function buildOpportunities({ company, matches, analysisResult, byLabel, 
         fit: m.level === "topic" ? { mode: judged ? "judged" : "inherited", relevance: h.relevance, judgedAt: judged?.judgedAt ?? null } : { mode: "judged", relevance: h.relevance, judgedAt: null },
         dataFlags: [
           ...(isClientPriority ? ["Client Priority ⭐"] : []),
-          ...(isNegativeBoom && negativeEdge ? [`Negative Trend Edge 💥 (+${negativeEdge})`] : []),
+          ...(isNegativeBoom && negativeEdge ? [`Negative news, high coverage 💥 (+${negativeEdge})`] : []),
           ...(m.baselineHours < (cfg.action.writeNowMinBaselineHours ?? 0) ? ["Thin history"] : []),
           ...(m.originsRecent < (cfg.action.writeNowMinOrigins ?? 0) ? ["Few independent origins"] : []),
           ...(inherited ? ["Sector link inherited"] : [])

@@ -512,7 +512,7 @@ async function showClientPrioritiesModal() {
 
         <div style="margin-bottom:18px;display:grid;gap:8px">
           <label class="chk small"><input type="checkbox" id="cp-priority-on"${cur.priorityBoost !== false ? " checked" : ""}> <b>Priority boost</b> on (opportunities in the chosen sectors and topics score higher)</label>
-          <label class="chk small"><input type="checkbox" id="cp-negative-on"${cur.negativeEdge !== false ? " checked" : ""}> <b>Adverse news edge</b> on (topics with mostly negative news get a small extra score)</label>
+          <label class="chk small"><input type="checkbox" id="cp-negative-on"${cur.negativeEdge !== false ? " checked" : ""}> <b>Adverse news edge</b> on (negative news with high coverage gets +10% score)</label>
         </div>
 
         <div style="display:flex;justify-content:flex-end;gap:10px">

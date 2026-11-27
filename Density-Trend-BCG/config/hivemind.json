@@ -52,6 +52,13 @@
     "writeNowMinBaselineHours": 72,
     "writeNowMinOrigins": 4
   },
+  "negativeNews": {
+    "_note": "Adverse-news edge (suggested by Pooja): +boostPct% of the score when a topic has at least minNegative negative stories in 7 days, at least minNegShare of its stories negative, and momentum >= minMomentum.",
+    "boostPct": 10,
+    "minNegative": 5,
+    "minNegShare": 0.5,
+    "minMomentum": 1
+  },
   "windows": {
     "immediateHours": 72,
     "analysisDays": 7
