@@ -1051,7 +1051,6 @@ async function showCustomTopicMapModal() {
 
 // ---------------------------------------------------------------- Journalist & Topic Intelligence
 // Find out which journalist writes about which topic, from which publication. Available for Admin and Member.
-const contactLinks = (c) => c ? [c.email && `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`, c.linkedin && `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`, c.profile && `<a href="${esc(c.profile)}" target="_blank" rel="noopener">Profile</a>`, c.phone && esc(c.phone)].filter(Boolean).join(" · ") || `<span class="mute">no contact details on record</span>` : `<span class="mute">no contact details on record</span>`;
 
 async function pgJournalists(el) {
   const f = (S.jf ??= { q: "", topic: "", beat: "", publication: "", offset: 0 }), enc = encodeURIComponent, PER = 25;
